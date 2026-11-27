@@ -60,13 +60,10 @@ resolve_engine_workload() {
             return 2
             ;;
     esac
-    case "$request_transport" in
-        zmq | grpc) ;;
-        *)
-            echo "Unknown LMCACHE_REQUEST_TRANSPORT='$request_transport'" >&2
-            return 2
-            ;;
-    esac
+    if [[ "$request_transport" != grpc ]]; then
+        echo "Unsupported LMCACHE_REQUEST_TRANSPORT='$request_transport'. Use grpc." >&2
+        return 2
+    fi
 
     WORKLOAD_NAME="$(resolve_workload_name "$test_name")"
     workload_file_name="${WORKLOAD_NAME//_/-}.sh"

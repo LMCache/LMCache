@@ -14,13 +14,13 @@ schemas:
 MP integration / SDK / benchmark
               |
               v
-     RequestClientFactory  -- selects by URL scheme
+     RequestClientFactory  -- normalizes the endpoint
               |
               v
          RequestClient     -- typed RPC contract
-          /       \
-         v         v
-  ZMQ adapter   gRPC adapter
+              |
+              v
+         gRPC adapter
 ```
 
 ## Shared RPC contract
@@ -30,21 +30,19 @@ truth. The method name is the stable operation name, its parameters define the
 ordered payload types, and `MessagingFuture[T]` defines the response type.
 `get_rpc_specs()` discovers these contracts at startup. The ZMQ server's
 sockets, polling and worker-pool dispatch stay in `zmq_impl/mq.py`; the msgspec
-codec both sides use is in `lmcache/v1/transport/zmq/codec.py`. The ZMQ client is in
-`lmcache/v1/client/transport/zmq_impl/`: `mq_client.py` holds
-`MessageQueueClient`, and `polling_loop.py` the loop all clients share.
+codec used by the legacy listener is in `lmcache/v1/transport/zmq/codec.py`.
 
 Business modules use `@request_handler` only for scheduling. The operation
 defaults to the handler name; `operation=` is for legacy method names.
 Discovery validates handler annotations against the shared contract before
 either server starts.
 
-A request whose server goes away before answering fails with a `TimeoutError`
-on both transports. ZMQ can't tell a lost server from a slow one, so the
-future times out. The gRPC client sees the connection close and raises
-`MPServerUnavailableError` from `lmcache/v1/transport/errors.py`, which is both a
-`TimeoutError` and a `ConnectionError`, so callers written for ZMQ handle it
-and event streams still end with a `ConnectionError`. When a gRPC server
+The legacy ZMQ client could not distinguish a lost server from a slow one, so
+its future raised `LMCacheTimeoutError` when the caller's timeout expired.
+The gRPC client detects a closed connection and raises `MPServerUnavailableError`
+from `lmcache/v1/transport/errors.py`. This is both a `TimeoutError` and a
+`ConnectionError`, so existing timeout handlers still work and event streams
+still end with a `ConnectionError`. When a gRPC server
 answers with any other error status, the client raises `MPRequestError` with
 the status code and message instead of grpcio's own error. ZMQ blocking-handler
 failures also produce error frames. On the serialized path only an explicit
@@ -83,29 +81,30 @@ The two `None` callers do not compare the response because it cannot differ.
 means a handler validated and refused a request without changing state. It is
 independent of operation names. All three gRPC unary servers map it to
 `INVALID_ARGUMENT`, preserving the reason as details; other exceptions keep
-their current mappings. ZMQ uses its existing error envelope and code
-`invalid_argument`. Its client prefixes the reason with the operation name.
-Both surfaces raise `MPRequestError`. ZMQ payload-count mismatches also raise
-the typed rejection so an old request gets an answer instead of timing out.
-The uppercase/lowercase code split is intentional here: existing ZMQ codes
-are unchanged. Outages keep the existing gRPC `MPServerUnavailableError` and
-ZMQ local `LMCacheTimeoutError` behavior described above.
+their current mappings. The gRPC client raises `MPRequestError` with that status
+and reason. The legacy ZMQ listener returns an error frame with the existing
+lowercase code `invalid_argument`, including when the request has the wrong
+number of payload frames. The legacy ZMQ client prefixed the reason with the
+operation name when raising `MPRequestError`.
 
 With `event_profile=None`, gRPC omits the optional request field and returns
-an empty response, preserving both wire byte strings. ZMQ always sends one
-extra request payload frame; caching behavior is identical, but request bytes
-are not. Its `None` success response still has no payload frame. QStore keeps
+an empty response, preserving both wire byte strings. A profile-aware legacy
+ZMQ client sent one extra request frame even for `None`. The ZMQ listener
+still returns a successful `None` response without a payload frame. QStore keeps
 its seven-field request and empty response under separate message types, with
 unchanged wire bytes.
 
-| Worker / server | gRPC | ZMQ |
+Here “older” and “newer” refer to support for the registration profile.
+
+| Worker / server | gRPC | Legacy ZMQ client and listener |
 | --- | --- | --- |
 | Older / newer | Works: absent profile decodes to `None` | Explicit payload-count rejection |
 | Newer / older | Accepted, but returned profile is absent | Older server cannot reply; worker times out |
 
 Returning the accepted profile lets a future caller detect an older gRPC
 server that ignored it; that comparison arrives with the first profile sender.
-This adds no handshake or fallback. Upgrade ZMQ deployments together.
+This adds no handshake or fallback. Deployments still using a legacy ZMQ client
+must upgrade the worker and listener together when adopting the registration profile.
 
 ## Client affinity
 
@@ -142,12 +141,15 @@ not from "ordered RPC" machinery.
 
 ## Transport implementations
 
-`RequestClientFactory` selects an implementation by endpoint scheme:
+`RequestClientFactory.create` always creates a gRPC client. It accepts the
+`context=` keyword used by ATOM and vLLM's fallback connector and leaves the
+caller responsible for that context.
 
 | Scheme | Implementation |
 |---|---|
-| no scheme, `grpc`, `grpc+unix` | gRPC |
-| `tcp`, `ipc`, `inproc` | ZMQ (deprecated) |
+| no scheme, `grpc`, `tcp` | gRPC over TCP. vLLM autostart starts a gRPC listener for all three. |
+| `grpc+unix` | gRPC over a Unix socket |
+| `ipc`, `inproc` | Rejected with a migration error pointing to `grpc://host:port`. |
 
 The gRPC adapter discovers generated service methods from protobuf descriptors.
 Each snake-case descriptor method must match one shared RPC operation. Its
@@ -155,10 +157,9 @@ codec combines the protobuf message schema with the Python payload and response
 types. Types needing a non-structural representation register an explicit
 message codec under `lmcache/v1/transport/grpc/codecs/`.
 
-The ZMQ adapter installs client methods from the same RPC specifications. IDs
-1–33 remain frozen for compatibility with deployed clients and servers. New
-operations use their stable string name on the wire and must not be added to
-the legacy ID table. The server accepts both encodings.
+The legacy ZMQ server keeps operation IDs 1–33 frozen for compatibility with
+deployed clients. New operations use their stable string name on the wire
+and must not be added to the legacy ID table. The server accepts both encodings.
 
 The server follows the same boundary. `server.py` builds transport-neutral
 engine modules and passes them to `create_request_server()`, which returns the
@@ -268,7 +269,7 @@ An ordinary RPC requires three changes:
 2. Add the protobuf request, response, and service method.
 3. Add a same-named `@request_handler` method to a business module.
 
-No request enum, Python protocol-definition registry, manual ZMQ client method,
+No request enum, Python protocol-definition registry,
 or gRPC service registration list is required. Add a custom gRPC message codec
 only when the structural codec cannot represent the Python type.
 
@@ -287,7 +288,7 @@ The CPU/L1 channel reuses the event bus and the existing vLLM publisher:
 ```text
 MP_TOKENS + L1 write/eviction -> KVEventModule's bounded log
     -> subscribe_kv_events(instance, model, cursor, limit)
-    -> ZMQ / gRPC push -> MP scheduler buffer -> vLLM -> router
+    -> gRPC server stream -> MP scheduler buffer -> vLLM -> router
 ```
 
 The scheduler subscribes once per configured server. Completed server writes are the store source;
@@ -301,10 +302,10 @@ Disconnects reopen the subscription; disabled channels and terminal failures
 withdraw CPU placements without falling back to worker stores. The buffer gauge and generated, drained, batch and resync counters
 expose delivery progress.
 
-Both transports use `MessagingStream` and the same bounded replay log. Readers
+The gRPC and legacy ZMQ listeners serve `MessagingStream` from the same bounded replay log. Readers
 wait on a condition notified by event-bus callbacks, including dropped events.
-gRPC uses a server stream; ZMQ retains the request ID and grants one batch of
-credit per acknowledgment. Slow subscribers do not create unbounded server
+The current scheduler consumes a gRPC server stream. For older clients, the ZMQ
+listener retains the request ID and grants one batch of credit per acknowledgment. Slow subscribers do not create unbounded server
 queues; if the shared log overruns their cursor, they receive a loss marker.
 Stream readers do not occupy the ordinary request executor. Cancellation,
 server shutdown and the existing worker reaper release subscriptions.
@@ -320,7 +321,7 @@ worker metadata or TP aggregation. Reception and heartbeat start at scheduler
 construction when events are enabled. Idle publication also requires vLLM to
 drain its connector while idle; moving reception alone does not provide it.
 
-Both transports advertise `kv_event_stream`. Enable the event
+Both server listeners advertise `kv_event_stream`. Enable the event
 bus and vLLM KV events, and match hash algorithms and chunk sizes. The scheduler
 subscribes automatically when vLLM events are enabled. See
 `docs/source/mp/configuration.rst` for the server's log-size/disable control.

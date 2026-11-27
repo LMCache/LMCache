@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Exercise auto-start health checks through the real ZMQ wire protocol."""
+"""Exercise auto-start health checks through the gRPC request transport."""
 
 # Standard
 import subprocess
@@ -19,32 +19,28 @@ def test_autostart_health_real_transport(start_server: bool) -> None:
     """
     script = textwrap.dedent("""
         import sys
-        import zmq
         from lmcache.integration.vllm.mp_server_launcher import is_mp_server_healthy
-        from lmcache.v1.multiprocess.request_handler import HandlerType
-        from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
+        from lmcache.v1.multiprocess.config import MPServerConfig
+        from lmcache.v1.multiprocess.request_handler import request_handler
+        from lmcache.v1.multiprocess.transport.grpc_impl import server_builder
 
-        def ping(instance_id: int | None) -> bool:
-            assert instance_id is None
-            return True
+        class Health:
+            @request_handler()
+            def ping(self, instance_id: int | None) -> bool:
+                return instance_id is None
 
         enabled = sys.argv[1] == 'True'
-        context = zmq.Context()
-        endpoint = 'inproc://autostart-health-regression'
-        server = None
+        config = MPServerConfig(host="127.0.0.1", port=0, grpc_server_mode="sync")
+        server = server_builder.build_grpc_request_server([Health()], config)
+        server.start()
+        endpoint = f"grpc://127.0.0.1:{server.bound_port}"
+        if not enabled:
+            server.close()
         try:
-            if enabled:
-                server = MessageQueueServer(endpoint, context)
-                server.add_handler(
-                    "ping", HandlerType.BLOCKING, ping,
-                )
-                server.add_normal_thread_pool(["ping"], max_workers=1)
-                server.start()
-            assert is_mp_server_healthy(endpoint, context, timeout=0.5) is enabled
+            assert is_mp_server_healthy(endpoint, None, timeout=1) is enabled
         finally:
-            if server is not None:
+            if enabled:
                 server.close()
-            context.term()
     """)
     result = subprocess.run(
         [sys.executable, "-c", script, str(start_server)],

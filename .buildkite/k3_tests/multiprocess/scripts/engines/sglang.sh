@@ -5,7 +5,7 @@ export ENGINE_NAME="SGLang"
 export ENGINE_DEFAULT_MODEL="Qwen/Qwen3-14B"
 
 ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven engine_driven)
-ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
+ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(grpc)
 
 # TODO(chunxiaozheng): Enable engine-driven hybrid-model coverage after the
 # shared EngineDrivenTransferContext supports multiple transfer groups.

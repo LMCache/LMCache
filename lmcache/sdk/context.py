@@ -15,7 +15,6 @@ import uuid
 # Third Party
 import requests
 import torch
-import zmq
 
 # First Party
 from lmcache.sdk.wrapper.ring_mapping import RingMapping, RingStateError
@@ -91,12 +90,11 @@ class LMCacheSDKContext:
         Initialize the SDK context.
 
         Args:
-            url: Multiprocess request endpoint. The URL scheme selects the
-                transport.
+            url: gRPC endpoint of the multiprocess server.
             http_url: HTTP endpoint URL for fetching information.
             model_name: Model name used by the running LMCache server instance.
             kind: The type of cache.
-            timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.
+            timeout: Timeout in seconds for blocking requests. Defaults to 60.
 
         Returns:
             LMCacheSDKContext instance.
@@ -106,11 +104,7 @@ class LMCacheSDKContext:
         """
         self._transfer_ctx: RingSDKTransferWrapper | None = None
         self._kind = kind
-        self._zmq_context = zmq.Context()
-        self._req_client: RequestClient = RequestClientFactory.create(
-            url,
-            context=self._zmq_context,
-        )
+        self._req_client: RequestClient = RequestClientFactory.create(url)
         self._mq_timeout = timeout
         self._model_name = kind.server_model_name(model_name)
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)

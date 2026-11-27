@@ -1,38 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 """Authentication tests for the multiprocess ZMQ transport."""
 
-# Standard
-from typing import Any
-import socket
-
 # Third Party
 import msgspec
 import pytest
 import zmq
 
 # First Party
-from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.security.api_key import APIKeyVerifier
 from lmcache.v1.multiprocess.request_handler import HandlerType
 from lmcache.v1.multiprocess.transport.zmq_impl.mq import MessageQueueServer
-from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.zmq.wire import (
     AUTH_ENVELOPE_MAGIC,
     AUTH_ERROR_FRAME,
     encode_authentication_frame,
+    encode_operation,
 )
-
-
-def _unused_tcp_url() -> str:
-    """Reserve and release a local TCP port for one test server."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return f"tcp://127.0.0.1:{sock.getsockname()[1]}"
 
 
 def _run_noop(
     accepted_keys: list[str], client_key: str | None
-) -> tuple[str | BaseException, int]:
+) -> tuple[list[bytes], int]:
     """Run one real ZMQ request and return its outcome and dispatch count."""
     context = zmq.Context()
     calls = 0
@@ -43,32 +31,39 @@ def _run_noop(
         return "NOOP_OK"
 
     server = MessageQueueServer(
-        _unused_tcp_url(), context, APIKeyVerifier(accepted_keys)
+        "tcp://127.0.0.1:0", context, APIKeyVerifier(accepted_keys)
     )
     server.add_handler("noop", HandlerType.SERIALIZED, noop)
     server.start()
     endpoint = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
-    client = MessageQueueClient(endpoint, context, api_key=client_key)
     try:
-        future: MessagingFuture[Any] | MessagingStream[Any] = client.submit_request(
-            "noop", []
-        )
-        assert isinstance(future, MessagingFuture)
-        try:
-            outcome: str | BaseException = future.result(timeout=3)
-        except BaseException as error:
-            outcome = error
-        return outcome, calls
+        with context.socket(zmq.DEALER) as peer:
+            peer.setsockopt(zmq.RCVTIMEO, 3000)
+            peer.setsockopt(zmq.LINGER, 0)
+            peer.connect(endpoint)
+            auth = (
+                [] if client_key is None else [encode_authentication_frame(client_key)]
+            )
+            uid = msgspec.msgpack.encode(1)
+            peer.send_multipart([*auth, uid, encode_operation("noop")])
+            reply_uid, *response = peer.recv_multipart()
+            assert reply_uid == uid
+            return response, calls
     finally:
-        client.close()
         server.close()
         context.term()
 
 
 def test_zmq_authentication_accepts_each_configured_key() -> None:
     """Multiple accepted server keys support credential rotation."""
-    assert _run_noop(["current", "next"], "current") == ("NOOP_OK", 1)
-    assert _run_noop(["current", "next"], "next") == ("NOOP_OK", 1)
+    assert _run_noop(["current", "next"], "current") == (
+        [encode_operation("noop"), msgspec.msgpack.encode("NOOP_OK")],
+        1,
+    )
+    assert _run_noop(["current", "next"], "next") == (
+        [encode_operation("noop"), msgspec.msgpack.encode("NOOP_OK")],
+        1,
+    )
 
 
 @pytest.mark.parametrize("client_key", [None, "wrong"])
@@ -76,7 +71,7 @@ def test_zmq_authentication_rejects_before_dispatch(client_key: str | None) -> N
     """Missing and incorrect credentials never reach the RPC handler."""
     outcome, calls = _run_noop(["secret"], client_key)
 
-    assert isinstance(outcome, PermissionError)
+    assert outcome == [AUTH_ERROR_FRAME]
     assert calls == 0
 
 
@@ -85,7 +80,10 @@ def test_zmq_authentication_disabled_is_wire_compatible(
     client_key: str | None,
 ) -> None:
     """A new server without keys accepts legacy and enveloped requests."""
-    assert _run_noop([], client_key) == ("NOOP_OK", 1)
+    assert _run_noop([], client_key) == (
+        [encode_operation("noop"), msgspec.msgpack.encode("NOOP_OK")],
+        1,
+    )
 
 
 @pytest.mark.parametrize(

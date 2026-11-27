@@ -13,7 +13,6 @@ is mocked.
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import MagicMock
-import socket
 import threading
 import time
 
@@ -56,12 +55,8 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from tests.v1.multiprocess.transport_test_utils import (
-    REQUEST_TRANSPORTS,
-    RequestTransport,
-    request_server_config,
-    request_server_url,
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+    build_grpc_request_server,
 )
 
 # ---------------------------------------------------------------------------
@@ -808,9 +803,7 @@ def test_blend_factory_forwards_configuration(
     )
 
 
-@pytest.mark.parametrize("transport", REQUEST_TRANSPORTS)
 def test_blend_store_overrides_transfer_handler(
-    transport: RequestTransport,
     monkeypatch: pytest.MonkeyPatch,
     stub_module_resources,
 ) -> None:
@@ -831,13 +824,10 @@ def test_blend_store_overrides_transfer_handler(
         MPServerConfig(engine_type="blend", worker_reap_timeout_seconds=0),
         CoordinatorConfig(),
     )
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-    url = request_server_url(transport, port)
-    server = create_request_server(
-        modules_for_service(modules, "worker"), request_server_config(transport, url)
+    server = build_grpc_request_server(
+        modules_for_service(modules, "worker"), MPServerConfig(host="127.0.0.1", port=0)
     )
+    url = f"grpc://127.0.0.1:{server.bound_port}"
     key = IPCCacheServerKey.from_token_ids("model", 1, 0, [1], end=1)
     try:
         server.start()

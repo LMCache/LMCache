@@ -33,9 +33,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             :sync: mp
 
             Start the LMCache server. ``--host`` / ``--port`` set the request
-            address vLLM connects to; ``--transport`` selects gRPC (the default)
-            or the deprecated ZMQ. The defaults are spelled out here so the two
-            commands line up:
+            address vLLM connects to over gRPC:
 
             .. code-block:: bash
 
@@ -54,11 +52,8 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             Start vLLM with the MP connector in a separate terminal. Point the
             connector at the server above via ``lmcache.mp.host`` /
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
-            include a transport prefix: ``tcp://`` for ZMQ or ``grpc://`` for
-            gRPC. A bare ``host``/``host:port`` is also accepted and is
-            normalized to ``grpc://`` automatically. ZMQ endpoints still work
-            but are deprecated. See :doc:`/mp/request_transport` for supported
-            endpoint schemes and transport-selection behavior:
+            use ``grpc://``, the ``tcp://`` alias, or a bare host.
+            See :doc:`/mp/request_transport` for the supported addresses:
 
             .. code-block:: bash
 
@@ -211,8 +206,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       typed inline transport, which serialises every chunk through the request
       channel and is much slower; see :ref:`mp-transfer-mode`.
 
-      gRPC is the default; the ``grpc://`` scheme is explicit for clarity and
-      for the case where a deployment still names ZMQ elsewhere:
+      Set the gRPC endpoint in the SGLang configuration:
 
       .. code-block:: bash
 
@@ -394,8 +388,7 @@ host, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
    vllm serve Qwen/Qwen3-8B --kv-transfer-config \
      '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "grpc://10.0.0.1", "lmcache.mp.port": 6555}}'
 
-A server started with the deprecated ``--transport zmq`` needs a
-``tcp://10.0.0.1`` connector host instead.
+An existing ``tcp://10.0.0.1`` connector host also reaches this gRPC server.
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``

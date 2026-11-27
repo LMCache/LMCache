@@ -10,7 +10,7 @@ Overview
    chunk_size_negotiation
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
-vLLM instances reach through a configurable ZMQ or gRPC request transport.
+vLLM instances reach over gRPC.
 One LMCache server per node can serve multiple vLLM pods, providing process
 isolation, shared caching, and independent resource scaling.
 
@@ -69,20 +69,15 @@ High-Level Architecture
 
 .. code-block:: text
 
-    Engine Worker(s)
-         |
-         | RequestClient (URL scheme selects ZMQ or gRPC)
-         v
-    RequestServer factory (transport/server_factory.py)
-         |                                      |
-         | ZMQ                                  | gRPC
-         v                                      v
-    MessageQueueServer                  GrpcMultiprocessServer
-    (transport/zmq_impl/mq.py)          (transport/grpc_impl/server.py)
-          |                                      |
-          +------------------+-------------------+
-                            | dispatch by operation name
-                            v
+                   RequestServer factory (transport/server_factory.py)
+                        |                              |
+                        | --transport grpc (default)   | --transport zmq
+                        v                              v
+    RequestClient --> gRPC server                MessageQueueServer <-- Legacy ZMQ client
+                        |                              |
+                        +--------------+---------------+
+                                       | dispatch by operation name
+                                       v
     EngineModule handlers owned by MPCacheServer (server.py)
          |
          |--- TokenHasher / SessionManager
@@ -149,11 +144,10 @@ part of the same process, and any configured runtime plugins are spawned by
 Request Operations
 ------------------
 
-Workers call the same typed operations through either ZMQ (DEALER/ROUTER) or
-gRPC. The handler scheduling contract is transport-neutral.
+Workers call typed operations over gRPC. The handler scheduling contract is transport-neutral.
 
-ZMQ encodes requests as msgspec multipart messages over DEALER/ROUTER sockets;
-gRPC encodes the same operations with protobuf. Both dispatch by operation
+Legacy ZMQ clients use msgspec multipart messages over DEALER/ROUTER sockets.
+gRPC clients encode the same operations with protobuf. Both dispatch by operation
 name; see :doc:`request_transport` for endpoint selection and wire details.
 
 **RPC operations** (declared by typed methods on ``RequestClient``):

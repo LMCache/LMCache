@@ -14,7 +14,7 @@ Retrieve / store / close are **methods** on the context.
 import lmcache.sdk.kvcache as kvcache   # query tensors: lmcache.sdk.qcache
 
 ctx = kvcache.connect(
-    url="grpc://localhost:5555",      # grpc:// for gRPC; tcp:// for ZMQ
+    url="grpc://localhost:5555",
     http_url="http://localhost:9000", # HTTP url for retrieving KV cache shape
     model_name="Qwen/Qwen3-8B",
 )
@@ -47,7 +47,7 @@ LMCacheSDKContext                                                    QRingBuffer
   │   (pieces of free blocks)       │   (CUDA IPC + events)               │
   ├ RingMapping ─────GET_Q_RING──▶  └ per-ring used blocks ◀──REPORT_Q_RING_STATE
   │   (maps the ring's IPC handles; checks num_alloc)
-  └ RequestClient ──ZMQ/gRPC──────▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
+  └ RequestClient ──gRPC──────▶ LookupModule (LOOKUP / QUERY_PREFETCH_STATUS)
 ```
 
 - **Ring state:** at the end of each step in which the ring changed, the vLLM worker reports

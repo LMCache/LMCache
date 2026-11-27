@@ -34,8 +34,8 @@ LMCACHE_REQUEST_TRANSPORT=grpc \
 .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
 ```
 
-CI runs every workload with `grpc`, which uses `grpc://` connector addresses.
-The deprecated `zmq` still works locally and uses `tcp://`.
+Local and CI workloads use `grpc` and connect to a gRPC listener. Setting
+`LMCACHE_REQUEST_TRANSPORT=zmq` is rejected before workload setup.
 
 ## vLLM sleep mode
 
@@ -145,7 +145,7 @@ export ENGINE_NAME="ExampleEngine"
 export ENGINE_DEFAULT_MODEL="example/model"
 
 ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven)
-ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
+ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(grpc)
 
 # Use normalized underscore names. Keep this empty when all common workloads
 # are supported.

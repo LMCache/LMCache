@@ -48,7 +48,7 @@ KV_TRANSFER_CONFIG="$(
 import json
 import os
 
-# The URL scheme picks the transport of the auto-started server.
+# Autostart launches a gRPC listener for both grpc:// and legacy tcp:// addresses.
 extra_config = {
     "lmcache.mp.host": f"{os.environ['LMCACHE_REQUEST_SCHEME']}://localhost",
     "lmcache.mp.port": int(os.environ["LMCACHE_PORT"]),
@@ -128,18 +128,12 @@ LMCACHE_PORT="${LMCACHE_PORT}" LMCACHE_REQUEST_SCHEME="${LMCACHE_REQUEST_SCHEME}
 import os
 import sys
 
-import zmq
-
 from lmcache.integration.vllm.mp_server_launcher import is_mp_server_healthy
 
 server_url = f"{os.environ['LMCACHE_REQUEST_SCHEME']}://localhost:{os.environ['LMCACHE_PORT']}"
-context = zmq.Context()
-try:
-    if not is_mp_server_healthy(server_url, context, timeout=5.0):
-        print(f"FAIL: auto-started MP server is not healthy at {server_url}", file=sys.stderr)
-        sys.exit(1)
-finally:
-    context.term()
+if not is_mp_server_healthy(server_url, None, timeout=5.0):
+    print(f"FAIL: auto-started MP server is not healthy at {server_url}", file=sys.stderr)
+    sys.exit(1)
 print(f"MP server responded to PING at {server_url}")
 PY
 

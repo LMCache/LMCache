@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # First Party
@@ -15,14 +15,14 @@ if TYPE_CHECKING:
 def create_request_client(
     server_url: str,
     *,
-    context: Any | None = None,
+    context: object | None = None,
     api_key: str | None = None,
 ) -> RequestClient:
     """Create a generated-stub gRPC request client.
 
     Args:
         server_url: gRPC endpoint selected by the request client factory.
-        context: Ignored; accepted for parity with other transports.
+        context: Ignored. Accepted for compatibility with existing clients.
         api_key: Optional explicit request credential. Environment request-key
             sources are used when omitted.
 

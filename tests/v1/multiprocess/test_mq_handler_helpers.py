@@ -1,27 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Helper handler functions for MessageQueue tests.
-
-These handlers are defined at module level to allow them to be pickled
-and passed between processes during multiprocessing tests.
-"""
+"""Handlers registered by the legacy ZMQ server tests."""
 
 # First Party
-from lmcache.v1.common.custom_types import (
-    BlockAllocationRecord,
-    EngineType,
-    IPCCacheServerKey,
-    KVEventProfile,
-)
-from lmcache.v1.common.group_view import EngineGroupInfo
-from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.platform.base.ipc_wrapper import KVCache
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 KeyType = IPCCacheServerKey
-
-# ==============================================================================
-# NOOP Request Handlers
-# ==============================================================================
 
 
 def noop_handler() -> str:
@@ -30,90 +13,6 @@ def noop_handler() -> str:
     Takes no arguments and returns a simple string response.
     """
     return "NOOP_OK"
-
-
-# ==============================================================================
-# REGISTER_KV_CACHE Request Handlers
-# ==============================================================================
-
-
-def register_kv_cache_handler(
-    gpu_id: int,
-    kv_cache: KVCache,
-    model_name: str,
-    world_size: int,
-    engine_type: EngineType,
-    layout_hints: LayoutHints,
-    engine_group_infos: list[EngineGroupInfo],
-    event_profile: KVEventProfile | None,
-    chunk_size: int | None = None,
-) -> KVEventProfile | None:
-    """
-    Dummy handler for REGISTER_KV_CACHE requests.
-
-    Args:
-        gpu_id: GPU device ID
-        kv_cache: List of CudaIPCWrapper objects representing KV cache
-        model_name: Name of the model associated with this KV cache
-        world_size: World size associated with this KV cache
-        engine_type: Which serving engine produced the caches
-        layout_hints: Engine-provided hints dict.
-        engine_group_infos: Engine-neutral KV cache group metadata,
-            msgspec-decoded from the request payload.
-        event_profile: Optional identity contract echoed by this test handler.
-        chunk_size: Effective logical tokens per LMCache chunk.
-
-    Returns:
-        The supplied profile, or None when absent.
-    """
-    # In a real implementation, this would register the KV cache
-    # For testing, we just validate the inputs are received correctly
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    assert isinstance(kv_cache, list), (
-        f"Expected kv_cache to be list, got {type(kv_cache)}"
-    )
-    assert isinstance(model_name, str), (
-        f"Expected model_name to be str, got {type(model_name)}"
-    )
-    assert isinstance(world_size, int), (
-        f"Expected world_size to be int, got {type(world_size)}"
-    )
-    assert isinstance(engine_type, EngineType), (
-        f"Expected engine_type to be EngineType, got {type(engine_type)}"
-    )
-    assert isinstance(layout_hints, dict), (
-        f"Expected layout_hints to be dict, got {type(layout_hints)}"
-    )
-    assert isinstance(engine_group_infos, list), (
-        f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"
-    )
-    return event_profile
-
-
-# ==============================================================================
-# UNREGISTER_KV_CACHE Request Handlers
-# ==============================================================================
-
-
-def unregister_kv_cache_handler(gpu_id: int) -> None:
-    """
-    Dummy handler for UNREGISTER_KV_CACHE requests.
-
-    Args:
-        gpu_id: GPU device ID
-
-    Returns:
-        None
-    """
-    # In a real implementation, this would unregister the KV cache for the given GPU
-    # For testing, we just validate the input is received correctly
-    assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
-    # No return value (returns None implicitly)
-
-
-# ==============================================================================
-# STORE Request Handlers
-# ==============================================================================
 
 
 def store_handler(
@@ -143,11 +42,6 @@ def store_handler(
         f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
     )
     return b"\x01" * 64, True
-
-
-# ==============================================================================
-# RETRIEVE Request Handlers
-# ==============================================================================
 
 
 def retrieve_handler(
@@ -187,11 +81,6 @@ def retrieve_handler(
     return b"\x01" * 64, True
 
 
-# ==============================================================================
-# LOOKUP Request Handlers
-# ==============================================================================
-
-
 def lookup_handler(key: KeyType, tp_size: int) -> None:
     """
     Dummy handler for LOOKUP requests.
@@ -208,58 +97,3 @@ def lookup_handler(key: KeyType, tp_size: int) -> None:
     # For testing, we just validate the input
     assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
     assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
-
-
-# ==============================================================================
-# FREE_LOOKUP_LOCKS Request Handlers
-# ==============================================================================
-
-
-def free_locks_handler(key: KeyType, tp_size: int) -> None:
-    """
-    Dummy handler for FREE_LOOKUP_LOCKS requests.
-
-    Args:
-        key: Cache key whose read locks should be released
-        tp_size: Tensor-parallel size for MLA
-            multi-reader locking
-
-    Returns:
-        None
-    """
-    assert isinstance(key, KeyType), f"Expected key to be KeyType, got {type(key)}"
-    assert isinstance(tp_size, int), f"Expected tp_size to be int, got {type(tp_size)}"
-
-
-# ==============================================================================
-# REPORT_BLOCK_ALLOCATION Request Handlers
-# ==============================================================================
-
-
-def report_block_allocations_handler(
-    instance_id: int,
-    model_name: str,
-    records: list[BlockAllocationRecord],
-) -> None:
-    """
-    Dummy handler for REPORT_BLOCK_ALLOCATION requests.
-
-    Args:
-        instance_id: The scheduler instance ID.
-        model_name: The model name from the adapter.
-        records: List of BlockAllocationRecord with per-request
-            block and token allocation deltas.
-
-    Returns:
-        None
-    """
-    assert isinstance(records, list), (
-        f"Expected records to be list, got {type(records)}"
-    )
-    for rec in records:
-        assert isinstance(rec, BlockAllocationRecord), (
-            f"Expected BlockAllocationRecord, got {type(rec)}"
-        )
-        assert isinstance(rec.req_id, str)
-        assert isinstance(rec.new_block_ids, list)
-        assert isinstance(rec.new_token_ids, list)

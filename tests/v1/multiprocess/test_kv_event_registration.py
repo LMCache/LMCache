@@ -13,7 +13,6 @@ import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
-from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
 from lmcache.v1.common.api import MemoryLayoutDesc
 from lmcache.v1.common.attn_window import AttnWindowDesc
 from lmcache.v1.common.custom_types import EngineType, KVEventProfile
@@ -24,7 +23,6 @@ from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as transfer
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.transport.errors import InvalidRequestError, MPRequestError
-from lmcache.v1.transport.futures import MessagingFuture, MessagingStream
 from lmcache.v1.transport.grpc.method_registry import (
     get_method_codec_registry,
 )
@@ -207,89 +205,72 @@ def test_profile_cannot_change_instance_namespace(
 
 
 @pytest.mark.parametrize(
-    ("transport", "mode"),
-    [
-        ("zmq", "sync"),
-        ("grpc", "sync"),
-        ("grpc", "aio"),
-        pytest.param("grpc", "native", marks=requires_pygrpc_native),
-    ],
+    "mode", ["sync", "aio", pytest.param("native", marks=requires_pygrpc_native)]
 )
 def test_registration_errors_reach_client_and_leave_server_usable(
     registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
-    transport: Literal["zmq", "grpc"],
     mode: Literal["sync", "aio", "native"],
 ) -> None:
     """Invalid registrations fail with a reason, not a timeout, on real sockets."""
     module, created = registration
     config = MPServerConfig(
-        transport=transport,
         host="127.0.0.1",
         port=0,
         grpc_server_mode=mode,
         max_cpu_workers=1,
     )
     server: Any = create_request_server([module, cast(Any, RejectingModule())], config)
-    url = (
-        server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
-        if transport == "zmq"
-        else f"grpc://127.0.0.1:{server.bound_port}"
-    )
+    url = f"grpc://127.0.0.1:{server.bound_port}"
     server.start()
-    client = RequestClientFactory.create(url, context=zmq.Context.instance())
+    client = RequestClientFactory.create(url)
     try:
         assert client.register_kv_cache(*_payload()).result(timeout=5) == PROFILE
         with pytest.raises(MPRequestError) as error:
             client.register_kv_cache(*_payload(2, KVEventProfile("other", 16))).result(
                 timeout=5
             )
-        expected_code = (
-            "INVALID_ARGUMENT" if transport == "grpc" else "invalid_argument"
-        )
-        assert error.value.code == expected_code
+        assert error.value.code == "INVALID_ARGUMENT"
         assert (
             "KV event profile conflicts with registration 1 "
             "for model 'model', world size 2"
         ) in error.value.details
         with pytest.raises(MPRequestError) as rejected:
             client.clear(False).result(timeout=5)
-        assert rejected.value.code == expected_code
+        assert rejected.value.code == "INVALID_ARGUMENT"
         assert "clear rejected without changing state" in rejected.value.details
-        if transport == "zmq":
-            with zmq.Context.instance().socket(zmq.DEALER) as socket:
-                socket.setsockopt(zmq.RCVTIMEO, 5000)
-                socket.connect(url)
-                # Old seven-field registration must receive an explicit arity error.
-                socket.send_multipart(
-                    [
-                        msgspec.msgpack.encode(7),
-                        encode_operation("register_kv_cache"),
-                        *[msgspec_encode(v, type(v)) for v in _payload()[:7]],
-                    ]
-                )
-                _, operation, payload = socket.recv_multipart()
-                assert decode_operation(operation) == ZMQ_ERROR_OPERATION
-                decoded = decode_error_response(payload)
-                assert decoded.code == "invalid_argument" and "count" in decoded.message
         assert client.register_kv_cache(*_payload(2)).result(timeout=5) == PROFILE
         assert len(created) == module.tracked_instance_count() == 2
         client.unregister_kv_cache(1).result(timeout=5)
         client.unregister_kv_cache(2).result(timeout=5)
         assert client.register_kv_cache(*_payload(3, None)).result(timeout=5) is None
-        if transport == "zmq":
-            with zmq.Context.instance().socket(zmq.DEALER) as socket:
-                socket.setsockopt(zmq.RCVTIMEO, 5000)
-                socket.connect(url)
-                prefix = [
-                    msgspec.msgpack.encode(8),
-                    encode_operation("register_kv_cache"),
-                ]
-                socket.send_multipart(
-                    prefix + [msgspec_encode(v, type(v)) for v in _payload(4, None)]
-                )
-                assert socket.recv_multipart() == prefix
     finally:
         client.close()
+        server.close()
+
+
+def test_legacy_zmq_server_handles_registration_frames(
+    registration: tuple[transfer.LMCacheDrivenTransferModule, list[MagicMock]],
+) -> None:
+    """A legacy worker receives an arity error and can retry a full registration."""
+    module, _ = registration
+    config = MPServerConfig(transport="zmq", host="127.0.0.1", port=0)
+    server: Any = create_request_server([module], config)
+    server.start()
+    try:
+        with zmq.Context.instance().socket(zmq.DEALER) as peer:
+            peer.setsockopt(zmq.RCVTIMEO, 5000)
+            peer.setsockopt(zmq.LINGER, 0)
+            peer.connect(server.socket.getsockopt_string(zmq.LAST_ENDPOINT))
+            header = [msgspec.msgpack.encode(7), encode_operation("register_kv_cache")]
+            values = [msgspec_encode(v, type(v)) for v in _payload(4, None)]
+            peer.send_multipart(header + values[:7])
+            _, operation, payload = peer.recv_multipart()
+            assert decode_operation(operation) == ZMQ_ERROR_OPERATION
+            error = decode_error_response(payload)
+            assert error.code == "invalid_argument" and "count" in error.message
+            peer.send_multipart(header + values)
+            assert peer.recv_multipart() == header
+    finally:
         server.close()
 
 
@@ -341,18 +322,3 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     decoded = codec.request_decoder(native)
     assert decoded[-2] == PROFILE
     assert decoded[-1] is None
-
-
-def test_zmq_missing_profile_reports_arity_not_union_attribute_error() -> None:
-    client = MessageQueueClient(
-        "inproc://missing-profile-test", context=zmq.Context.instance()
-    )
-    try:
-        future: MessagingFuture[Any] | MessagingStream[Any] = client.submit_request(
-            "register_kv_cache", list(_payload()[:7])
-        )
-        assert isinstance(future, MessagingFuture)
-        with pytest.raises(ValueError, match="Payload count mismatch"):
-            future.result(timeout=5)
-    finally:
-        client.close()

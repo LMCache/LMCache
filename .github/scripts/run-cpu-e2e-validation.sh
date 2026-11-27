@@ -82,18 +82,15 @@ LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-engine_driven}"
 
 # grpc-aio and grpc-native are the gRPC transport served by
 # --grpc-server-mode aio and native.
-LMCACHE_TRANSPORT_ARGS=(--transport "${LMCACHE_REQUEST_TRANSPORT}")
+LMCACHE_TRANSPORT_ARGS=(--transport grpc)
 case "${LMCACHE_REQUEST_TRANSPORT}" in
-  zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
-  grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
+  grpc) ;;
   grpc-aio|grpc-native)
-    LMCACHE_REQUEST_SCHEME="grpc"
-    LMCACHE_TRANSPORT_ARGS=(--transport grpc
-      --grpc-server-mode "${LMCACHE_REQUEST_TRANSPORT#grpc-}")
+    LMCACHE_TRANSPORT_ARGS+=(--grpc-server-mode "${LMCACHE_REQUEST_TRANSPORT#grpc-}")
     ;;
   *)
     echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'" >&2
-    echo "Valid values: zmq, grpc, grpc-aio, grpc-native" >&2
+    echo "Valid values: grpc, grpc-aio, grpc-native" >&2
     exit 1
     ;;
 esac
@@ -387,7 +384,7 @@ print(json.dumps({
     'kv_role': 'kv_both',
     'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
     'kv_connector_extra_config': {
-        'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
+        'lmcache.mp.host': 'grpc://localhost',
         'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
         # CPU tensors use shared memory, not CUDA driver-mapped allocations.
         'lmcache.mp.use_vmm_api': False,

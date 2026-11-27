@@ -5,7 +5,7 @@ export ENGINE_NAME="vLLM"
 export ENGINE_DEFAULT_MODEL="Qwen/Qwen3-14B"
 
 ENGINE_SUPPORTED_TRANSFER_MODES=(lmcache_driven engine_driven)
-ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(zmq grpc)
+ENGINE_SUPPORTED_REQUEST_TRANSPORTS=(grpc)
 
 # Common workloads that this adapter cannot currently run. Entries use the
 # normalized workload name with underscores, for example: long_doc_qa_l2.

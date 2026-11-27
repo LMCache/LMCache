@@ -18,7 +18,6 @@ import time
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
@@ -913,22 +912,15 @@ def test_unknown_and_expired_token_bindings_skip_stores(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("transport", "grpc_server_mode"),
-    [
-        ("zmq", "sync"),
-        ("grpc", "sync"),
-        ("grpc", "aio"),
-        pytest.param("grpc", "native", marks=requires_pygrpc_native),
-    ],
+    "grpc_server_mode",
+    ["sync", "aio", pytest.param("native", marks=requires_pygrpc_native)],
 )
 def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
-    transport: Literal["zmq", "grpc"],
     grpc_server_mode: Literal["sync", "aio", "native"],
 ) -> None:
     """Real sockets: one subscription pushes store/remove and wakes on shutdown."""
     module, bus = _event_module()
     config = MPServerConfig(
-        transport=transport,
         host="127.0.0.1",
         port=0,
         max_cpu_workers=1,
@@ -940,12 +932,9 @@ def test_event_subscription_pushes_without_polling_and_keeps_requests_live(
         liveness_targets=[module],
     )
     server: Any = create_request_server([management, module], config)
-    if transport == "grpc":
-        url = f"grpc://127.0.0.1:{server.bound_port}"
-    else:
-        url = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+    url = f"grpc://127.0.0.1:{server.bound_port}"
     server.start()
-    client = RequestClientFactory.create(url, context=zmq.Context.instance())
+    client = RequestClientFactory.create(url)
     streams = []
     pool = ThreadPoolExecutor(max_workers=3)
     try:

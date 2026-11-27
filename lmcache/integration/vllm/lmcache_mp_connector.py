@@ -55,7 +55,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 import torch
-import zmq
 
 # First Party
 from lmcache.integration.vllm.experimental import LMCacheMPQRequestMetadata, dispatch
@@ -573,16 +572,13 @@ def build_parallel_strategy_from_vllm_config(
 
 
 def _ensure_transport_scheme(server_url: str) -> str:
-    """Ensure a multiprocess server URL carries a transport scheme.
-
-    Preserve explicit schemes so the request client factory can select the
-    transport. Bare endpoints default to gRPC.
+    """Add a gRPC scheme to a bare multiprocess server address.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
 
     Returns:
-        The URL with a transport scheme, defaulting to ``grpc://``.
+        The explicit URL as supplied, or the bare address prefixed with ``grpc://``.
     """
     if "://" in server_url:
         return server_url
@@ -603,7 +599,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
       "grpc://127.0.0.1" (default "grpc://localhost"). The final URL is
       "{host}:{port}". If no transport scheme is provided, "grpc://" is
-      automatically prepended. "tcp://" selects the deprecated ZMQ transport.
+      automatically prepended. "tcp://" is a gRPC alias.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
@@ -807,7 +803,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     f"Got pp_size={pp_size}."
                 )
 
-        zmq_context = zmq.Context.instance()
         parallel_strategy = build_parallel_strategy_from_vllm_config(
             vllm_config, n_servers
         )
@@ -840,7 +835,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             print_banner_once(sys.stderr)
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
                 server_urls=server_urls,
-                context=zmq_context,
+                context=None,
                 model_name=cache_model_name,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,
@@ -878,7 +873,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ]
             self.worker_adapter = self.create_lmcache_mp_worker_adapter(
                 server_url=local_server_url,
-                context=zmq_context,
+                context=None,
                 model_name=cache_model_name,
                 vllm_block_size=scheduler_block_size,
                 parallel_strategy=parallel_strategy,

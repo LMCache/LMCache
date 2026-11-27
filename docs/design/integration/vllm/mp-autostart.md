@@ -54,17 +54,15 @@ The launcher uses the connector's resolved server URL. When
 `lmcache.mp.server_urls` is set, `lmcache.mp.host` and `lmcache.mp.port` are
 ignored, including during auto-start. Otherwise the connector builds the URL
 from those host/port settings.
-The URL scheme picks the server transport: `grpc://` starts a gRPC server
-(`--transport grpc`) and `tcp://` starts a deprecated ZMQ server
-(`--transport zmq`). `grpc+unix://` is not
-accepted, because auto-start binds a local TCP port.
-Only `localhost` and `127.0.0.1` are accepted. IPv6 endpoints (including `::1`)
-raise `ValueError` before probing or starting a process: the MP ZMQ transport
-does not enable IPv6 sockets. Disabling auto-start leaves connect-only behavior
-unchanged. Endpoint CLI flags
+A bare endpoint, `grpc://`, and `tcp://` all start the server with
+`--transport grpc`. Autostart binds a local TCP port on `localhost` or
+`127.0.0.1`. Unix socket and IPv6 endpoints raise `ValueError` before probing
+or starting a process. Endpoint CLI flags
 `--host`, `--port`, `--http-host`, and `--transport` are rejected in
 `server_args` because the autostarted server must bind the same local endpoint,
-over the same transport, that the connector will use.
+over the same transport, that the connector will use. Constructing an
+`MPServerAutostartConfig` with any transport other than `grpc` raises
+`ValueError` before the launcher can start a process.
 
 Required server sizing options, such as `--l1-size-gb` and `--eviction-policy`,
 remain explicit in `server_args`; the connector does not infer them from the

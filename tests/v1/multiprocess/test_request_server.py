@@ -5,28 +5,19 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import cast
-import socket
 import threading
 import time
 
-# Third Party
-import pytest
-
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.request_handler import request_handler
-from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.transport.request_client import RequestClient
-
-# Test helpers
-from tests.v1.multiprocess.transport_test_utils import (
-    REQUEST_TRANSPORTS,
-    RequestTransport,
-    request_server_config,
-    request_server_url,
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+    build_grpc_request_server,
 )
+from lmcache.v1.transport.request_client import RequestClient
 
 
 @dataclass
@@ -37,16 +28,7 @@ class _DispatchState:
     calls: int = 0
 
 
-def _unused_tcp_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return cast(int, sock.getsockname()[1])
-
-
-@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
-def test_serialized_handlers_run_one_at_a_time(
-    request_transport: RequestTransport,
-) -> None:
+def test_serialized_handlers_run_one_at_a_time() -> None:
     """SERIALIZED handlers must retain the single-main-loop execution contract."""
     state = _DispatchState()
 
@@ -77,9 +59,9 @@ def test_serialized_handlers_run_one_at_a_time(
             return "ok"
 
     worker_count = 8
-    server_url = request_server_url(request_transport, _unused_tcp_port())
-    config = request_server_config(request_transport, server_url)
-    server = create_request_server([SyncModule()], config)
+    config = MPServerConfig(host="127.0.0.1", port=0)
+    server = build_grpc_request_server([SyncModule()], config)
+    server_url = f"grpc://127.0.0.1:{server.bound_port}"
     server.start()
     clients: list[RequestClient] = []
     try:

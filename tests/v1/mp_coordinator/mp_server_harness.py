@@ -34,7 +34,6 @@ import uuid
 import httpx
 import torch
 import uvicorn
-import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
@@ -545,11 +544,7 @@ class KVClient:
             )
             for i in range(self._LAYERS)
         }
-        self._zmq = zmq.Context()
-        self._zmq.setsockopt(zmq.LINGER, 0)
-        self._client: RequestClient = RequestClientFactory.create(
-            rpc_url, context=self._zmq
-        )
+        self._client: RequestClient = RequestClientFactory.create(rpc_url)
         self._transfer: TransferContext = create_transfer_context(
             self._kv_caches,
             mode="lmcache_driven",
@@ -620,7 +615,6 @@ class KVClient:
             unregistered.result(timeout=_RPC_TIMEOUT_S)
         self._transfer.close()
         self._client.close()
-        self._zmq.term()
 
 
 @contextmanager

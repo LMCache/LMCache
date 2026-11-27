@@ -164,7 +164,8 @@ explicit ``true``/``false`` always wins.
    **Upgrade note.** The operator now starts engines with ``--transport grpc``
    and writes a ``grpc://`` host into the connection ConfigMap.  vLLM pods
    pick up that host when they start, so pods created before the upgrade keep
-   the old ``tcp://`` host and can no longer reach the restarted engine.
+   the old ``tcp://`` host. Pods running the old ZMQ client need the new
+   configuration to reach the restarted engine.
    Restart the vLLM pods after upgrading the operator.  See
    :ref:`mp-migrating-from-zmq`.
 

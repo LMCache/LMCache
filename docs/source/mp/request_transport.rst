@@ -1,19 +1,17 @@
 Request Transport
 =================
 
-LMCache MP clients select the request transport from the LMCache server URL.
+LMCache MP clients send requests over gRPC.
 This transport carries control and cache-operation requests; it is separate
 from ``--supported-transfer-mode``, which controls how KV data moves between
 the engine worker and the LMCache server.
 
 .. note::
 
-   gRPC is the default request transport. ``lmcache server`` serves gRPC unless
-   told otherwise, and a client URL without a scheme is read as ``grpc://``.
-   ZMQ still works and still speaks the same protocol, but it is **deprecated**:
-   the server and the client warn when it is selected, and the ZMQ client and
-   server implementations will be removed in a future release. See
-   :ref:`mp-migrating-from-zmq`.
+   ``lmcache server`` serves gRPC by default. Both ``tcp://host:port`` and a
+   bare ``host:port`` connect to that gRPC listener. If a server still runs
+   with ``--transport zmq``, follow :ref:`mp-migrating-from-zmq` before
+   upgrading its clients.
 
 Transport schemes
 -----------------
@@ -29,14 +27,11 @@ Transport schemes
      - gRPC
      - **Default.** A URL without a scheme is read as gRPC.
    * - ``tcp://host:port``
-     - ZMQ over TCP
-     - Deprecated. Accepted during the transition; the server and the client
-       warn when it is selected.
+     - gRPC over TCP
+     - Alias for ``grpc://host:port``.
    * - ``ipc://path`` or ``inproc://name``
-     - ZMQ IPC or in-process
-     - Deprecated together with ZMQ. Recognized by the client factory, but the
-       standard LMCache server binds TCP only, so these have no gRPC
-       counterpart; use ``grpc://host:port``.
+     - Removed
+     - Use ``grpc://host:port`` with the standard LMCache server.
 
 gRPC implementation and schema development
 ------------------------------------------
@@ -67,22 +62,11 @@ port in ``lmcache.mp.port``. A gRPC configuration is:
      "lmcache.mp.port": 5555
    }
 
-The deprecated ZMQ transport uses the same configuration shape with a
-``tcp://`` host:
-
-.. code-block:: json
-
-   {
-     "lmcache.mp.host": "tcp://localhost",
-     "lmcache.mp.port": 5555
-   }
-
-Start the server with the matching request transport:
+Start the server on the same host and port:
 
 .. code-block:: bash
 
    lmcache server --transport grpc --host localhost --port 5555
-   lmcache server --transport zmq --host localhost --port 5555
 
 Request API-key authentication
 ------------------------------
@@ -94,7 +78,7 @@ for rotation. Clients send one explicit key or use one of the environment
 sources. Authentication stays disabled when the server has no keys, preserving
 existing deployments. The same key sources also protect the HTTP API.
 
-ZMQ clients send the credential in a dedicated, versioned frame that the
+Legacy ZMQ clients send the credential in a dedicated, versioned frame that the
 server removes and verifies before decoding the RPC operation or payload
 frames; streaming acknowledgements and cancellations carry the same envelope.
 Enabling authentication requires clients that understand the versioned frame:
@@ -111,9 +95,6 @@ enforce this policy.
 .. code-block:: bash
 
    # Server: repeat --api-key-file to overlap old and new keys.
-   lmcache server --transport zmq --host 0.0.0.0 --port 5555 \
-       --api-key-file /run/secrets/lmcache-request-key
-
    lmcache server --transport grpc --host 0.0.0.0 --port 5555 \
        --api-key-file /run/secrets/lmcache-request-key
 
@@ -130,11 +111,9 @@ transport crosses an untrusted network. CURVE can be added as a future ZMQ
 transport-security adapter, and mutual TLS can add encryption and
 certificate-based peer identity to gRPC without replacing the API-key verifier.
 
-For multiple servers, specify the scheme on every entry in
-``lmcache.mp.server_urls``, for example
-``grpc://host1:5555,grpc://host2:5555`` or
-``tcp://host1:5555,tcp://host2:5555``. All clients and servers in a
-deployment must use matching transports.
+For multiple servers, set ``lmcache.mp.server_urls`` to a list such as
+``grpc://host1:5555,grpc://host2:5555``. Each entry may also use the
+legacy ``tcp://`` alias. Every listed server must have a gRPC listener.
 
 
 IPC descriptor compatibility
@@ -156,63 +135,34 @@ restricted to trusted networks.
 Migrating from ZMQ
 ------------------
 
-A ``--transport zmq`` server keeps serving ZMQ, and a ``tcp://`` client URL
-keeps reaching it. The default is what changes, so a deployment that relied on
-the default on one side and named the transport on the other ends up on two
-different transports.
+The release that switched the default to gRPC still supported an explicit ZMQ
+client. In releases with the ZMQ client removed, ``tcp://host:port`` uses gRPC.
+A server still running ``--transport zmq`` can serve legacy clients only.
 
-.. warning::
-
-   Clients from LMCache 0.5.7 and earlier cannot tell that a server speaks gRPC.
-   Pointed at a server that now defaults to gRPC, they wait for the full
-   ``lmcache.mp.mq_timeout`` (300 seconds by default) and then report that the
-   server is not running. When the server and the engines are upgraded
-   separately, upgrade the engines first, or start the upgraded server with
-   ``--transport zmq`` until they catch up. Clients from 0.5.8 on fail at the
-   first request with a message that names the transport.
-
-Migrate in this order:
-
-1. **Pick the transport the server should serve** and name it instead of relying
-   on the default:
+1. Move the server and its engines to gRPC together while using a release
+   that supports both transports. Start the server with:
 
    .. code-block:: bash
 
       lmcache server --transport grpc --host 0.0.0.0 --port 5555
 
-   The same applies to every other path that starts a server: the vLLM
-   autostart derives the transport from the connector URL, and the operator and
-   the test harnesses name theirs explicitly. With the operator, restart the
-   vLLM pods after upgrading it, since they keep the connector config they
-   started with.
-
-2. **Point clients at that transport.** Set the scheme in the connector URL, or
-   rely on the scheme-less default, which is now gRPC:
+   Set the endpoint explicitly on clients from the transition release, since
+   ``tcp://`` still selects ZMQ there:
 
    .. code-block:: json
 
       {"lmcache.mp.host": "grpc://lmcache-server", "lmcache.mp.port": 5555}
 
-   ``bench server --rpc-url`` and the SGLang ``mp_host`` setting take the same
-   scheme. A ``tcp://`` URL still selects ZMQ while ZMQ is supported.
+2. Upgrade the clients. Existing ``grpc://`` endpoints continue to work.
+   Configurations using ``tcp://`` can keep their address when connecting to
+   a gRPC server. Replace ``ipc://`` and ``inproc://`` with ``grpc://host:port``.
+   The same rules apply to ``bench server --rpc-url`` and SGLang's ``mp_host``.
+   Restart engine pods after changing their configuration.
 
-3. **Watch the logs.** Selecting ZMQ logs a deprecation warning on the server
-   and in each client process. A deployment that logs no warning is already on
-   gRPC.
+Clients from LMCache 0.5.7 and earlier can wait for their full
+``lmcache.mp.mq_timeout`` (300 seconds by default) when pointed at the
+wrong transport. Upgrade these clients to a release that supports an explicit
+gRPC endpoint before switching their server.
 
-4. **Remove the ZMQ settings** before the removal release, since
-   ``--transport zmq`` goes away with it.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 30 70
-
-   * - Release
-     - Behaviour
-   * - The release with the switch
-     - gRPC is the default; ZMQ works and warns. Mixed fleets are fine as long
-       as each client and its server agree.
-   * - A later release
-     - ZMQ client and server request transports are removed. HTTP APIs, the
-       coordinator, KV transfer modes and the NIXL/Mooncake handshakes are
-       unaffected -- those still use ``pyzmq``.
+The request transport is independent of KV data transfer. The NIXL and
+Mooncake handshakes continue to use ``pyzmq``.

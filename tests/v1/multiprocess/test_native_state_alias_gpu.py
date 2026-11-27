@@ -20,7 +20,6 @@ import time
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -84,8 +83,7 @@ def native_client() -> Generator[RequestClient, None, None]:
         port = listener.getsockname()[1]
     process = mp.get_context("spawn").Process(target=_serve, args=(port,), daemon=True)
     process.start()
-    context = zmq.Context()
-    client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}", context=context)
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}")
     try:
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
@@ -100,7 +98,6 @@ def native_client() -> Generator[RequestClient, None, None]:
         yield client
     finally:
         client.close()
-        context.destroy(linger=0)
         process.terminate()
         process.join(timeout=5)
         if process.is_alive():

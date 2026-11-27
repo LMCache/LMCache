@@ -362,7 +362,7 @@ server offers workers one of two engine-driven transports:
   This is the transport to use for any real workload.
 - **Typed inline** -- the fallback when no SHM pool is available.  Every KV
   chunk is serialised into the request message and copied through the
-  ZMQ/gRPC request channel on each store and retrieve (and deserialised on the
+  gRPC request channel on each store and retrieve (and deserialised on the
   other side), in messages of up to 128 MiB.  It only exists so that the engine-driven path still works
   where ``/dev/shm`` is unavailable (for example Docker without
   ``--ipc host``); it is not tuned for throughput.

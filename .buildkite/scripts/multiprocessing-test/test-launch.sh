@@ -19,15 +19,10 @@ MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 
-case "${LMCACHE_REQUEST_TRANSPORT}" in
-    zmq) LMCACHE_REQUEST_SCHEME="tcp" ;;
-    grpc) LMCACHE_REQUEST_SCHEME="grpc" ;;
-    *)
-        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
-        echo "Valid values: zmq, grpc"
-        exit 1
-        ;;
-esac
+if [[ "$LMCACHE_REQUEST_TRANSPORT" != grpc ]]; then
+    echo "Unsupported LMCACHE_REQUEST_TRANSPORT='$LMCACHE_REQUEST_TRANSPORT'. Use grpc." >&2
+    exit 1
+fi
 
 # Check GPU memory and set gpu-memory-utilization if > 100GB
 GPU_MEMORY_UTIL_ARG=""
@@ -82,7 +77,7 @@ docker run -d \
     --env PYTHONHASHSEED=0 \
     lmcache/vllm-openai:test \
     "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"$LMCACHE_REQUEST_SCHEME://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"grpc://localhost\", \"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     --port "$VLLM_PORT" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG

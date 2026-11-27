@@ -1,44 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, cast
+from importlib.util import resolve_name
 import ast
 
 # First Party
 from lmcache.v1.client.transport.grpc_impl.client import (
     GrpcMultiprocessClient,
 )
-from lmcache.v1.client.transport.zmq_impl import ZmqMultiprocessClient
-from lmcache.v1.client.transport.zmq_impl.mq_client import MessageQueueClient
-from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.grpc.descriptors import (
     client_method_name,
     iter_methods,
 )
 from lmcache.v1.transport.request_client import RequestClient
 from lmcache.v1.transport.rpc import get_rpc_specs
-from lmcache.v1.transport.server_module import ServerModuleCallRequest
 from tests.import_utils import repo_path
-
-
-class _RecordingMessageQueueClient(MessageQueueClient):
-    """Record requests without opening a ZMQ socket."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, list[Any]]] = []
-        self.closed = False
-
-    def submit_request(
-        self,
-        operation: str,
-        request_payloads: list[Any],
-    ) -> MessagingFuture[Any]:
-        future: MessagingFuture[Any] = MessagingFuture()
-        self.calls.append((operation, request_payloads))
-        future.set_result(operation)
-        return future
-
-    def close(self) -> None:
-        self.closed = True
 
 
 def test_all_rpc_contracts_have_explicit_named_methods() -> None:
@@ -48,14 +23,6 @@ def test_all_rpc_contracts_have_explicit_named_methods() -> None:
     expected_names = set(get_rpc_specs())
 
     assert expected_names <= contract_names
-    zmq_method_names = {
-        name
-        for name, value in ZmqMultiprocessClient.__dict__.items()
-        if callable(value)
-    }
-    assert expected_names <= zmq_method_names
-    assert "submit_request" not in ZmqMultiprocessClient.__dict__
-
     grpc_client = GrpcMultiprocessClient(  # type: ignore[abstract]
         "grpc://127.0.0.1:1"
     )
@@ -72,122 +39,46 @@ def test_all_rpc_contracts_have_explicit_named_methods() -> None:
 
 
 # test-import: allow -- AST contract check intentionally scans checkout sources.
-def test_only_zmq_transport_layer_submits_request_envelopes() -> None:
-    """Business callers must use named methods instead of ZMQ envelopes."""
+def test_business_callers_respect_request_transport_boundaries() -> None:
+    """Worker clients use the factory, and the legacy listener stays server-side."""
     repo_root = repo_path()
-    allowed = {
-        repo_root / "lmcache/v1/client/transport/zmq_impl/client.py",
-        repo_root / "lmcache/v1/client/transport/zmq_impl/mq_client.py",
-    }
-    violations: list[str] = []
-    for path in (repo_root / "lmcache").rglob("*.py"):
-        if path in allowed:
-            continue
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr == "submit_request":
-                violations.append(f"{path.relative_to(repo_root)}:{node.lineno}")
-
-    assert violations == []
-
-
-# test-import: allow -- AST contract check intentionally scans checkout sources.
-def test_business_callers_create_clients_through_factory() -> None:
-    """Transport implementations must not leak into business callers or tests."""
-    repo_root = repo_path()
-    transport_roots = (
-        repo_root / "lmcache/v1/multiprocess/transport",
-        repo_root / "lmcache/v1/client/transport",
-    )
+    product = repo_root / "lmcache"
+    client_transport = product / "v1/client/transport"
+    server_transport = product / "v1/multiprocess/transport"
     implementation_tests = {
-        repo_root
-        / "tests/v1/distributed/l2_adapters/test_p2p_l2_adapter_integration.py",
-        repo_root / "tests/v1/multiprocess/test_client.py",
         repo_root / "tests/v1/multiprocess/test_mq.py",
-        repo_root / "tests/v1/multiprocess/test_kv_event_registration.py",
         repo_root / "tests/v1/multiprocess/test_zmq_auth.py",
-        repo_root / "tests/v1/multiprocess/test_p2p_controller.py",
-        repo_root / "tests/v1/multiprocess/test_protocols.py",
-        repo_root / "tests/v1/multiprocess/transport_test_utils.py",
-        repo_root / "tests/cli/commands/bench/test_server_bench.py",
-        repo_root / "lmcache/v1/multiprocess/mq.py",
     }
     violations: list[str] = []
-    for source_root in (repo_root / "lmcache", repo_root / "tests"):
+    for source_root in (product, repo_root / "tests"):
         for path in source_root.rglob("*.py"):
+            forbidden_modules = []
             if (
-                any(path.is_relative_to(root) for root in transport_roots)
-                or path in implementation_tests
+                not path.is_relative_to(server_transport)
+                and path not in implementation_tests
             ):
+                forbidden_modules.append("lmcache.v1.multiprocess.transport.zmq_impl")
+            if source_root == product and not path.is_relative_to(client_transport):
+                forbidden_modules.append("lmcache.v1.client.transport.grpc_impl")
+            if not forbidden_modules:
                 continue
+            package = ".".join(path.relative_to(repo_root).parent.parts)
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
-                if not isinstance(node, ast.ImportFrom) or node.module is None:
-                    continue
-                imports_raw_client = node.module in (
-                    "lmcache.v1.client.transport.zmq_impl.mq_client",
-                    "lmcache.v1.multiprocess.transport.zmq_impl.mq",
-                ) and any(alias.name == "MessageQueueClient" for alias in node.names)
-                if imports_raw_client or node.module.startswith(
-                    (
-                        "lmcache.v1.multiprocess.transport.zmq_impl",
-                        "lmcache.v1.client.transport.zmq_impl",
+                if isinstance(node, ast.ImportFrom):
+                    module = resolve_name(
+                        "." * node.level + (node.module or ""), package
                     )
+                    imports = [f"{module}.{alias.name}" for alias in node.names]
+                elif isinstance(node, ast.Import):
+                    imports = [alias.name for alias in node.names]
+                else:
+                    continue
+                if any(
+                    name == module or name.startswith(f"{module}.")
+                    for name in imports
+                    for module in forbidden_modules
                 ):
                     violations.append(f"{path.relative_to(repo_root)}:{node.lineno}")
 
     assert violations == []
-
-
-def test_named_rpc_method_delegates_to_zmq_request_envelope() -> None:
-    transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
-
-    future = client.lookup(cast(Any, "key"), 4)
-
-    assert future.result(timeout=0) == "lookup"
-    assert transport.calls == [("lookup", ["key", 4])]
-
-    client.subscribe_kv_events(9, "model", cursor=7, max_events=16)
-    assert transport.calls[-1] == ("subscribe_kv_events", [9, "model", 7, 16])
-
-
-def test_zmq_clear_defaults_to_non_force_and_accepts_force() -> None:
-    transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
-
-    client.clear()
-    client.clear(force=True)
-
-    assert transport.calls == [
-        ("clear", [False]),
-        ("clear", [True]),
-    ]
-
-
-def test_compatibility_alias_delegates_to_same_zmq_request_type() -> None:
-    transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
-
-    client.cb_unregister_rope_v3(7)
-
-    assert transport.calls == [("cb_unregister_rope", [7])]
-
-
-def test_server_module_call_delegates_to_zmq_request_envelope() -> None:
-    transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
-    request = ServerModuleCallRequest(method="fake.echo", payload=b"hello")
-
-    client.server_module_call(request)
-
-    assert transport.calls == [("server_module_call", [request])]
-
-
-def test_close_delegates_to_zmq_client() -> None:
-    transport = _RecordingMessageQueueClient()
-    client = ZmqMultiprocessClient(transport)  # type: ignore[abstract]
-
-    client.close()
-
-    assert transport.closed

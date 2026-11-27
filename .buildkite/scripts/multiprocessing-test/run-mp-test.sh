@@ -17,15 +17,11 @@ export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILD_ID:-local_$$}"
 export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 
-case "${LMCACHE_REQUEST_TRANSPORT}" in
-    zmq) export LMCACHE_REQUEST_SCHEME="tcp" ;;
-    grpc) export LMCACHE_REQUEST_SCHEME="grpc" ;;
-    *)
-        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
-        echo "Valid values: zmq, grpc"
-        exit 1
-        ;;
-esac
+if [[ "$LMCACHE_REQUEST_TRANSPORT" != grpc ]]; then
+    echo "Unsupported LMCACHE_REQUEST_TRANSPORT='$LMCACHE_REQUEST_TRANSPORT'. Use grpc." >&2
+    exit 1
+fi
+export LMCACHE_REQUEST_SCHEME="grpc"
 
 # Track the overall test result
 TEST_RESULT=0
