@@ -294,3 +294,50 @@ def test_invalid_config_is_rejected() -> None:
                 kwargs={"groups": {0: [{**_SPLIT, "head_dim": 64}]}},
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# CPU kernel variant selection (AVX2 vs AVX-512)
+# ---------------------------------------------------------------------------
+
+_AVX512_CPU = frozenset({"avx2", "avx512f", "avx512bw", "avx512dq", "avx512vl"})
+_AVX2_CPU = frozenset({"avx2", "fma", "f16c"})
+
+
+@pytest.mark.parametrize(
+    "flags,env,expected",
+    [
+        (_AVX512_CPU, None, "avx512"),
+        (_AVX512_CPU, "", "avx512"),
+        (_AVX512_CPU, "auto", "avx512"),
+        (_AVX512_CPU, "AVX2", "avx2"),
+        (_AVX512_CPU, "avx512", "avx512"),
+        (_AVX2_CPU, None, "avx2"),
+        (_AVX2_CPU, "avx512", "avx2"),  # refused: would crash on this CPU
+        (_AVX512_CPU - {"avx512vl"}, None, "avx2"),  # partial AVX-512
+        (frozenset(), None, "avx2"),  # /proc/cpuinfo unreadable
+        (_AVX512_CPU, "bogus", "avx512"),  # unknown value -> auto
+    ],
+)
+def test_cpu_isa_selection(monkeypatch, flags, env, expected) -> None:
+    """The AVX-512 kernels are chosen only when the CPU has every AVX-512
+    subset they are built for; the env var can force AVX2 but never AVX-512
+    on a CPU without it."""
+    # First Party
+    from lmcache.v1.distributed.serde.gha import gha_serde
+
+    monkeypatch.setattr(gha_serde, "_cpu_flags", lambda: flags)
+    if env is None:
+        monkeypatch.delenv(gha_serde._CPU_ISA_ENV, raising=False)
+    else:
+        monkeypatch.setenv(gha_serde._CPU_ISA_ENV, env)
+    assert gha_serde._select_cpu_isa() == expected
+
+
+def test_loaded_cpu_module_matches_host() -> None:
+    """The serde loads the variant this host supports."""
+    # First Party
+    from lmcache.v1.distributed.serde.gha import gha_serde
+
+    assert gha_serde.gha_quant is not None
+    assert gha_serde.gha_quant.isa == gha_serde._select_cpu_isa()

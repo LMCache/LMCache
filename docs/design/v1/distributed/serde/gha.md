@@ -126,7 +126,25 @@ csrc/sycl/gha/
 GHA is Intel-only. The native modules are built only by the SYCL (Intel
 XPU) build profile, and only when ``BUILD_GHA=1`` is set at install time
 (e.g. ``BUILD_GHA=1 pip install -e .`` with oneAPI's ``icpx`` on ``PATH``):
-``lmcache.gha_quant`` for the x86-64 host CPU (AVX2) and
-``lmcache.gha_quant_xpu``. Other platforms never build them, and the
+``lmcache.gha_quant`` (AVX2) and ``lmcache.gha_quant_avx512`` (AVX-512
+F/BW/DQ/VL) for the x86-64 host CPU, and ``lmcache.gha_quant_xpu``. Other
+platforms never build them, and the
 ``gha`` serde raises an error when it is configured without them; the rest
 of LMCache is unaffected.
+
+### CPU kernel variants
+
+The CPU sources are compiled twice with different ISA flags. The AVX-512
+build compiles thin `csrc/sycl/gha/cpu/avx512/*.cpp` wrappers that `#include`
+the shared sources, so the two builds get distinct object files, and
+`GHA_QUANT_MODULE_NAME` names each module. Each module exposes `isa`
+(`"avx2"` / `"avx512"`).
+
+`gha_serde.py` picks the module once, at import time: the AVX-512 build when
+`/proc/cpuinfo` lists `avx512f`, `avx512bw`, `avx512dq` and `avx512vl` (Linux
+only reports them when the kernel saves the ZMM state), else the AVX2 build.
+The AVX-512 module is never imported on other CPUs, because loading it there
+would die with an illegal instruction instead of raising. `LMCACHE_GHA_CPU_ISA`
+(`auto` / `avx2` / `avx512`) overrides the choice, but `avx512` falls back to
+AVX2 with a warning on a CPU without AVX-512. When the AVX-512 module was not
+built, the AVX2 one is used.

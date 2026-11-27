@@ -15,6 +15,8 @@ Payload layouts produced by the native modules:
 """
 
 # Standard
+from typing import Any
+import importlib
 import struct
 
 # Third Party
@@ -23,8 +25,18 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
+from lmcache.v1.distributed.serde.gha.gha_serde import _AVX512_FLAGS, _cpu_flags
 
 gha_quant = pytest.importorskip("lmcache.gha_quant")
+
+# The AVX-512 build may only be imported on a CPU with AVX-512: importing it
+# elsewhere dies with an illegal instruction instead of raising.
+gha_quant_avx512: Any = None
+if _AVX512_FLAGS <= _cpu_flags():
+    try:
+        gha_quant_avx512 = importlib.import_module("lmcache.gha_quant_avx512")
+    except ImportError:
+        pass
 
 try:
     # First Party
@@ -37,8 +49,14 @@ _HAS_XPU = (
     and torch_device_type == "xpu"
     and torch_dev.is_available()
 )
-_DEVICES = ["cpu"] + (["xpu"] if _HAS_XPU else [])
+# "cpu" is the AVX2 build, "cpu_avx512" the AVX-512 build of the same kernels.
+_CPU_DEVICES = ["cpu"] + (["cpu_avx512"] if gha_quant_avx512 is not None else [])
+_DEVICES = _CPU_DEVICES + (["xpu"] if _HAS_XPU else [])
 requires_xpu = pytest.mark.skipif(not _HAS_XPU, reason="requires an Intel XPU")
+requires_avx512 = pytest.mark.skipif(
+    gha_quant_avx512 is None,
+    reason="requires an AVX-512 CPU and the lmcache.gha_quant_avx512 build",
+)
 
 _HEADER = b"GHAT"
 _LAYERS, _TOKENS, _HIDDEN = 3, 64, 256
@@ -48,7 +66,11 @@ _MEAN_ERR = {(4, False): 0.15, (8, False): 0.02, (4, True): 0.5, (8, True): 0.05
 
 
 def _native(device: str):
-    return gha_quant if device == "cpu" else gha_quant_xpu
+    return {
+        "cpu": gha_quant,
+        "cpu_avx512": gha_quant_avx512,
+        "xpu": gha_quant_xpu,
+    }[device]
 
 
 def _precond(n: int, seed: int = 42) -> tuple[torch.Tensor, torch.Tensor]:
@@ -212,16 +234,18 @@ def test_split_chunk_is_deterministic_and_into_4d_matches(device):
     assert torch.equal(dst, expected)
 
 
-def test_cpu_split_chunk_out_matches_bytes():
+@pytest.mark.parametrize("device", _CPU_DEVICES)
+def test_cpu_split_chunk_out_matches_bytes(device):
     """CPU ``gha_serialize_chunk(out=...)`` writes exactly the bytes the
     bytes-returning call produces, nothing past them, and rejects an undersized
     or mistyped buffer."""
+    native = _native(device)
     x = _data((2, _LAYERS, _TOKENS, _HIDDEN))
     signs, perm = _precond(_HIDDEN)
     kwargs = _chunk_kwargs(4, "per_token", True, True, signs, perm)
-    expected = _encode_chunk(gha_quant, x, 4, "per_token", True, True, signs, perm)
+    expected = _encode_chunk(native, x, 4, "per_token", True, True, signs, perm)
     out = torch.full((len(expected) + 55,), 0xAB, dtype=torch.uint8)
-    n = gha_quant.gha_serialize_chunk(
+    n = native.gha_serialize_chunk(
         x, _HEADER, 1, 2, num_layers=_LAYERS, out=out, **kwargs
     )
     assert n == len(expected)
@@ -232,7 +256,7 @@ def test_cpu_split_chunk_out_matches_bytes():
         torch.empty(n, dtype=torch.int8),
     ):
         with pytest.raises((ValueError, RuntimeError)):
-            gha_quant.gha_serialize_chunk(
+            native.gha_serialize_chunk(
                 x, _HEADER, 1, 2, num_layers=_LAYERS, out=bad, **kwargs
             )
 
@@ -294,9 +318,7 @@ def test_mismatched_preconditioner_is_rejected(device):
     wrong_rows = _chunk_kwargs(4, "per_token", True, True, signs, perm)
     wrong_rows["block_size"] = 4 * _TOKENS
     with pytest.raises((ValueError, RuntimeError)):
-        native.gha_serialize_chunk(
-            x, _HEADER, 1, 2, num_layers=_LAYERS, **wrong_rows
-        )
+        native.gha_serialize_chunk(x, _HEADER, 1, 2, num_layers=_LAYERS, **wrong_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -507,9 +529,7 @@ def test_state_per_tensor_round_trip(device, qbit):
     x = _data((_LAYERS, _TOKENS, _HEAD_NUM * _HEAD_DIM))
     kwargs = _state_kwargs(qbit, "per_tensor", False, True, None, None)
     payload = bytes(
-        native.gha_serialize_chunk_state(
-            x, _HEADER, 5, num_layers=_LAYERS, **kwargs
-        )
+        native.gha_serialize_chunk_state(x, _HEADER, 5, num_layers=_LAYERS, **kwargs)
     )
     blob, q_raw = _split_state_payload(payload)
     out = native.gha_dequantize_chunk_state(
@@ -572,12 +592,108 @@ def test_xpu_state_into_variants_match_the_tensor_api(merge_head_num):
 # ---------------------------------------------------------------------------
 
 
-def test_split_and_merge_fused_heads_are_inverse():
+@pytest.mark.parametrize("device", _CPU_DEVICES)
+def test_split_and_merge_fused_heads_are_inverse(device):
     """The CPU head reorder used around the fused codec round-trips exactly."""
+    native = _native(device)
     x = _data((_LAYERS, _TOKENS, _HEAD_NUM * _HEAD_DIM))
-    split = gha_quant.gha_split_fused_heads(x, _HEAD_NUM, _HEAD_DIM)
+    split = native.gha_split_fused_heads(x, _HEAD_NUM, _HEAD_DIM)
     assert torch.equal(split.view_as(_split_heads(x)), _split_heads(x))
-    merged = gha_quant.gha_merge_fused_heads(
-        split, _LAYERS, _HEAD_NUM, _HEAD_DIM
-    )
+    merged = native.gha_merge_fused_heads(split, _LAYERS, _HEAD_NUM, _HEAD_DIM)
     assert torch.equal(merged.view_as(x), x)
+
+
+# ---------------------------------------------------------------------------
+# CPU ISA variants: lmcache.gha_quant (AVX2) vs lmcache.gha_quant_avx512
+# ---------------------------------------------------------------------------
+
+
+def test_cpu_modules_report_their_isa():
+    """Each CPU build reports the ISA it was compiled for."""
+    assert gha_quant.isa == "avx2"
+    if gha_quant_avx512 is not None:
+        assert gha_quant_avx512.isa == "avx512"
+
+
+@requires_avx512
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("qbit", [4, 8])
+@pytest.mark.parametrize("scaling", ["per_token", "per_channel"])
+def test_avx512_split_chunk_matches_avx2(dtype, qbit, scaling):
+    """The AVX-512 build encodes split chunks like the AVX2 build, and each
+    build decodes the other's payload: L2 data written on an AVX-512 host may
+    be read on an AVX2 host and vice versa."""
+    x = _data((2, _LAYERS, _TOKENS, _HIDDEN), dtype)
+    # The RH transform runs over the hidden axis for per_token and over the
+    # tokens for per_channel; the preconditioner must match that length.
+    signs, perm = _precond(_TOKENS if scaling == "per_channel" else _HIDDEN)
+    args = (qbit, scaling, True, True, signs, perm)
+    ref = _encode_chunk(gha_quant, x, *args)
+    got = _encode_chunk(gha_quant_avx512, x, *args)
+    assert len(got) == len(ref)
+    # Compare the codes and the float scale blobs separately: a different
+    # vector width may reorder float sums, which perturbs the scales' low bits
+    # (counted as differing bytes) without changing what they decode to.
+    r_k, r_v, r_q = _split_chunk_payload(ref)
+    g_k, g_v, g_q = _split_chunk_payload(got)
+    # One scale unit per layer, one (scale, zp) per token (per_token) or per
+    # hidden column (per_channel).
+    nchunks = _HIDDEN if scaling == "per_channel" else _TOKENS
+    for g_blob, r_blob in ((g_k, r_k), (g_v, r_v)):
+        torch.testing.assert_close(
+            _parse_unit_scales(g_blob, _LAYERS, nchunks),
+            _parse_unit_scales(r_blob, _LAYERS, nchunks),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    assert (_q(g_q) != _q(r_q)).float().mean().item() < 1e-2
+
+    def decode(native, payload):
+        return _decode_chunk(native, payload, x.shape, dtype, *args).float()
+
+    expected = decode(gha_quant, ref)
+    for native, payload in (
+        (gha_quant_avx512, got),  # each build on its own payload
+        (gha_quant, got),  # AVX-512 payload read by AVX2
+        (gha_quant_avx512, ref),  # AVX2 payload read by AVX-512
+    ):
+        torch.testing.assert_close(decode(native, payload), expected, rtol=0, atol=0.05)
+
+
+@requires_avx512
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("qbit", [4, 8])
+@pytest.mark.parametrize("rh,precond", _FUSED_MODES, ids=["no-rh", "rh", "rh-pre"])
+def test_avx512_fused_direct_matches_avx2(dtype, qbit, rh, precond):
+    """The AVX-512 build encodes fused chunks like the AVX2 build, and each
+    build decodes the other's payload."""
+    x = _data((_LAYERS, _TOKENS, _HEAD_NUM * _HEAD_DIM), dtype)
+    signs, perm = _precond(_TOKENS) if precond else (None, None)
+    units = _LAYERS * _HEAD_NUM
+    ref = bytes(_direct(gha_quant, x, qbit, rh, True, signs, perm))
+    got = bytes(_direct(gha_quant_avx512, x, qbit, rh, True, signs, perm))
+    assert len(got) == len(ref)
+    g_blob, g_q = _split_state_payload(got)
+    r_blob, r_q = _split_state_payload(ref)
+    torch.testing.assert_close(
+        _parse_unit_scales(g_blob, units, _HEAD_DIM),
+        _parse_unit_scales(r_blob, units, _HEAD_DIM),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    assert (_q(g_q) != _q(r_q)).float().mean().item() < 1e-2
+
+    def decode(native, q, blob):
+        dst = torch.full_like(x, 7.0)
+        _direct_dequant(
+            native, _q(q), blob, dst, qbit, rh, True, signs, perm, "per_channel"
+        )
+        return dst.float()
+
+    expected = decode(gha_quant, r_q, r_blob)
+    for native, q, blob in (
+        (gha_quant_avx512, g_q, g_blob),  # each build on its own payload
+        (gha_quant, g_q, g_blob),  # AVX-512 payload read by AVX2
+        (gha_quant_avx512, r_q, r_blob),  # AVX2 payload read by AVX-512
+    ):
+        torch.testing.assert_close(decode(native, q, blob), expected, rtol=0, atol=0.05)

@@ -3,7 +3,8 @@
 
 Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx). With
 ``BUILD_GHA=1`` it also builds the optional GHA quantization kernels
-(``lmcache.gha_quant`` for the host CPU and ``lmcache.gha_quant_xpu``);
+(``lmcache.gha_quant`` / ``lmcache.gha_quant_avx512`` for the host CPU and
+``lmcache.gha_quant_xpu``);
 GHA is only built on this (Intel) platform.
 Requires Intel oneAPI environment to be sourced before building.
 """
@@ -114,39 +115,73 @@ class SyclProfile(BuildProfile):
     def _gha_extensions(
         self, include_dirs: list[str], library_dirs: list[str]
     ) -> list["Extension"]:
-        """GHA CPU (x86-64 AVX2) and XPU quantization kernels."""
+        """GHA CPU (x86-64 AVX2 and AVX-512) and XPU quantization kernels.
+
+        The CPU kernels are built twice from the same sources:
+        ``lmcache.gha_quant`` (AVX2) and ``lmcache.gha_quant_avx512``
+        (AVX-512 F/BW/DQ/VL). The serde picks one at import time from the
+        host CPU's flags, so the AVX-512 module is never loaded on a CPU
+        without AVX-512.
+        """
         # Third Party
         from torch.utils import cpp_extension
 
         ext_modules = []
         if platform.machine().lower() in {"x86_64", "amd64"}:
-            ext_modules.append(
-                cpp_extension.CppExtension(
-                    "lmcache.gha_quant",
-                    sources=[
+            # (module name, sources, ISA flags). The AVX-512 variant compiles
+            # thin wrapper sources that #include the shared ones, so the two
+            # builds get distinct object files instead of overwriting (or
+            # reusing) each other's.
+            cpu_variants = [
+                (
+                    "gha_quant",
+                    [
                         "csrc/sycl/gha/cpu/gha_quant_wrapper.cpp",
                         "csrc/sycl/gha/cpu/quant.cpp",
                     ],
-                    include_dirs=["csrc/sycl/gha/cpu"],
-                    extra_compile_args={
-                        "cxx": [
-                            *self.default_cxx_flags(),
-                            "-O3",
-                            "-std=c++20",
-                            "-mavx2",
-                            "-mfma",
-                            "-mf16c",
-                            "-fopenmp",
-                            "-DUSE_MULTITHREADING",
-                        ],
-                    },
-                    extra_link_args=["-fopenmp"],
+                    ["-mavx2", "-mfma", "-mf16c"],
+                ),
+                (
+                    "gha_quant_avx512",
+                    [
+                        "csrc/sycl/gha/cpu/avx512/gha_quant_wrapper_avx512.cpp",
+                        "csrc/sycl/gha/cpu/avx512/quant_avx512.cpp",
+                    ],
+                    [
+                        "-mavx2",
+                        "-mfma",
+                        "-mf16c",
+                        "-mavx512f",
+                        "-mavx512bw",
+                        "-mavx512dq",
+                        "-mavx512vl",
+                    ],
+                ),
+            ]
+            for module, sources, isa_flags in cpu_variants:
+                ext_modules.append(
+                    cpp_extension.CppExtension(
+                        f"lmcache.{module}",
+                        sources=sources,
+                        include_dirs=["csrc/sycl/gha/cpu"],
+                        extra_compile_args={
+                            "cxx": [
+                                *self.default_cxx_flags(),
+                                "-O3",
+                                "-std=c++20",
+                                *isa_flags,
+                                "-fopenmp",
+                                "-DUSE_MULTITHREADING",
+                                f"-DGHA_QUANT_MODULE_NAME={module}",
+                            ],
+                        },
+                        extra_link_args=["-fopenmp"],
+                    )
                 )
-            )
         else:
             print(
                 "[GHA] WARNING: the GHA CPU kernels need x86-64; "
-                "skipping lmcache.gha_quant"
+                "skipping lmcache.gha_quant and lmcache.gha_quant_avx512"
             )
         ext_modules.append(
             cpp_extension.CppExtension(

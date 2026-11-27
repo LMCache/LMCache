@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from typing import Any, Optional, cast
+import os
 import struct
 
 # Third Party
@@ -21,19 +22,88 @@ from lmcache.v1.distributed.serde.gha.gha_config import (
     GHACodecConfig,
 )
 
-try:
-    # First Party
-    import lmcache.gha_quant as gha_quant
-except ImportError:  # pragma: no cover
-    gha_quant = None
+logger = init_logger(__name__)
+
+# Environment variable forcing the CPU kernel variant: auto (default) | avx2 |
+# avx512. ``avx512`` on a CPU without AVX-512 is refused rather than loaded,
+# since importing that module there would crash with an illegal instruction.
+_CPU_ISA_ENV = "LMCACHE_GHA_CPU_ISA"
+# AVX-512 subsets the AVX-512 build is compiled for (see build_profiles/sycl.py).
+_AVX512_FLAGS = frozenset({"avx512f", "avx512bw", "avx512dq", "avx512vl"})
+
+
+def _cpu_flags() -> frozenset[str]:
+    """The host CPU's feature flags from /proc/cpuinfo (empty if unreadable).
+
+    Linux only reports a flag when the kernel has also enabled its register
+    state, so the AVX-512 flags imply the OS saves ZMM registers.
+    """
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("flags"):
+                    return frozenset(line.split(":", 1)[1].split())
+    except OSError:
+        pass
+    return frozenset()
+
+
+def _select_cpu_isa() -> str:
+    """Pick the CPU kernel variant ("avx512" or "avx2") for this host."""
+    has_avx512 = _AVX512_FLAGS <= _cpu_flags()
+    requested = (os.environ.get(_CPU_ISA_ENV) or "auto").strip().lower()
+    if requested == "avx2":
+        return "avx2"
+    if requested == "avx512":
+        if has_avx512:
+            return "avx512"
+        logger.warning(
+            "%s=avx512 but this CPU lacks %s; using the AVX2 GHA kernels",
+            _CPU_ISA_ENV,
+            "/".join(sorted(_AVX512_FLAGS)),
+        )
+        return "avx2"
+    if requested != "auto":
+        logger.warning(
+            "%s=%r is not one of auto/avx2/avx512; using auto", _CPU_ISA_ENV, requested
+        )
+    return "avx512" if has_avx512 else "avx2"
+
+
+def _load_cpu_module() -> Any:
+    """Import the GHA CPU kernels built for this host's ISA.
+
+    Falls back to the AVX2 module when the AVX-512 one was not built.
+    """
+    if _select_cpu_isa() == "avx512":
+        try:
+            # First Party
+            import lmcache.gha_quant_avx512 as module
+
+            return module
+        except ImportError:  # pragma: no cover
+            logger.warning(
+                "CPU supports AVX-512 but lmcache.gha_quant_avx512 is not built; "
+                "using the AVX2 GHA kernels"
+            )
+    try:
+        # First Party
+        import lmcache.gha_quant as module
+
+        return module
+    except ImportError:  # pragma: no cover
+        return None
+
+
+gha_quant = _load_cpu_module()
+if gha_quant is not None:
+    logger.debug("GHA CPU kernels: %s (%s)", gha_quant.__name__, gha_quant.isa)
 
 try:
     # First Party
     import lmcache.gha_quant_xpu as gha_quant_xpu
 except ImportError:  # pragma: no cover
     gha_quant_xpu = None
-
-logger = init_logger(__name__)
 
 _BytesLike = bytes | memoryview
 
@@ -234,9 +304,7 @@ class _GHACodec:
         then the packed q data. Independent of ``rh``/``asym``/``precond``.
         """
         if len(shape) != 3:
-            raise ValueError(
-                f"GHA fused-K/V estimate expects [L, T, H], got {shape}"
-            )
+            raise ValueError(f"GHA fused-K/V estimate expects [L, T, H], got {shape}")
         layers, tokens, hidden = (int(dim) for dim in shape)
         method = method or self.scaling_method
         elements = layers * tokens * hidden
@@ -298,9 +366,7 @@ class _GHACodec:
         shape = self._normalize(work)
         method = scaling_method or self.scaling_method
         if shape.hidden_dim <= 0:
-            raise ValueError(
-                "GHA attention quantization needs a non-empty hidden axis"
-            )
+            raise ValueError("GHA attention quantization needs a non-empty hidden axis")
         rh, asym, precond = (
             (False, False, False)
             if method == "per_tensor"

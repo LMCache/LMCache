@@ -134,9 +134,14 @@ XPU) backend and ``BUILD_GHA=1``:
     # oneAPI's icpx must be on PATH (SYCL build profile)
     BUILD_GHA=1 pip install -e . --no-build-isolation
 
-This builds ``lmcache.gha_quant`` (x86-64 host CPU, AVX2 required) and
-``lmcache.gha_quant_xpu``. On any other platform the modules are not
-built and configuring ``"type": "gha"`` raises an error.
+This builds the host-CPU kernels twice, ``lmcache.gha_quant`` (x86-64, AVX2
+required) and ``lmcache.gha_quant_avx512`` (AVX-512 F/BW/DQ/VL), plus
+``lmcache.gha_quant_xpu``. At import time the serde loads the AVX-512 build
+when ``/proc/cpuinfo`` reports all four AVX-512 subsets, and the AVX2 build
+otherwise. Set ``LMCACHE_GHA_CPU_ISA=avx2`` to force the AVX2 build;
+``avx512`` is ignored (with a warning) on a CPU without AVX-512. On any other
+platform the modules are not built and configuring ``"type": "gha"`` raises an
+error.
 
 .. code-block:: bash
 

@@ -268,11 +268,9 @@ void dispatch_dequantization_kernel(torch::Tensor& src, torch::Tensor& dst,
     } else if (dst_type == torch::kBFloat16) {
       run_dequantize_kernel<__bf16, int16_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e4m3fn) {
-      run_dequantize_kernel<gha_fp8_e4m3, int16_t>(src, dst, scale_id,
-                                                       args);
+      run_dequantize_kernel<gha_fp8_e4m3, int16_t>(src, dst, scale_id, args);
     } else if (dst_type == torch::kFloat8_e5m2) {
-      run_dequantize_kernel<gha_fp8_e5m2, int16_t>(src, dst, scale_id,
-                                                       args);
+      run_dequantize_kernel<gha_fp8_e5m2, int16_t>(src, dst, scale_id, args);
     } else {
       throw std::invalid_argument(
           "Unsupported destination dtype for int16 source.");
@@ -1035,8 +1033,7 @@ pybind11::object gha_serialize_chunk_py(
   }
 
   if (k_scale_data.size() != blob_len || v_scale_data.size() != blob_len) {
-    throw std::runtime_error(
-        "gha scale blob size does not match its layout");
+    throw std::runtime_error("gha scale blob size does not match its layout");
   }
   auto put_be32 = [](uint8_t* at, uint32_t v) {
     at[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
@@ -1607,14 +1604,14 @@ void gha_dequantize_fused_chunk_direct_py(
                                     scales.data(), zps.data(), params);
   }
   else if (dtype == torch::kFloat8_e4m3fn) {
-    dequantize_fused_direct<gha_fp8_e4m3>(
-        q_ptr, static_cast<gha_fp8_e4m3*>(dst_ptr), scales.data(),
-        zps.data(), params);
+    dequantize_fused_direct<gha_fp8_e4m3>(q_ptr,
+                                          static_cast<gha_fp8_e4m3*>(dst_ptr),
+                                          scales.data(), zps.data(), params);
   }
   else if (dtype == torch::kFloat8_e5m2) {
-    dequantize_fused_direct<gha_fp8_e5m2>(
-        q_ptr, static_cast<gha_fp8_e5m2*>(dst_ptr), scales.data(),
-        zps.data(), params);
+    dequantize_fused_direct<gha_fp8_e5m2>(q_ptr,
+                                          static_cast<gha_fp8_e5m2*>(dst_ptr),
+                                          scales.data(), zps.data(), params);
   }
   else {
     dequantize_fused_direct<float>(q_ptr, static_cast<float*>(dst_ptr),
@@ -1623,8 +1620,26 @@ void gha_dequantize_fused_chunk_direct_py(
   Py_END_ALLOW_THREADS
 }
 
-PYBIND11_MODULE(gha_quant, m) {
+// The same sources are built twice: ``lmcache.gha_quant`` (AVX2) and
+// ``lmcache.gha_quant_avx512`` (AVX-512), see setup_extensions/build_profiles/
+// sycl.py. The module name must match the shared object's file name.
+#ifndef GHA_QUANT_MODULE_NAME
+  #define GHA_QUANT_MODULE_NAME gha_quant
+#endif
+
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512DQ__)
+  #define GHA_QUANT_ISA "avx512"
+#elif defined(__AVX2__)
+  #define GHA_QUANT_ISA "avx2"
+#else
+  #define GHA_QUANT_ISA "scalar"
+#endif
+
+PYBIND11_MODULE(GHA_QUANT_MODULE_NAME, m) {
   m.doc() = "PyBind11 bindings for gha quantization utilities";
+  // ISA this module was compiled for; lets the loader and tests check which
+  // variant is in use.
+  m.attr("isa") = GHA_QUANT_ISA;
 
   m.def("gha_dequantize_chunk", &gha_dequantize_chunk_py,
         pybind11::arg("q_data"), pybind11::arg("k_scale_bytes"),
@@ -1670,12 +1685,11 @@ This path writes each half into its final destination layout and avoids the
 )doc");
 
   // All-in-one serialize (quantize + pack header+scales+qdata in C++).
-  m.def("gha_serialize_chunk", &gha_serialize_chunk_py,
-        pybind11::arg("src"), pybind11::arg("header_bytes"),
-        pybind11::arg("scale_id_k"), pybind11::arg("scale_id_v"),
-        pybind11::arg("qbit"), pybind11::arg("blocks_num"),
-        pybind11::arg("block_size"), pybind11::arg("head_num"),
-        pybind11::arg("head_dim"),
+  m.def("gha_serialize_chunk", &gha_serialize_chunk_py, pybind11::arg("src"),
+        pybind11::arg("header_bytes"), pybind11::arg("scale_id_k"),
+        pybind11::arg("scale_id_v"), pybind11::arg("qbit"),
+        pybind11::arg("blocks_num"), pybind11::arg("block_size"),
+        pybind11::arg("head_num"), pybind11::arg("head_dim"),
         pybind11::arg("num_layers") = static_cast<int64_t>(1),
         pybind11::arg("rh") = false, pybind11::arg("asym") = false,
         pybind11::arg("scaling_method") = "per_token",
