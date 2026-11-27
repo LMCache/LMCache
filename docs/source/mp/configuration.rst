@@ -479,7 +479,8 @@ single-L1 interface. For placing L1 on CXL-attached memory see
      - Initial allocation size (GB) when using lazy allocation.
    * - ``--l1-align-bytes``
      - ``4096``
-     - Alignment size in bytes (default 4 KB).
+     - Alignment size in bytes (default 4 KB). Must be a power of two; with
+       lazy allocation it must not exceed 64 MiB.
    * - ``--l1-use-hugepages`` / ``--no-l1-use-hugepages``
      - ``False``
      - Allocate the L1 pool from the 2 MiB hugepage pool instead of regular

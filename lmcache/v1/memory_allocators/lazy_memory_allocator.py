@@ -101,18 +101,28 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             init_size (int): Initial size of the memory allocation in bytes.
             final_size (int): Final size of the memory allocation in bytes.
             align_bytes (int, optional): Alignment for the underlying allocations.
-                Must be a positive power of two. The buffer's base address is
+                Must be a positive power of two no larger than
+                ``PIN_CHUNK_SIZE``. The buffer's base address is
                 aligned to this value, not merely the offsets within it.
             mlock (bool): Lock the whole buffer before any of it is pinned.
 
         Raises:
-            ValueError: If ``align_bytes`` is not a positive power of two.
+            ValueError: If ``align_bytes`` is not a positive power of two, or
+                is larger than ``PIN_CHUNK_SIZE`` (64 MiB).
             RuntimeError: If the platform does not support memory pinning, if
                 the allocated buffer could not be aligned to ``align_bytes``,
                 or if ``mlock`` fails.
         """
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
+        # Each expansion commits a whole number of pin chunks through
+        # AddressManager.sbrk, which rounds the size up to align_bytes; a
+        # larger alignment would grow the address space past the buffer.
+        if align_bytes > self.PIN_CHUNK_SIZE:
+            raise ValueError(
+                f"align_bytes ({align_bytes}) must not exceed PIN_CHUNK_SIZE "
+                f"({self.PIN_CHUNK_SIZE}) for lazy allocation"
+            )
 
         # Whether using NUMA allocation
         self._use_numa = numa_mapping is not None
