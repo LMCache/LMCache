@@ -235,6 +235,10 @@ def _new_connector() -> UnifiedLMCacheMPConnector:
     connector._needs_store_progress_reset = False
     connector._transfer_ctx_lock = threading.Lock()
     connector._closed = False
+    connector._writeback_supported = True
+    connector._recomputed_writeback = {}
+    connector._writeback_backlog = {}
+    connector.chunk_size = 4
     connector.tp_size = 1
     connector.pp_size = 1
     connector.tp_group = None
@@ -1581,3 +1585,55 @@ def test_terminal_partial_retrieve_is_available_to_engine_recovery(
         )
         assert operation.coverage == coverage
         assert connector.complete_load(operation) is allow_partial
+
+
+def test_missing_range_uses_ordinary_store_without_rewinding_frontier() -> None:
+    """Only the contradicted lookup range is resubmitted through normal STORE."""
+    from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
+
+    with _store_connector() as (connector, transfer, _):
+        ledger = RecomputedWriteback()
+        ledger.observe(8, 16)
+        connector._recomputed_writeback["request"] = ledger
+        connector._store_submitted_tokens["request"] = 24
+        operation = connector.submit_store(
+            "request",
+            list(range(16)),
+            torch.arange(12, 20),
+            device_indices_start=8,
+            cache_salt="",
+            writeback_range=(8, 16),
+        )
+        assert operation is not None
+        transfer.submit_store.assert_called_once()
+        key = transfer.submit_store.call_args.args[1]
+        assert (key.start, key.end) == (8, 16)
+        assert key.request_configs is None
+        assert connector._store_submitted_tokens["request"] == 24
+        assert connector.complete_store(operation)
+        assert not ledger.has_pending
+
+
+def test_failed_range_store_does_not_add_a_retry_policy() -> None:
+    """Failure leaves ordinary future store opportunities eligible, with no loop."""
+    from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
+
+    with _store_connector() as (connector, transfer, _):
+        ledger = RecomputedWriteback()
+        ledger.observe(8, 16)
+        connector._recomputed_writeback["request"] = ledger
+        connector._store_submitted_tokens["request"] = 24
+        transfer.submit_store.return_value.result.return_value = False
+        operation = connector.submit_store(
+            "request",
+            list(range(16)),
+            torch.arange(12, 20),
+            device_indices_start=8,
+            cache_salt="",
+            writeback_range=(8, 16),
+        )
+        assert operation is not None
+        assert not connector.complete_store(operation)
+        assert connector.pending_writeback_ranges("request", 24) == [(8, 16)]
+        assert connector._store_submitted_tokens["request"] == 24
+        transfer.submit_store.assert_called_once()

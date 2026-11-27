@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Iterable
+from dataclasses import dataclass
+import hashlib
 from typing import TYPE_CHECKING, Any
 import math
 import sys
@@ -94,8 +96,10 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.recomputed_writeback import RecomputedWriteback, WritebackTicket
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.utils import CacheRemoveEvent
+from lmcache.v1.distributed.api import get_request_tags
 
 try:
     # First Party
@@ -589,6 +593,13 @@ def _ensure_transport_scheme(server_url: str) -> str:
     return f"grpc://{server_url}"
 
 
+@dataclass
+class _PendingWriteback:
+    ledger: RecomputedWriteback
+    ticket: WritebackTicket
+    metadata: LMCacheMPRequestMetadata
+
+
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
     The connector for LMCache multi-process mode.
@@ -849,6 +860,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 enable_kv_events=self._enable_kv_events,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            self._writeback_backlog: dict[tuple[str, bytes], RecomputedWriteback] = {}
+            self._writeback_supported = (
+                parallel_strategy.vllm_world_size == 1
+                and len(group_tokens_per_block) == 1
+                and not self._full_hit_holds_back_last_token
+                and mamba_cache_mode not in ("align", "all")
+                and spec_config is None
+            )
+            self._pending_writebacks: dict[str, _PendingWriteback] = {}
+            self._queued_writebacks: list[LMCacheMPRequestMetadata] = []
             # Requests whose request_finished returned True, sent to the
             # workers with the next step's metadata.
             self._delay_free_req_ids: set[str] = set()
@@ -1289,18 +1310,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def build_connector_worker_meta(self) -> LMCacheMPWorkerMetadata | None:
-        """Build this step's lazy-offload store results.
+        """Build ordinary STORE results and contradicted lookup ranges.
 
         Returns:
-            Completion counts and failed request IDs, or None when lazy
-            offload is disabled or there are no new results.
+            Missing ranges and exact-range store outcomes, plus lazy-offload
+            completion counts when enabled; None when no new results exist.
         """
+        loads, writebacks = self.worker_adapter.get_writeback_results()
         if not self.lazy_offload:
-            return None
+            return (
+                LMCacheMPWorkerMetadata(
+                    {}, failed_load_ranges=loads, writeback_results=writebacks
+                )
+                if loads or writebacks
+                else None
+            )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
+        if completed_store_requests or failed_store_requests or loads or writebacks:
             return LMCacheMPWorkerMetadata(
+                failed_load_ranges=loads,
+                writeback_results=writebacks,
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
             )
@@ -1724,6 +1754,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
 
+        for tracker in list(self.request_trackers.values()):
+            self._queue_recomputed_writebacks(tracker)
+        for store in self._queued_writebacks:
+            metadata.add_request_metadata(store)
+        self._queued_writebacks = []
+
         if self.lazy_offload:
             actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)
             for store_metadata in actions.stores_to_submit:
@@ -1751,6 +1787,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for request_id in connector_output.finished_sending or ():
             self._release_boundary_state_blocks(request_id)
 
+        meta = connector_output.kv_connector_worker_meta
+        if isinstance(meta, LMCacheMPWorkerMetadata):
+            for rid, spans in meta.failed_load_ranges.items():
+                tracker = self.request_trackers.get(rid)
+                if tracker is not None and self._writeback_supported:
+                    for start, end, generation in spans:
+                        if generation == tracker.writeback_generation:
+                            tracker.writeback.observe(start, end)
+                            self._writeback_backlog[
+                                self._writeback_content_key(tracker)
+                            ] = tracker.writeback
+            self._complete_recomputed_writebacks(meta.writeback_results)
         if not self.lazy_offload:
             return
         meta = connector_output.kv_connector_worker_meta
@@ -1805,6 +1853,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self.request_trackers.get(request.request_id)
         delay_free = tracker is not None and tracker.store_scheduled
 
+        if tracker is not None and request.status != RequestStatus.FINISHED_ABORTED:
+            self._queue_recomputed_writebacks(tracker)
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
@@ -1876,20 +1926,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return blocks
 
+    def has_pending_block_frees(self) -> bool:
+        """Allow pending write-backs to release their pins before preemption."""
+        return self.role == KVConnectorRole.SCHEDULER and bool(self._pending_writebacks)
+
     def has_pending_push_work(self) -> bool:
-        """Return whether vLLM should keep stepping for pending push work.
+        """Keep stepping until ordinary exact-range STORE transfers release pins.
 
-        Returns:
-            True when scheduler-side lazy offload has submitted stores waiting
-            for worker completion. Queued stores are intentionally excluded:
-            they require a model-token step for submission and cannot progress
-            during a connector-only step. Non-lazy mode uses vLLM's normal
-            delayed-free path and does not need this keepalive.
+        Queued missing ranges can use a connector-only step because their GPU
+        sources were committed before submission. Normal lazy-offload behavior
+        remains unchanged.
         """
-        if self.role != KVConnectorRole.SCHEDULER or not self.lazy_offload:
+        if self.role != KVConnectorRole.SCHEDULER:
             return False
-
-        return self._lazy_offload_manager.has_inflight_store_work()
+        return bool(self._pending_writebacks or self._queued_writebacks) or (
+            self.lazy_offload and self._lazy_offload_manager.has_inflight_store_work()
+        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
@@ -2202,6 +2254,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     self.scheduler_adapter.end_session(session_id)
             new_tracker = LMCacheMPRequestTracker(request)
             self._apply_revision_tag(new_tracker)
+            if self._writeback_backlog:
+                saved_writeback = self._writeback_backlog.get(
+                    self._writeback_content_key(new_tracker)
+                )
+                if saved_writeback is not None:
+                    new_tracker.writeback = saved_writeback
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 
@@ -2323,6 +2381,77 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 ).extend(boundary_state_block_ids)
             metadata.add_request_metadata(r_meta)
             tracker.store_scheduled = True
+
+    @staticmethod
+    def _writeback_content_key(tracker: LMCacheMPRequestTracker) -> tuple[str, bytes]:
+        """Identify retryable work across request IDs without retaining GPU memory."""
+        prompt = tracker.packed_token_ids()[: tracker.num_prompt_tokens * 4]
+        tags = repr(sorted(get_request_tags(tracker.request_configs).items())).encode()
+        return tracker.cache_salt, hashlib.sha256(prompt + tags).digest()
+
+    def _queue_recomputed_writebacks(self, tracker: LMCacheMPRequestTracker) -> None:
+        """Pin and enqueue only failed ranges whose normal forward has committed.
+
+        This first implementation is restricted to full-attention, one-rank
+        connectors. The scheduler and model runner remain backend independent.
+        """
+        pool = self._gpu_block_pool
+        if (
+            not self._writeback_supported
+            or not self._can_store
+            or pool is None
+            or self._boundary_state_groups
+            or len(self._group_tokens_per_block) != 1
+        ):
+            return
+        if self.scheduler_adapter.world_size != 1:
+            return
+        for span in tracker.writeback.ready(tracker.committed_tokens):
+            store, ticket = LMCacheMPRequestMetadata.GetWritebackMetadata(
+                tracker, span, self._group_tokens_per_block
+            )
+            identity = store.request_configs["recomputed_writeback_id"]
+            pool.touch([pool.blocks[bid] for bid in store.op.flat_block_ids])
+            self._pending_writebacks[identity] = _PendingWriteback(
+                tracker.writeback, ticket, store
+            )
+            self._queued_writebacks.append(store)
+            logger.info(
+                "KV_WRITEBACK_QUEUED id=%s request=%s range=%d:%d",
+                identity,
+                tracker.request_id,
+                *span,
+            )
+
+    def _complete_recomputed_writebacks(self, results: dict[str, bool]) -> None:
+        pool = self._gpu_block_pool
+        for identity, success in results.items():
+            pending = self._pending_writebacks.pop(identity, None)
+            if pending is None:
+                continue
+            ledger, ticket, store = pending.ledger, pending.ticket, pending.metadata
+            ledger.complete(ticket, success)
+            if not ledger.has_pending:
+                for content, saved in list(self._writeback_backlog.items()):
+                    if saved is ledger:
+                        del self._writeback_backlog[content]
+            logger.info(
+                "KV_WRITEBACK_ACK id=%s request=%s range=%d:%d success=%s",
+                identity,
+                store.request_id,
+                store.op.start,
+                store.op.end,
+                success,
+            )
+            if pool is not None:
+                pool.free_blocks([pool.blocks[bid] for bid in store.op.flat_block_ids])
+            if store.request_id not in self.request_trackers and not any(
+                other.metadata.request_id == store.request_id
+                for other in self._pending_writebacks.values()
+            ):
+                # A one-token request may retire before its deferred STORE is
+                # dispatched. Close the normal session that STORE recreated.
+                self.scheduler_adapter.end_session(store.request_id)
 
     def _release_boundary_state_blocks(self, request_id: str) -> None:
         """Unpin the boundary-state blocks a request's unfull-chunk stores read.

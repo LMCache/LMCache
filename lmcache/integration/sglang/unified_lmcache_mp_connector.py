@@ -30,6 +30,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.common.custom_types import RetrieveCoverage
+from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
 
 if TYPE_CHECKING:
     # First Party
@@ -293,6 +294,14 @@ class UnifiedLMCacheMPConnector:
         self._lookups: dict[str, LMCacheLookupOperation] = {}
         self._active_sessions: set[str] = set()
         self._store_submitted_tokens: dict[str, int] = {}
+        self._writeback_supported = (
+            self.tp_size == self.pp_size == 1
+            and len(self._kv_groups) == 1
+            and not self._kv_groups[0].recurrent_state
+            and self._kv_groups[0].sliding_window_size < 0
+        )
+        self._recomputed_writeback: dict[str, RecomputedWriteback] = {}
+        self._writeback_backlog: dict[tuple[str, bytes], RecomputedWriteback] = {}
         self._control_futures: list[Any] = []
         self._heartbeat: Optional[HeartbeatThread] = None
         self._heartbeat_lock = threading.Lock()
@@ -754,6 +763,10 @@ class UnifiedLMCacheMPConnector:
             self._store_submitted_tokens[operation.request_id] = (
                 operation.total_hit_tokens
             )
+        if self._writeback_backlog:
+            saved = self._writeback_backlog.get(self._writeback_content_key(operation))
+            if saved is not None:
+                self._recomputed_writeback[operation.request_id] = saved
         return operation.total_hit_tokens
 
     def _slots_to_blocks(
@@ -970,6 +983,24 @@ class UnifiedLMCacheMPConnector:
             lookup=operation,
         )
 
+    @staticmethod
+    def _writeback_content_key(lookup: LMCacheLookupOperation) -> tuple[str, bytes]:
+        return lookup.cache_salt, hashlib.sha256(
+            str(lookup.token_ids).encode()
+        ).digest()
+
+    def _observe_failed_writeback(
+        self, operation: LMCacheLoadOperation, failed: Sequence[int]
+    ) -> None:
+        if not self._writeback_supported:
+            return
+        content = self._writeback_content_key(operation.lookup)
+        ledger = self._writeback_backlog.setdefault(content, RecomputedWriteback())
+        self._recomputed_writeback[operation.request_id] = ledger
+        for index in failed:
+            start = operation.start + index * self.chunk_size
+            ledger.observe(start, min(start + self.chunk_size, operation.end))
+
     def prepare_load_on_stream(
         self,
         operation: LMCacheLoadOperation,
@@ -1003,6 +1034,8 @@ class UnifiedLMCacheMPConnector:
             if isinstance(outcome, RetrieveCoverage):
                 outcome.validate()
                 operation.coverage = outcome
+                if outcome.failed_chunks:
+                    self._observe_failed_writeback(operation, outcome.failed_chunks)
             local_success = bool(outcome)
             if (
                 allow_partial
@@ -1024,6 +1057,10 @@ class UnifiedLMCacheMPConnector:
             )
 
         success = self._sync_success(local_success)
+        if not success and operation.coverage is None:
+            self._observe_failed_writeback(
+                operation, range((operation.end - operation.start) // self.chunk_size)
+            )
         if success:
             return True
 
@@ -1052,7 +1089,18 @@ class UnifiedLMCacheMPConnector:
             return operation.result
         success = False
         try:
-            success = bool(operation.future.result(timeout=0))
+            outcome = operation.future.result(timeout=0)
+            if isinstance(outcome, RetrieveCoverage):
+                outcome.validate()
+                operation.coverage = outcome
+                if outcome.failed_chunks:
+                    self._observe_failed_writeback(operation, outcome.failed_chunks)
+            elif not outcome:
+                self._observe_failed_writeback(
+                    operation,
+                    range((operation.end - operation.start) // self.chunk_size),
+                )
+            success = bool(outcome)
         except Exception:
             logger.exception("LMCache retrieve failed for %s", operation.request_id)
         if synchronize:
@@ -1094,6 +1142,21 @@ class UnifiedLMCacheMPConnector:
         start = min(self._store_submitted_tokens.get(request_id, 0), aligned_end)
         return start // self.chunk_size * self.chunk_size
 
+    def pending_writeback_ranges(
+        self, request_id: str, committed_tokens: int
+    ) -> list[tuple[int, int]]:
+        """Return missing chunks covered by successfully committed engine KV.
+
+        Args:
+            request_id: Engine request owning the cache delivery.
+            committed_tokens: Completed prefix; never include planned work.
+
+        Returns:
+            Exact aligned ranges eligible for the ordinary STORE path.
+        """
+        ledger = self._recomputed_writeback.get(request_id)
+        return [] if ledger is None else ledger.ready(committed_tokens)
+
     def submit_store(
         self,
         request_id: str,
@@ -1102,11 +1165,34 @@ class UnifiedLMCacheMPConnector:
         *,
         device_indices_start: int,
         cache_salt: str,
+        writeback_range: tuple[int, int] | None = None,
     ) -> Optional[LMCacheStoreOperation]:
+        """Submit normal asynchronous STORE for a suffix or a regenerated range.
+
+        Args:
+            request_id: Owner used for session and completion bookkeeping.
+            token_ids: Logical tokens through the committed source boundary.
+            device_indices: GPU slots for each registered engine group.
+            device_indices_start: Logical position of the first supplied slot.
+            cache_salt: Cache identity namespace shared with lookup.
+            writeback_range: Optional missing chunk range. Bypasses the normal
+                stored-prefix cursor without changing transport or store policy.
+
+        Returns:
+            An operation whose future covers ordinary GPU-to-L1 completion,
+            or None when this range cannot currently be submitted. CMX offload
+            remains asynchronous under the normal server policy.
+        """
         self._ensure_heartbeat_started()
 
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
         start = self.get_store_start(request_id, aligned_end)
+        if writeback_range is not None:
+            start, aligned_end = writeback_range
+            if writeback_range not in self.pending_writeback_ranges(
+                request_id, len(token_ids)
+            ):
+                return None
         if aligned_end <= start:
             return None
         lookup = LMCacheLookupOperation(
@@ -1177,6 +1263,9 @@ class UnifiedLMCacheMPConnector:
                     request_id,
                 )
             return None
+        ticket = None
+        if writeback_range is not None:
+            ticket = self._recomputed_writeback[request_id].begin(*writeback_range)
         submitted = False
         event = None
         future: MessagingFuture[Any] | _ImmediateFuture
@@ -1216,8 +1305,20 @@ class UnifiedLMCacheMPConnector:
             self._active_sessions.add(request_id)
         if event is not None:
             future.retain_reference(event)
-        self._store_submitted_tokens[request_id] = aligned_end
-        return LMCacheStoreOperation(request_id, start, aligned_end, future)
+        if ticket is None:
+            self._store_submitted_tokens[request_id] = aligned_end
+        operation = LMCacheStoreOperation(
+            request_id, start, aligned_end, future, writeback_ticket=ticket
+        )
+        if ticket is not None:
+            logger.info(
+                "KV_WRITEBACK_QUEUED id=%s request=%s range=%d:%d",
+                ticket.identity,
+                request_id,
+                start,
+                aligned_end,
+            )
+        return operation
 
     def complete_store(
         self, operation: LMCacheStoreOperation, *, synchronize: bool = True
@@ -1229,9 +1330,11 @@ class UnifiedLMCacheMPConnector:
             synchronize: Whether to reduce success across TP and PP ranks.
 
         Returns:
-            Whether the store succeeded. On failure, the next store starts no
-            later than this range, even if later stores have been submitted.
-            Repeated completion calls return the cached result.
+            Whether ordinary STORE admission succeeded. A failed normal suffix
+            rolls back its submitted cursor; a failed missing range remains
+            separately eligible without moving that cursor. Completion never
+            adds a retry loop or waits for external persistence. Repeated calls
+            return the cached result.
         """
         if operation.result is not None:
             return operation.result
@@ -1241,6 +1344,23 @@ class UnifiedLMCacheMPConnector:
         except Exception:
             logger.exception("LMCache store failed for %s", operation.request_id)
         operation.result = self._sync_success(success) if synchronize else success
+        if operation.writeback_ticket is not None:
+            ledger = self._recomputed_writeback.get(operation.request_id)
+            if ledger is not None:
+                ledger.complete(operation.writeback_ticket, bool(operation.result))
+                if not ledger.has_pending:
+                    for content, saved in list(self._writeback_backlog.items()):
+                        if saved is ledger:
+                            del self._writeback_backlog[content]
+            logger.info(
+                "KV_WRITEBACK_ACK id=%s request=%s range=%d:%d success=%s",
+                operation.writeback_ticket.identity,
+                operation.request_id,
+                operation.start,
+                operation.end,
+                operation.result,
+            )
+            return operation.result
         if (
             not operation.result
             and self._store_submitted_tokens.get(operation.request_id, 0)
@@ -1300,6 +1420,7 @@ class UnifiedLMCacheMPConnector:
     def finish_request(self, request_id: str) -> None:
         self.end_session(request_id)
         self._store_submitted_tokens.pop(request_id, None)
+        self._recomputed_writeback.pop(request_id, None)
 
     def end_all_sessions(self) -> None:
         for request_id in list(self._active_sessions):

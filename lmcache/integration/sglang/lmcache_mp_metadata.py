@@ -10,6 +10,7 @@ import torch
 
 # First Party
 from lmcache.v1.common.custom_types import RetrieveCoverage
+from lmcache.v1.common.recomputed_writeback import WritebackTicket
 
 if TYPE_CHECKING:
     # Third Party
@@ -69,6 +70,7 @@ class LMCacheStoreOperation:
     end: int
     future: Any
     result: Optional[bool] = None
+    writeback_ticket: WritebackTicket | None = None
 
     def query(self) -> bool:
         return self.result is not None or bool(self.future.query())
