@@ -66,6 +66,10 @@ class FSConnector : public ConnectorBase<WorkerFSConn> {
   // The byte budget in force, or 0 when there is no read pool.
   size_t read_budget_bytes() const;
 
+  // The block size O_DIRECT transfers must align to, or 0 when O_DIRECT
+  // is off.
+  size_t disk_block_size() const;
+
   // Dispatched directly to the read pool when one is configured, so lookups
   // and reads do not queue behind background writes on the shared workers.
   uint64_t submit_batch_get(const std::vector<std::string>& keys,

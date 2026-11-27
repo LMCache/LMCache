@@ -8,7 +8,9 @@ C++ IStorageConnector interface, so no Redis or C++ build is needed.
 
 # Standard
 from types import ModuleType
+from typing import Iterator
 import ctypes
+import logging
 import os
 import select
 import sys
@@ -43,6 +45,61 @@ from lmcache.v1.platform import consume_fd, create_event_notifier
 _MEMORY_TAGS = MemoryTags(MemorySegment.STORAGE, MemoryResidency.REMOTE)
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
+
+_FS_NATIVE_LOGGER = "lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter"
+
+
+def _install_fake_fs_client(
+    monkeypatch: pytest.MonkeyPatch, disk_block_size: int = 0
+) -> None:
+    """Make the fs_native factory build a fake client that reports
+    ``disk_block_size``."""
+
+    class _FakeFSClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            self.read_fd, self.write_fd = os.pipe()
+
+        def event_fd(self) -> int:
+            return self.read_fd
+
+        def read_budget_bytes(self) -> int:
+            """Report what the real client does with no read pool."""
+            return 0
+
+        def disk_block_size(self) -> int:
+            return disk_block_size
+
+        def close(self) -> None:
+            os.close(self.read_fd)
+            os.close(self.write_fd)
+
+    fake_module = ModuleType("lmcache.lmcache_fs")
+    monkeypatch.setattr(fake_module, "LMCacheFSClient", _FakeFSClient, raising=False)
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", fake_module)
+
+
+class _CaptureHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def fs_native_warnings() -> Iterator[list[logging.LogRecord]]:
+    """Collect WARNING records from the fs_native adapter's logger, which
+    does not propagate to pytest's caplog."""
+    handler = _CaptureHandler()
+    lg = logging.getLogger(_FS_NATIVE_LOGGER)
+    lg.addHandler(handler)
+    try:
+        yield handler.records
+    finally:
+        lg.removeHandler(handler)
+
 
 # =============================================================================
 # Mock Native Connector (simulates the pybind C++ IStorageConnector interface)
@@ -1184,26 +1241,7 @@ class TestFSNativeL2AdapterConfig:
             FSNativeL2AdapterConfig,
         )
 
-        class _FakeFSClient:
-            def __init__(self, *args, **kwargs):
-                del args, kwargs
-                self.read_fd, self.write_fd = os.pipe()
-
-            def event_fd(self) -> int:
-                return self.read_fd
-
-            def read_budget_bytes(self) -> int:
-                """Report what the real client does with no read pool."""
-                return 0
-
-            def close(self) -> None:
-                os.close(self.read_fd)
-                os.close(self.write_fd)
-
-        fake_module = ModuleType("lmcache.lmcache_fs")
-        fake_module.LMCacheFSClient = _FakeFSClient
-        monkeypatch.setitem(sys.modules, "lmcache.lmcache_fs", fake_module)
-
+        _install_fake_fs_client(monkeypatch)
         config = FSNativeL2AdapterConfig.from_dict(
             {
                 "type": "fs_native",
@@ -1214,6 +1252,86 @@ class TestFSNativeL2AdapterConfig:
         adapter = create_l2_adapter(config)
         try:
             assert adapter.report_status()["pad_buffers_to_alignment"] is use_odirect
+        finally:
+            adapter.close()
+
+    @pytest.mark.parametrize(
+        ("use_odirect", "disk_block_size", "l1_ptr", "l1_align_bytes", "warning"),
+        [
+            (True, 16384, 0, 4096, "--l1-align-bytes (4096)"),
+            (True, 1 << 20, 0, 4096, "--l1-align-bytes (4096)"),
+            (True, 1 << 20, 4096, 1 << 20, "L1 base address"),
+            (True, 4096, 0, 4096, None),
+            (True, 4096, 4096, 1 << 20, None),
+            (True, 1 << 20, 1 << 30, 1 << 20, None),
+            (False, 0, 4096, 4096, None),
+        ],
+    )
+    def test_factory_warns_when_l1_misaligned_for_odirect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fs_native_warnings: list[logging.LogRecord],
+        use_odirect: bool,
+        disk_block_size: int,
+        l1_ptr: int,
+        l1_align_bytes: int,
+        warning: str | None,
+    ) -> None:
+        """With O_DIRECT on, an L1 arena whose base address or alignment is
+        not a multiple of the connector's block size logs a warning at
+        creation; the adapter is created either way."""
+        # First Party
+        from lmcache.v1.distributed.internal_api import L1MemoryDesc
+        from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        _install_fake_fs_client(monkeypatch, disk_block_size)
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/tmp/lmcache_test",
+                "use_odirect": use_odirect,
+            }
+        )
+        desc = L1MemoryDesc(ptr=l1_ptr, size=1 << 30, align_bytes=l1_align_bytes)
+        adapter = create_l2_adapter(config, desc)
+        try:
+            messages = [r.getMessage() for r in fs_native_warnings]
+            if warning is None:
+                assert messages == []
+            else:
+                assert len(messages) == 1
+                assert warning in messages[0]
+                assert str(disk_block_size) in messages[0]
+        finally:
+            adapter.close()
+
+    def test_factory_skips_odirect_alignment_check_without_l1_desc(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fs_native_warnings: list[logging.LogRecord],
+    ) -> None:
+        """Without an L1 description there is nothing to check, so O_DIRECT
+        on logs no alignment warning."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import create_l2_adapter
+        from lmcache.v1.distributed.l2_adapters.fs_native_l2_adapter import (
+            FSNativeL2AdapterConfig,
+        )
+
+        _install_fake_fs_client(monkeypatch, 1 << 20)
+        config = FSNativeL2AdapterConfig.from_dict(
+            {
+                "type": "fs_native",
+                "base_path": "/tmp/lmcache_test",
+                "use_odirect": True,
+            }
+        )
+        adapter = create_l2_adapter(config, None)
+        try:
+            assert fs_native_warnings == []
         finally:
             adapter.close()
 

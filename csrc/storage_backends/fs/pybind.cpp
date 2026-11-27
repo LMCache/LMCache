@@ -16,5 +16,8 @@ PYBIND11_MODULE(lmcache_fs, m) {
            &lmcache::connector::FSConnector::read_budget_bytes,
            "Bytes allowed outstanding against the device; 0 when there is "
            "no read pool.")
+      .def("disk_block_size", &lmcache::connector::FSConnector::disk_block_size,
+           "Block size O_DIRECT transfers align to; 0 when O_DIRECT is "
+           "off.")
           LMCACHE_BIND_CONNECTOR_METHODS(lmcache::connector::FSConnector);
 }

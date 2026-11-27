@@ -348,6 +348,20 @@ def test_finished_reads_return_their_budget(tmp_path: Path) -> None:
         client.close()
 
 
+@pytest.mark.parametrize("use_odirect", [True, False])
+def test_disk_block_size_reports_odirect_alignment_unit(
+    tmp_path: Path, use_odirect: bool
+) -> None:
+    """With O_DIRECT on, the client reports the filesystem block size it
+    aligns transfers to; with O_DIRECT off it reports 0."""
+    client = LMCacheFSClient(str(tmp_path), 1, "", use_odirect, 0, 0, 0)
+    try:
+        expected = os.statvfs(tmp_path).f_bsize if use_odirect else 0
+        assert client.disk_block_size() == expected
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("num_read_workers", [0, 4])
 def test_lookup_error_fails_batch_while_read_error_zeroes_key(
     tmp_path: Path, num_read_workers: int

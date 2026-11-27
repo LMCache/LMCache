@@ -109,9 +109,11 @@ FSConnector::FSConnector(std::string base_path, int num_workers,
   // Query disk block size for O_DIRECT
   if (use_odirect_) {
     struct statvfs st;
-    if (statvfs(base_path_.c_str(), &st) == 0) {
-      disk_block_size_ = st.f_bsize;
+    if (statvfs(base_path_.c_str(), &st) != 0) {
+      throw std::runtime_error("statvfs failed for " + base_path_ + ": " +
+                               std::string(strerror(errno)));
     }
+    disk_block_size_ = st.f_bsize;
   }
 
   // Readers first.  On failure join whatever started: the destructor does
@@ -264,6 +266,8 @@ DeleteResult FSConnector::do_single_delete_result(WorkerFSConn& conn,
 size_t FSConnector::read_budget_bytes() const {
   return read_max_bytes_in_flight_;
 }
+
+size_t FSConnector::disk_block_size() const { return disk_block_size_; }
 
 uint64_t FSConnector::submit_batch_get(const std::vector<std::string>& keys,
                                        const std::vector<void*>& bufs,
