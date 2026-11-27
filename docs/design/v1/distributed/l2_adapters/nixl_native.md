@@ -203,6 +203,32 @@ NIXL 1.3 exposes no object-deletion operation. The strategy reports deletion
 as unsupported, its delete entry point returns a clear error, status contains
 `supports_delete: false`, and Python configuration rejects OBJECT eviction.
 
+### Multiple endpoints
+
+The OBJ backend accepts an adapter-level `endpoints` list, for example
+`"endpoints": ["http://10.0.0.1:9020", "http://10.0.0.2:9020"]`. Entries are
+forwarded verbatim and take the same forms as `endpoint_override`: NIXL hands
+the value to the AWS SDK, which uses a full URL as is and prefixes a bare
+`host:port` with `backend_params.scheme` (default `https`). The adapter turns
+the list into one `{"endpoint_override": <entry>}` map per entry and passes it
+to the connector as `worker_backend_params`. The connector is generic: worker `i`
+merges `worker_backend_params[i % n]` over the shared `backend_params` and
+never interprets the keys. `endpoints` and `backend_params.endpoint_override`
+are mutually exclusive, so a plain `endpoint_override` keeps its original NIXL
+meaning (commas and empty values are forwarded untouched).
+
+Config validation rejects `endpoints` for non-OBJ backends, empty or blank
+entries, and more entries than `num_workers` (an endpoint with no worker would
+be silently unused). When `num_workers` is not a multiple of the list length
+the split is uneven (3 workers over 2 endpoints is 2/1).
+
+This is static load spreading, **not high availability**. Workers stay pinned
+to their endpoint for the life of the connector and any worker can serve any
+request, so with one of `n` endpoints down about `1/n` of operations fail until
+it returns. HA belongs in the service behind the endpoints. All endpoints must
+serve the same bucket, because object keys are deterministic and any worker
+may load an object another worker stored.
+
 ## Persistent identity
 
 The native wire key is:

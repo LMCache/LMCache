@@ -233,6 +233,53 @@ def _client_round_trip(
     assert list(results) == [True] * len(keys)
 
 
+def _make_client_with_worker_params(
+    arena: torch.Tensor,
+    base_path: Path,
+    worker_backend_params: list[dict[str, str]],
+    num_workers: int,
+) -> Any:
+    """Create a native client with per-worker backend parameter overrides."""
+    return load_nixl_client_class()(
+        backend="POSIX",
+        backend_params={"file_path": str(base_path)},
+        num_workers=num_workers,
+        l1_base=arena.data_ptr(),
+        l1_size=arena.numel(),
+        l1_alignment=_ALIGNMENT,
+        worker_backend_params=worker_backend_params,
+    )
+
+
+@requires_nixl_integration
+@requires_nixl_extension
+def test_worker_backend_params_apply_per_worker(tmp_path: Path) -> None:
+    """Worker i receives worker_backend_params[i % n], replacing shared params.
+
+    The POSIX strategy creates its ``file_path`` directory when a worker is
+    built, so per-worker ``file_path`` overrides stand in for per-worker
+    endpoints: only directories of overrides that were assigned to a worker
+    exist afterwards, and the shared value is never used.
+    """
+    _, arena = _aligned_arena(_CHUNK_SIZE)
+    shared, first, second, unused = (
+        tmp_path / name for name in ("shared", "first", "second", "unused")
+    )
+
+    client = _make_client_with_worker_params(
+        arena,
+        shared,
+        [{"file_path": str(p)} for p in (first, second, unused)],
+        num_workers=2,
+    )
+    client.close()
+
+    assert first.is_dir()
+    assert second.is_dir()
+    assert not unused.exists()
+    assert not shared.exists()
+
+
 @requires_nixl_integration
 @requires_nixl_extension
 def test_posix_public_batch_round_trip_persistence_and_delete(

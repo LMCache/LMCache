@@ -86,6 +86,12 @@ Configuration reference
      - ``{}``
      - String-to-string map passed to NIXL. A ``FILE_SEG`` backend also requires
        ``file_path`` and accepts ``use_direct_io`` and ``shard_dirs``.
+   * - ``endpoints``
+     - unset
+     - ``OBJ`` only. List of object-store frontends; worker ``i`` uses entry
+       ``i % len(endpoints)`` as its ``endpoint_override``. Mutually exclusive
+       with ``backend_params.endpoint_override`` and limited to ``num_workers``
+       entries. See :ref:`nixl-native-multi-endpoint`.
    * - ``num_workers``
      - ``4``
      - Positive worker count. Each worker owns one NIXL agent, backend handle,
@@ -219,6 +225,44 @@ configuration can be displayed by operational tooling.
          },
          "num_workers": 4
        }'
+
+.. _nixl-native-multi-endpoint:
+
+Multiple object-store endpoints
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+To spread workers over several frontends of one object store without a
+separate load balancer, replace ``endpoint_override`` with ``endpoints``:
+
+.. code-block:: json
+
+   {
+     "type": "nixl_native",
+     "backend": "OBJ",
+     "backend_params": {"bucket": "example-lmcache-bucket", "scheme": "http"},
+     "endpoints": ["10.0.0.1:9020", "10.0.0.2:9020"],
+     "num_workers": 4
+   }
+
+Each entry is used as that worker's ``endpoint_override`` and accepts the same
+forms: ``host:port`` takes its scheme from ``backend_params.scheme`` (default
+``https``), and a full URL such as ``http://10.0.0.1:9020`` sets its own scheme.
+Worker ``i`` connects to ``endpoints[i % 2]``, so workers 0 and 2 use the first
+endpoint and workers 1 and 3 the second. All endpoints must serve the same
+bucket, because any worker may read an object another worker wrote. Startup
+rejects an empty list, blank entries, more endpoints than ``num_workers``, and
+combining ``endpoints`` with ``backend_params.endpoint_override``. If
+``num_workers`` is not a multiple of the number of endpoints, the split is
+uneven (for example 2 and 1 for 3 workers over 2 endpoints).
+
+.. warning::
+
+   This is load spreading, **not high availability**. Each worker stays on its
+   endpoint for the life of the server and any worker can serve any request.
+   If one of ``n`` endpoints goes down, about ``1/n`` of stores and loads fail
+   until it is back; there is no failover. Provide HA in the object-store
+   service itself (for example a load balancer or virtual IP) and use a single
+   ``endpoint_override`` to point at it.
 
 The tested NIXL 1.3 OBJ parameters are ``bucket``, ``endpoint_override``,
 ``scheme``, ``region``, ``use_virtual_addressing``, ``req_checksum``, and

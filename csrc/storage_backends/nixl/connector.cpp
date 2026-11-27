@@ -108,7 +108,9 @@ WorkerNixlContext::~WorkerNixlContext() {
 NixlConnector::NixlConnector(
     std::string backend,
     std::unordered_map<std::string, std::string> backend_params,
-    int num_workers, uintptr_t l1_base, size_t l1_size, size_t l1_alignment)
+    int num_workers, uintptr_t l1_base, size_t l1_size, size_t l1_alignment,
+    std::vector<std::unordered_map<std::string, std::string>>
+        worker_backend_params)
     : ConnectorBase(num_workers),
       l1_base_(l1_base),
       l1_size_(l1_size),
@@ -132,9 +134,18 @@ NixlConnector::NixlConnector(
 
   contexts_.reserve(static_cast<size_t>(num_workers));
   for (int worker = 0; worker < num_workers; ++worker) {
+    auto worker_params = backend_params;
+    if (!worker_backend_params.empty()) {
+      const auto& overrides =
+          worker_backend_params[static_cast<size_t>(worker) %
+                                worker_backend_params.size()];
+      for (const auto& [key, value] : overrides) {
+        worker_params[key] = value;
+      }
+    }
     std::unique_ptr<WorkerNixlContext> context =
         std::make_unique<WorkerNixlContext>(make_agent_name(), backend,
-                                            backend_params, l1_base_, l1_size_);
+                                            worker_params, l1_base_, l1_size_);
     if (contexts_.empty()) {
       storage_type_ = nixl_storage_kind_name(context->storage_kind);
       storage_capabilities_ = context->storage->capabilities();
