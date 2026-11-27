@@ -1,0 +1,5 @@
+# Metrics disabled, webhook+cert-manager enabled.
+# Verifies the metrics Service, metrics RBAC, and --metrics-bind-address
+# arg are omitted while the webhook stack remains.
+metrics:
+  enabled: false

@@ -1,0 +1,46 @@
+name: "Helm Chart: CI"
+
+on:
+  push:
+    branches:
+      - dev
+      - "release-**"
+    paths:
+      - "charts/**"
+      - "operator/config/crd/bases/**"
+      - ".github/workflows/helm_ci.yml"
+  pull_request:
+    branches:
+      - dev
+      - "release-**"
+    paths:
+      - "charts/**"
+      - "operator/config/crd/bases/**"
+      - ".github/workflows/helm_ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint and template tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: helm lint
+        run: helm lint charts/operator
+
+      - name: Template rendering tests
+        run: bash charts/operator/tests/test.sh

@@ -1,0 +1,3 @@
+# CRD installation disabled — operator deploys without installing CRDs.
+# Use when CRDs are managed separately (e.g. via a dedicated CRD chart).
+crdInstall: false
