@@ -62,6 +62,103 @@ The options are:
      - Maximum number of finished requests selected each time the threshold is
        met.
 
+Running on DGX Spark
+--------------------
+
+This single-node example follows the :doc:`vLLM MP quickstart </getting_started/quickstart>`.
+On GB10 the engine KV pool and the daemon's host L1 share physical DRAM.
+Use lazy offload when requests usually return to the same worker and
+you want to avoid copying hot prefixes into L1 before they are needed.
+When a deferred store runs, it still copies KV into daemon-owned memory.
+An eager store makes the prefix available to other workers sooner.
+
+Start with an empty standalone LMCache server in one terminal:
+
+.. code-block:: bash
+
+   lmcache server --host 127.0.0.1 --port 18555 --http-host 127.0.0.1 --http-port 18808 \
+       --supported-transfer-mode lmcache_driven --chunk-size 256 \
+       --l1-size-gb 12 --no-l1-use-lazy --eviction-policy LRU
+
+In a second terminal, start vLLM with the LMCache-shipped connector:
+
+.. code-block:: bash
+
+   vllm serve Qwen/Qwen3-8B --host 127.0.0.1 --port 8000 \
+       --dtype bfloat16 --tensor-parallel-size 1 --enable-prefix-caching \
+       --block-size 16 --kv-cache-memory-bytes 6442450944 --max-model-len 16512 \
+       --max-num-seqs 8 --max-num-batched-tokens 4096 --enforce-eager \
+       --gpu-memory-utilization 0.5 --shutdown-timeout 30 \
+       --kv-transfer-config '{
+         "kv_connector": "LMCacheMPConnector",
+         "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
+         "kv_role": "kv_both",
+         "kv_connector_extra_config": {
+           "lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 18555,
+           "lmcache.mp.lazy_offload": true,
+           "lmcache.mp.lazy_offload_max_deferral_seconds": 60
+         }
+       }'
+
+The example caps engine KV at 6 GiB and preallocates a 12 GiB L1 arena.
+Those sizes illustrate the tested configuration. Deferred stores reduce
+live L1 payload under low pressure; the daemon still reserves its arena.
+The 60-second deadline is optional. Omitting it uses the eviction-aware
+policy's default of zero, which allows deferral until eviction pressure.
+
+Once the engine is healthy, use a third terminal to seed and replay an
+identical 4,096-token prompt. The short trigger uses different token IDs.
+
+.. code-block:: bash
+
+   request() {
+       python3 - "$1" <<'PYTHON'
+   import json
+   import sys
+   from urllib.request import Request, urlopen
+
+   prompt = list(range(1000, 5096)) if sys.argv[1] == "target" else [42] * 16
+   body = dict(model="Qwen/Qwen3-8B", prompt=prompt, max_tokens=4, temperature=0,
+               kv_transfer_params={"cached_token_stats": True})
+   req = Request("http://127.0.0.1:8000/v1/completions",
+                 data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+   with urlopen(req, timeout=180) as response:
+       print(json.load(response)["kv_transfer_params"]["cached_token_stats"])
+   PYTHON
+   }
+   request target
+   request target
+   curl -fsS http://127.0.0.1:18808/status
+
+In this isolated run, check for a cold seed followed by native cached
+tokens on the replay. Inspect the daemon's L1 object and staging counts in
+``storage_manager.l1_managers`` under ``/status``. For an eager control,
+restart both services with empty caches, changing only
+``lmcache.mp.lazy_offload`` to ``false``, and repeat the two requests.
+
+**Planned restart.** In the lazy run, leave both services alive, wait past
+the configured deadline, then send a token-producing request:
+
+.. code-block:: bash
+
+   sleep 62
+   request trigger
+   curl -fsS http://127.0.0.1:18808/status
+
+Idle time alone does not flush buffered stores. A subsequent scheduler
+step can submit the overdue work. In this single-prefix example, look
+for 16 completed 256-token L1 objects and zero staging objects before
+stopping vLLM. The short trigger is smaller than one chunk. In shared
+serving, aggregate counts can include unrelated requests; verify the
+target's publication before relying on a warm handoff. Restart only
+vLLM with the same command and run ``request target`` again. Check for
+zero native hits and 4,096 external cached tokens if all chunks survived.
+An engine exit before publication can leave the surviving daemon empty.
+
+See the `UMA accounting RFC <https://github.com/LMCache/LMCache/issues/6206>`_
+and the separate `zero-copy STORE prototype <https://github.com/LMCache/LMCache/pull/6985>`_.
+The stock recipe works independently of the prototype.
+
 How It Works
 ------------
 
