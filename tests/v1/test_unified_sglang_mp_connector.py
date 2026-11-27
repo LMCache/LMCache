@@ -39,7 +39,11 @@ import lmcache.lmcache_native as lmcache_native
 
 @contextmanager
 def _store_connector(
-    rank: int = 0, parallel_axis: str = "single"
+    rank: int = 0,
+    parallel_axis: str = "single",
+    *,
+    revision: str | None = None,
+    client: Mock | None = None,
 ) -> Iterator[tuple[UnifiedLMCacheMPConnector, Mock, Mock]]:
     """Construct a connector with mocked transfer and heartbeat dependencies."""
     adapter = Mock()
@@ -54,7 +58,8 @@ def _store_connector(
     vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
     config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
     config.get_extra_config_value = lambda _key, default: default
-    client = Mock()
+    if client is None:
+        client = Mock()
     client.get_chunk_size.return_value.result.return_value = 8
     transfer = Mock()
     transfer.submit_store.return_value.query.return_value = True
@@ -81,7 +86,7 @@ def _store_connector(
     ):
         connector = UnifiedLMCacheMPConnector(
             config_file=None,
-            model_config=SimpleNamespace(model_path="test-model"),
+            model_config=SimpleNamespace(model_path="test-model", revision=revision),
             tp_size=2 if parallel_axis == "tp" else 1,
             tp_rank=rank if parallel_axis == "tp" else 0,
             tp_group=dist.group.WORLD if parallel_axis == "tp" else None,
@@ -235,6 +240,7 @@ def _new_connector() -> UnifiedLMCacheMPConnector:
     connector._needs_store_progress_reset = False
     connector._transfer_ctx_lock = threading.Lock()
     connector._closed = False
+    connector._model_revision = None
     connector.tp_size = 1
     connector.pp_size = 1
     connector.tp_group = None
@@ -299,7 +305,7 @@ class TestUnifiedLMCacheMPConnector(unittest.TestCase):
         ):
             connector = UnifiedLMCacheMPConnector(
                 config_file=None,
-                model_config=SimpleNamespace(model_path="test-model"),
+                model_config=SimpleNamespace(model_path="test-model", revision=None),
                 tp_size=1,
                 tp_rank=0,
                 tp_group=None,
@@ -1552,3 +1558,52 @@ class TestSGLangRecovery:
             nprocs=2,
             join=True,
         )
+
+
+class TestSGLangModelRevision(unittest.TestCase):
+    """Exercise revision isolation through public cache operations."""
+
+    def test_model_revision_partitions_cache_objects(self) -> None:
+        """Lookup and store agree on the namespace of each model revision."""
+        tokens = list(range(8))
+        revisions = ("a" * 40, "b" * 40)
+        identities = set()
+        for revision in (*revisions, None):
+            with self.subTest(revision=revision):
+                client = Mock()
+                with _store_connector(revision=revision, client=client) as (
+                    connector,
+                    transfer,
+                    _,
+                ):
+                    connector.submit_lookup(
+                        "lookup", tokens, local_hit_tokens=4, cache_salt="tenant"
+                    )
+                    connector.submit_store(
+                        "store",
+                        tokens,
+                        torch.arange(4, 12),
+                        device_indices_start=0,
+                        cache_salt="tenant",
+                    )
+
+                lookup_key = client.lookup.call_args.args[0]
+                store_key = transfer.submit_store.call_args.args[1]
+                self.assertEqual(
+                    lookup_key.request_configs["lmcache.hint.engine_computed_tokens"], 4
+                )
+                lookup_objects = ipc_key_to_object_keys(
+                    lookup_key, [b"\xab" * 32], [0], DEFAULT_SHARD_REPLICATION_DESC
+                )
+                store_objects = ipc_key_to_object_keys(
+                    store_key, [b"\xab" * 32], [0], DEFAULT_SHARD_REPLICATION_DESC
+                )
+                lookup_identity = lookup_objects[0][0].identity
+                self.assertEqual(lookup_identity, store_objects[0][0].identity)
+                self.assertEqual(
+                    dict(lookup_identity.tags),
+                    {"revision": revision} if revision is not None else {},
+                )
+                identities.add(lookup_identity)
+
+        self.assertEqual(len(identities), 3)

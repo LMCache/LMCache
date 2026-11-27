@@ -30,6 +30,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     SGLangKVComponentGroup,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 
 if TYPE_CHECKING:
     # First Party
@@ -247,6 +248,7 @@ class UnifiedLMCacheMPConnector:
         )
 
         self.model_name = model_config.model_path
+        self._model_revision: str | None = model_config.revision
         (
             self.tp_size,
             self.tp_rank,
@@ -656,10 +658,12 @@ class UnifiedLMCacheMPConnector:
         end: int,
         worker_id: Optional[int],
         request_configs: Optional[dict[str, Any]] = None,
-    ) -> Any:
-        # First Party
-        from lmcache.v1.common.custom_types import IPCCacheServerKey
-
+    ) -> IPCCacheServerKey:
+        if self._model_revision:
+            request_configs = {
+                **(request_configs or {}),
+                "lmcache.tag.revision": self._model_revision,
+            }
         return IPCCacheServerKey.from_token_ids(
             model_name=self.model_name,
             world_size=self.kv_world_size,
