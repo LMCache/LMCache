@@ -14,11 +14,18 @@ function dashboard(respond = () => new Response('{}')) {
     function element() {
         return {
             value: '', dataset: {}, checked: false, disabled: false,
-            textContent: '', innerHTML: '', children: [], listeners: {},
+            textContent: '', children: [], listeners: {},
+            get innerHTML() { return this.html || ''; },
+            set innerHTML(value) { this.html = value; this.children = []; },
             classList: {add() {}, remove() {}},
             addEventListener(event, callback) { this.listeners[event] = callback; },
             appendChild(child) {
                 this.children.push(child);
+                if (child.nodeType === 3) {
+                    this.html = (this.html || '') + child.textContent
+                        .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+                    return;
+                }
                 for (const match of child.innerHTML.matchAll(/class="[^"]*(edit-node|delete-node)[^"]*" data-name="([^"]+)"/g)) {
                     const button = element();
                     button.kind = match[1];
@@ -34,6 +41,7 @@ function dashboard(respond = () => new Response('{}')) {
             return elements.get(id);
         },
         createElement: element,
+        createTextNode: text => ({nodeType: 3, textContent: String(text)}),
         addEventListener() {},
         querySelector() { return {id: 'metrics'}; },
         querySelectorAll(selector) {
