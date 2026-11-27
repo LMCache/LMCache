@@ -169,7 +169,8 @@ def _fold_shard_replication_desc(
     )
     if not any(r > 1 for r in replicas):
         return ShardReplicationDesc()
-    # DCP is deployment-wide: every replicated kernel group carries it.
+    # One DCP-sharded kernel group makes the object differ per token shard,
+    # so the object takes the largest shard count among its kernel groups.
     return ShardReplicationDesc(
         group_tp_replicas=replicas,
         group_dcp_shards=tuple(

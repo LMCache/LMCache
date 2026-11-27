@@ -19,6 +19,7 @@ from lmcache.v1.common.group_view import (
     EXCLUDED_ENGINE_GROUP,
     expand_engine_block_ids,
     get_engine_group_indices,
+    is_kv_writer,
     num_engine_groups,
 )
 import lmcache.lmcache_native as lmcache_native
@@ -885,6 +886,90 @@ def test_conversion_partial_tp_sharding_is_not_replicated():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(1, 1)]
+
+
+@dataclass
+class ReplicatedSlidingWindowSpec(SlidingWindowSpec):
+    """Sliding-window spec that every TP rank holds in full
+    (``max_tp_shards == 1``), with vLLM's ``dcp_sharded`` flag: ``False`` for
+    a cache DCP does not split, e.g. a draft model run without DCP."""
+
+    max_tp_shards: "int | None" = 1
+    dcp_sharded: bool = True
+
+
+@pytest.mark.parametrize("dcp_size", [4, 8])
+def test_conversion_replicated_group_not_dcp_sharded_is_one_shard(dcp_size: int):
+    """A TP-replicated group that DCP does not shard holds the same whole
+    block on every rank, so it is stored once per TP group (``dcp_shards``
+    1) and its block span is not scaled. A DCP-sharded replicated group next
+    to it keeps ``dcp_size`` shards."""
+    infos = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["mla.0"], MLAAttentionSpec(block_size=16, max_tp_shards=1)
+                ),
+                MockKVCacheGroup(
+                    ["draft.0"],
+                    ReplicatedSlidingWindowSpec(
+                        block_size=16, sliding_window=32, dcp_sharded=False
+                    ),
+                ),
+                MockKVCacheGroup(
+                    ["swa.0"],
+                    ReplicatedSlidingWindowSpec(block_size=16, sliding_window=32),
+                ),
+            ]
+        ),
+        _same_shape_caches(["mla.0", "draft.0", "swa.0"]),
+        dcp_size=dcp_size,
+        kv_tp_size=8,
+    )
+
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [
+        (8, dcp_size),
+        (8, 1),
+        (8, dcp_size),
+    ]
+    assert [group.tokens_per_block for group in infos] == [
+        16 * dcp_size,
+        16,
+        16 * dcp_size,
+    ]
+    # Only the first rank of the TP group writes the unsharded group.
+    assert [is_kv_writer([infos[1]], rank) for rank in range(8)] == [True] + [False] * 7
+
+
+def test_conversion_manager_config_group_not_dcp_sharded_is_one_shard() -> None:
+    """Same rule for vLLM's ``KVCacheGroup`` (the flag lives on the group)."""
+    groups = [
+        KVCacheGroup(
+            {"mla.0": MLAAttentionSpec(16, max_tp_shards=1)},
+            FullAttentionManager,
+            16,
+        ),
+        KVCacheGroup(
+            {"draft.0": MLAAttentionSpec(16, max_tp_shards=1)},
+            SlidingWindowManager,
+            16,
+            SimpleNamespace(sliding_window=32),
+            dcp_sharded=False,
+        ),
+    ]
+
+    infos = create_engine_group_infos_from_vllm(
+        SimpleNamespace(kv_cache_groups=groups),
+        _same_shape_caches(["mla.0", "draft.0"]),
+        dcp_size=8,
+        kv_tp_size=8,
+    )
+
+    assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [
+        (8, 8),
+        (8, 1),
+    ]
+    assert [group.tokens_per_block for group in infos] == [128, 16]
 
 
 def test_conversion_pure_mla_model_replicates_every_group():

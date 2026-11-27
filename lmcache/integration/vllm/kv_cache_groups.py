@@ -89,11 +89,20 @@ def is_per_request_state_spec(spec: Any) -> bool:
     )
 
 
+def _is_dcp_sharded_spec(spec: Any) -> bool:
+    """Return whether decode context parallelism splits the spec's tokens
+    across ranks: an attention spec, unless vLLM marks it
+    ``dcp_sharded=False``. Older vLLM has no such field and shards every
+    attention spec."""
+    return _is_attention_spec(spec) and getattr(spec, "dcp_sharded", True)
+
+
 def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     """Global tokens covered by one block id of ``kv_cache_spec``.
 
     Attention blocks span ``block_size * dcp_size`` tokens under DCP
-    (vLLM's ``resolve_kv_cache_block_sizes`` rule); recurrent state is
+    (vLLM's ``resolve_kv_cache_block_sizes`` rule) unless ``dcp_sharded`` is
+    False (e.g. a replicated draft cache); recurrent state is
     replicated, not sharded, and stays at ``block_size``. Scratch specs
     (see :func:`is_scratch_spec`) cover no tokens and yield ``0``.
     """
@@ -102,7 +111,7 @@ def get_tokens_per_block(kv_cache_spec: Any, dcp_size: int) -> int:
     block_size = kv_cache_spec.block_size
     if dcp_size <= 1:
         return block_size
-    if _is_attention_spec(kv_cache_spec):
+    if _is_dcp_sharded_spec(kv_cache_spec):
         return block_size * dcp_size
     return block_size
 
@@ -470,6 +479,36 @@ def _resolve_per_layer_tp_replicated(
     return per_layer_tp_replicated
 
 
+def _resolve_per_layer_dcp_sharded(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list[bool]:
+    """Resolve whether decode context parallelism splits each registered KV
+    tensor's tokens across ranks. Uses the rule of
+    :func:`tokens_per_group_block`: an attention group is sharded unless vLLM
+    marks it ``dcp_sharded=False`` (e.g. a draft model's cache, which every
+    rank holds in full).
+
+    Args:
+        vllm_groups: vLLM KV cache groups.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers``, ``True`` for DCP-sharded layers.
+    """
+    per_layer_dcp_sharded = [False] * num_layers
+    for group in vllm_groups:
+        if _manager_config(group) is not None:
+            group_sharded = bool(group.dcp_sharded)
+        else:
+            group_sharded = _is_dcp_sharded_spec(group.kv_cache_spec)
+        for name in group_layer_specs(group):
+            per_layer_dcp_sharded[layer_to_idx[name]] = group_sharded
+    return per_layer_dcp_sharded
+
+
 def _merge_layer_recurrent(per_layer_recurrent: list[bool], indices: list[int]) -> bool:
     """Merge the per-layer recurrent-state flags of one LMCache group.
 
@@ -550,7 +589,9 @@ def create_engine_group_infos_from_vllm(
             group vLLM replicates on every TP rank (``max_tp_shards == 1``, or
             an MLA spec that leaves it unset) is tagged
             ``EngineGroupInfo.tp_replicas = kv_tp_size`` and
-            ``dcp_shards = dcp_size``; every other group stays ``(1, 1)``.
+            ``dcp_shards = dcp_size``, or ``dcp_shards = 1`` when vLLM does
+            not shard the group under DCP (``dcp_sharded=False``: every rank
+            holds the whole group); every other group stays ``(1, 1)``.
 
     Note:
         Under DCP each attention group's ``tokens_per_block`` is scaled by
@@ -617,6 +658,7 @@ def create_engine_group_infos_from_vllm(
     per_layer_sw_size = [-1] * num_layers
     per_layer_recurrent = [False] * num_layers
     per_layer_tp_replicated = [False] * num_layers
+    per_layer_dcp_sharded = [False] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -638,6 +680,9 @@ def create_engine_group_infos_from_vllm(
             vllm_groups, layer_to_idx, num_layers
         )
         per_layer_tp_replicated = _resolve_per_layer_tp_replicated(
+            vllm_groups, layer_to_idx, num_layers
+        )
+        per_layer_dcp_sharded = _resolve_per_layer_dcp_sharded(
             vllm_groups, layer_to_idx, num_layers
         )
 
@@ -680,6 +725,9 @@ def create_engine_group_infos_from_vllm(
         # A group's object is stored once per TP group only if every layer in
         # it is replicated: one sharded layer makes the object differ per rank.
         replicated = all(per_layer_tp_replicated[idx] for idx in indices)
+        # DCP splits a replicated group's tokens across its replicas, unless
+        # vLLM keeps the group whole on every rank (``dcp_sharded=False``).
+        dcp_sharded = any(per_layer_dcp_sharded[idx] for idx in indices)
         infos.append(
             EngineGroupInfo(
                 engine_group_id=identity.engine_group_idx,
@@ -693,8 +741,7 @@ def create_engine_group_infos_from_vllm(
                 extra_object_group_tag=aux_group_tags.get(identity.engine_group_idx, 0),
                 recurrent_state=_merge_layer_recurrent(per_layer_recurrent, indices),
                 tp_replicas=kv_tp_size if replicated else 1,
-                # DCP splits a replicated group's tokens across its replicas.
-                dcp_shards=dcp_size if replicated else 1,
+                dcp_shards=dcp_size if replicated and dcp_sharded else 1,
             )
         )
     return infos

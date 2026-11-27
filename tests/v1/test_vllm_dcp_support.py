@@ -134,6 +134,20 @@ def test_attention_group_scaled_by_dcp(dcp_size: int):
     assert get_tokens_per_block(spec, dcp_size) == 1024 * dcp_size
 
 
+@dataclass
+class SlidingWindowSpec(AttentionSpec):
+    """Double for a sliding-window spec carrying vLLM's ``dcp_sharded`` flag."""
+
+    dcp_sharded: bool = True
+
+
+def test_attention_group_not_dcp_sharded_is_not_scaled():
+    """A replicated attention cache (e.g. a draft model run without DCP under
+    a DCP target) keeps one block = block_size tokens on every rank."""
+    assert get_tokens_per_block(SlidingWindowSpec(1152, dcp_sharded=False), 8) == 1152
+    assert get_tokens_per_block(SlidingWindowSpec(1152, dcp_sharded=True), 8) == 9216
+
+
 def test_mamba_group_never_scaled():
     """Recurrent state is replicated per rank, so its span is unchanged."""
     spec = _FakeMambaSpec(block_size=1024)
