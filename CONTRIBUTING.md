@@ -19,6 +19,18 @@ To become a committer, you should:
 
 ========
 
+## How Contributors Are Credited
+
+Every contributor is listed by GitHub handle in [CONTRIBUTORS.md](CONTRIBUTORS.md)
+and in the release notes for each release that includes their work.
+
+LMCache does not list your employer or other affiliation unless you ask it to.
+To choose the name and affiliation shown for you, add a row to
+[ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md) in a pull request from your own
+GitHub account. You can change or remove your row at any time.
+
+========
+
 ## Basics of LMCache dev
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
