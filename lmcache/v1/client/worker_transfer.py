@@ -327,6 +327,7 @@ class TransferContext(ABC):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        cache_format: str = "",
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -348,6 +349,8 @@ class TransferContext(ABC):
                 worker's own groups, which is wrong when a pipeline stage does
                 not hold the group with the largest block. Adapters that know
                 the chunk size should pass it.
+            cache_format: Configured KV precision identity; empty selects
+                the legacy layout namespace. Independent of layout hints.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -379,6 +382,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        cache_format: str = "",
     ) -> None:
         """Register the paged Q ring with the server under the same worker
         instance ID but different model_name (model_name##query).
@@ -391,6 +395,8 @@ class TransferContext(ABC):
             mq_timeout: Timeout in seconds for synchronous request wait.
             layout_hints: Optional inference-engine-provided layout hints.
             engine_group_infos: LMCache-owned engine KV cache group metadata.
+            cache_format: Precision identity shared with KV registration;
+                empty selects the legacy layout namespace.
 
         Raises:
             NotImplementedError: If the concrete transport does not support the
@@ -584,6 +590,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        cache_format: str = "",
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -598,6 +605,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             engine_type: Serving engine that produced the caches.
             lmcache_chunk_tokens: Effective logical tokens per LMCache chunk,
                 or ``None`` to use the server default.
+            cache_format: Configured KV precision identity; empty selects
+                the legacy layout namespace.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device,
@@ -626,6 +635,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                     list(engine_group_infos),
                     None,
                     lmcache_chunk_tokens,
+                    cache_format,
                 )
             )
             future.result(timeout=mq_timeout)
@@ -674,6 +684,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         mq_timeout: float,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
+        cache_format: str = "",
     ) -> None:
         wrappers = wrap_kv_caches(q_caches)
         with kv_wrapper_fds_delivered(wrappers, self._fd_channel_path, mq_timeout):
@@ -686,6 +697,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                 layout_hints or {},
                 list(engine_group_infos),
                 self._chunk_size,
+                cache_format,
             )
             future.result(timeout=mq_timeout)
 
@@ -920,11 +932,14 @@ class EngineDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        cache_format: str = "",
     ) -> None:
         """Register KV caches with the engine-driven context server.
 
         ``engine_type`` selects the KV layout normalization used during
         registration and subsequent gather/scatter operations.
+        ``cache_format`` selects the configured precision namespace separately
+        from layout hints; an empty string selects legacy layouts.
 
         With multiple ``engine_group_infos`` or a single compressed group, the layers
         are partitioned by :class:`KVLayerGroupsManager` and each group is
@@ -1097,6 +1112,7 @@ class EngineDrivenTransferContext(TransferContext):
                     chunk_size=chunk_tokens,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
+                    cache_format=cache_format,
                 )
             )
         )

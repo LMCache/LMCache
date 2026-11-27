@@ -18,6 +18,7 @@ message RegisterKvCacheRequest {
   repeated EngineGroupInfo engine_group_infos = 7;
   optional KVEventProfile event_profile = 8;
   optional int64 chunk_size = 9;
+  string cache_format = 10;
 }
 
 message RegisterKvCacheResponse {

@@ -1310,6 +1310,7 @@ class LMCacheMPWorkerAdapter:
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
         extra_config: dict[str, Any] | None = None,
         required_chunk_alignment: int | None = None,
+        cache_format: str = "",
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -1332,6 +1333,8 @@ class LMCacheMPWorkerAdapter:
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
             required_chunk_alignment: Optional model-derived chunk alignment
                 used to resolve the client effective chunk size.
+            cache_format: Configured KV precision identity used by every
+                registration, including recovery. Empty selects legacy layouts.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1413,6 +1416,7 @@ class LMCacheMPWorkerAdapter:
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._layout_hints: "LayoutHints | None" = None
+        self.cache_format = cache_format
         self.engine_group_infos: list[EngineGroupInfo] = []
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -1724,6 +1728,7 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
+                cache_format=self.cache_format,
             )
         except TimeoutError:
             # Never published, so there is nothing to roll back: close the

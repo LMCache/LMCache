@@ -76,12 +76,15 @@ class PrefetchService:
             Unavailable: no layout registered for the model (not on this node).
         """
         _check_direction(source_tier, target_tier)
+        cache_format = (tags or {}).get("kv_format", "")
         group_layout_descs, attn_desc, shard_replication_desc = self._registered_descs(
-            model_name, world_size
+            model_name, world_size, cache_format
         )
         registry = self._engine.context.layout_desc_registry
         try:
-            token_hasher = registry.get_token_hasher(model_name, world_size)
+            token_hasher = registry.get_token_hasher(
+                model_name, world_size, cache_format
+            )
             key_groups, chunks = resolve_grouped_object_keys(
                 token_hasher,
                 model_name,
@@ -131,8 +134,9 @@ class PrefetchService:
             chunks_to_warm = named_chunks_of_keys(keys)
         except ValueError as exc:
             raise InvalidRequest(str(exc)) from None
+        cache_format = (chunks_to_warm.tags or {}).get("kv_format", "")
         group_layout_descs, attn_desc, shard_replication_desc = self._registered_descs(
-            chunks_to_warm.model_name, chunks_to_warm.world_size
+            chunks_to_warm.model_name, chunks_to_warm.world_size, cache_format
         )
         try:
             key_groups = resolve_grouped_chunk_keys(
@@ -181,7 +185,7 @@ class PrefetchService:
         return {"request_id": request_id, "status": status.state}
 
     def _registered_descs(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> tuple[dict[int, MemoryLayoutDesc], AttnWindowDesc, ShardReplicationDesc]:
         """Read the layouts, attention windows and shard replication the model
         registered on this node.
@@ -196,16 +200,19 @@ class PrefetchService:
         # --separate-object-groups and report success.
         unregistered = Unavailable(
             f"no layout registered for model_name={model_name!r} "
-            f"world_size={world_size}; the model has not allocated "
+            f"world_size={world_size} cache_format={cache_format!r}; "
+            f"the model has not allocated "
             f"KV cache on this node yet"
         )
-        group_layout_descs = registry.find_group_layout_descs(model_name, world_size)
+        group_layout_descs = registry.find_group_layout_descs(
+            model_name, world_size, cache_format
+        )
         if not group_layout_descs:
             raise unregistered
         try:
-            attn_desc = registry.find_attn_desc(model_name, world_size)
+            attn_desc = registry.find_attn_desc(model_name, world_size, cache_format)
             shard_replication_desc = registry.find_shard_replication_desc(
-                model_name, world_size
+                model_name, world_size, cache_format
             )
         except ValueError:
             # Unregistered between the two reads: the same answer, not a

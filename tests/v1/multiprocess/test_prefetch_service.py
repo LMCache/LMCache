@@ -62,18 +62,18 @@ class _Registry:
         self._attn_raises = attn_raises
         self._token_hasher = TokenHasher(chunk_size=CHUNK_SIZE, hash_algorithm="blake3")
 
-    def find_group_layout_descs(self, model_name, world_size):
+    def find_group_layout_descs(self, model_name, world_size, cache_format=""):
         return self._layouts
 
-    def find_attn_desc(self, model_name, world_size):
+    def find_attn_desc(self, model_name, world_size, cache_format=""):
         if self._attn_raises:
             raise ValueError("no attention-window descriptor registered")
         return self._windows
 
-    def find_shard_replication_desc(self, model_name, world_size):
+    def find_shard_replication_desc(self, model_name, world_size, cache_format=""):
         return ShardReplicationDesc()
 
-    def get_token_hasher(self, model_name, world_size):
+    def get_token_hasher(self, model_name, world_size, cache_format=""):
         return self._token_hasher
 
 

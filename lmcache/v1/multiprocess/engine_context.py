@@ -15,6 +15,7 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     ShardReplicationDesc,
+    get_request_tags,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
@@ -52,6 +53,21 @@ class _LayoutDescEntry:
     every group per rank."""
 
 
+def get_request_cache_format(key: IPCCacheServerKey) -> str:
+    """Return the opaque layout identity carried by a request's matching tags.
+
+    Args:
+        key: IPC key whose request configs may include ``lmcache.tag.kv_format``.
+
+    Returns:
+        The registered format token, or the legacy empty namespace.
+
+    Raises:
+        ValueError: If the request contains malformed matching tags.
+    """
+    return get_request_tags(key.request_configs).get("kv_format", "")
+
+
 def check_chunk_hash_key(ctx: "MPCacheServerContext", key: IPCCacheServerKey) -> None:
     """Reject a chunk-hash key the server cannot use.
 
@@ -82,9 +98,10 @@ def check_chunk_hash_key(ctx: "MPCacheServerContext", key: IPCCacheServerKey) ->
             "or turn off client chunk hashes"
         )
     registry = ctx.layout_desc_registry
-    if registry.find(key.model_name, key.world_size) is not None:
+    cache_format = get_request_cache_format(key)
+    if registry.find(key.model_name, key.world_size, cache_format) is not None:
         key.check_chunk_hash_count(
-            registry.get_chunk_size(key.model_name, key.world_size)
+            registry.get_chunk_size(key.model_name, key.world_size, cache_format)
         )
 
 
@@ -104,7 +121,7 @@ def finish_lookup_read(
         l1_owners: The L1 manager that holds each key, when known.
     """
     desc = ctx.layout_desc_registry.find_shard_replication_desc(
-        key.model_name, key.world_size
+        key.model_name, key.world_size, get_request_cache_format(key)
     )
     by_read_locks: dict[int, list[ObjectKey]] = {}
     for obj_key in obj_keys:
@@ -118,18 +135,19 @@ def finish_lookup_read(
 
 
 class LayoutDescRegistry:
-    """Registry of layouts and hashing metadata keyed by model and world size.
+    """Registry of layouts and hashing metadata by model, world size and precision.
 
     Modules write to this thread-safe registry when KV caches are registered.
     Consumers read the layout, chunk size, and token hasher from the same entry
     so object geometry and key derivation cannot diverge. Multiple worker
     instances can share an entry, which remains until the last matching
     registration is unregistered.
+    The registration field cache_format must match the request tag kv_format.
     """
 
     def __init__(self) -> None:
-        # Key: (model_name, world_size) -> layout descriptor entry
-        self._registry: dict[tuple[str, int], _LayoutDescEntry] = {}
+        # Key: (model_name, world_size, cache_format) -> layout descriptor entry
+        self._registry: dict[tuple[str, int, str], _LayoutDescEntry] = {}
         self._lock = threading.Lock()
 
     def register(
@@ -143,10 +161,11 @@ class LayoutDescRegistry:
         group_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         group_unfull_chunk_layout_descs: dict[int, MemoryLayoutDesc] | None = None,
         shard_replication_desc: ShardReplicationDesc = DEFAULT_SHARD_REPLICATION_DESC,
+        cache_format: str = "",
     ) -> None:
-        """Register a layout descriptor for a (model_name, world_size) pair.
+        """Register a layout descriptor for a model/world-size/precision namespace.
 
-        Re-registering the same pair increments the active registration
+        Re-registering the same namespace increments the active registration
         count. The latest descriptor is retained for lookups.
 
         Args:
@@ -167,13 +186,15 @@ class LayoutDescRegistry:
             shard_replication_desc: How each object group is spread over the kv ranks.
                 Empty (the default) stores every group per rank; otherwise it
                 describes every object group of ``attn_desc``.
+            cache_format: Opaque precision token from registration or the
+                request's ``kv_format`` tag. Empty selects legacy layouts.
 
         Raises:
             ValueError: If the chunk size or hash algorithm conflicts with an
                 existing registration, or ``shard_replication_desc`` describes
                 a different number of object groups than ``attn_desc``.
         """
-        key = (model_name, world_size)
+        key = (model_name, world_size, cache_format)
         attn_desc = replace(attn_desc, world_size=world_size)
         if (
             shard_replication_desc.num_object_groups
@@ -224,17 +245,21 @@ class LayoutDescRegistry:
             entry.shard_replication_desc = shard_replication_desc
             entry.ref_count += 1
 
-    def unregister(self, model_name: str, world_size: int) -> None:
-        """Unregister one layout descriptor registration for a pair.
+    def unregister(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> None:
+        """Unregister one layout descriptor registration for a namespace.
 
         The descriptor is removed only when the last active registration for
-        the pair is unregistered.
+        the namespace is unregistered.
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: Opaque precision token from registration or the
+                request's ``kv_format`` tag. Empty selects legacy layouts.
         """
-        key = (model_name, world_size)
+        key = (model_name, world_size, cache_format)
         with self._lock:
             entry = self._registry.get(key)
             if entry is None:
@@ -246,147 +271,185 @@ class LayoutDescRegistry:
 
             entry.ref_count -= 1
 
-    def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
-        """Look up a layout descriptor by (model_name, world_size).
+    def find(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> MemoryLayoutDesc | None:
+        """Look up a layout descriptor by (model_name, world_size, cache_format).
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: Opaque precision token from registration or the
+                request's ``kv_format`` tag. Empty selects legacy layouts.
 
         Returns:
             The layout descriptor if found, otherwise None.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None:
                 return None
             return entry.layout_desc
 
-    def get_chunk_size(self, model_name: str, world_size: int) -> int:
+    def get_chunk_size(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> int:
         """Return the effective chunk size registered for a model and world size.
 
         Args:
             model_name: Registered model name.
             world_size: Registered KV world size.
+            cache_format: Precision token; empty selects the legacy layout.
 
         Returns:
             The effective chunk size.
 
         Raises:
-            ValueError: If the model and world size are not registered.
+            ValueError: If the namespace is not registered.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size).chunk_size
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).chunk_size
 
-    def get_token_hasher(self, model_name: str, world_size: int) -> TokenHasher:
+    def get_token_hasher(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> TokenHasher:
         """Return the token hasher registered for a model and world size.
 
         Args:
             model_name: Registered model name.
             world_size: Registered KV world size.
+            cache_format: Precision token; empty selects the legacy layout.
 
         Returns:
             The registered token hasher.
 
         Raises:
-            ValueError: If the model and world size are not registered.
+            ValueError: If the namespace is not registered.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size).token_hasher
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).token_hasher
 
     def find_group_layout_descs(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> dict[int, MemoryLayoutDesc] | None:
-        """Look up per-object-group layout descriptors, or ``None``."""
+        """Look up the per-object-group layouts of a precision namespace.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+            cache_format: Opaque precision token; empty selects legacy layouts.
+
+        Returns:
+            The group's layouts, or ``None`` when the namespace is unregistered.
+        """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None:
                 return None
             return entry.group_layout_descs
 
     def find_group_shard_geometry(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> tuple[tuple[int, ...], ShardReplicationDesc] | None:
         """Read the object group IDs and shard replication from one registration.
 
         Args:
             model_name: Registered model name.
             world_size: Registered KV world size.
+            cache_format: Precision token; empty selects the legacy layout.
 
         Returns:
             The group IDs and their replication descriptor, or None when the
             registration is absent or has no groups.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None or not entry.group_layout_descs:
                 return None
             return tuple(entry.group_layout_descs), entry.shard_replication_desc
 
     def find_group_unfull_chunk_layout_descs(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> dict[int, MemoryLayoutDesc] | None:
         """Look up per-object-group layouts of unfull-chunk objects.
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: Opaque precision token from registration or the
+                request's ``kv_format`` tag. Empty selects legacy layouts.
 
         Returns:
             The registered unfull-chunk layouts, the per-group layouts when
-            none were registered, or ``None`` if the pair is not registered.
+            none were registered, or ``None`` if the namespace is not registered.
         """
         with self._lock:
-            entry = self._registry.get((model_name, world_size))
+            entry = self._registry.get((model_name, world_size, cache_format))
             if entry is None:
                 return None
             return entry.group_unfull_chunk_layout_descs or entry.group_layout_descs
 
-    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
-        """Look up the attention-window descriptor for a pair.
+    def find_attn_desc(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> AttnWindowDesc:
+        """Look up the attention-window descriptor for a namespace.
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: Opaque precision token from registration or the
+                request's ``kv_format`` tag. Empty selects legacy layouts.
 
         Returns:
-            The :class:`AttnWindowDesc` registered for the pair.
+            The :class:`AttnWindowDesc` registered for the namespace.
 
         Raises:
-            ValueError: If no descriptor is registered for the pair. Callers
-                must register the KV cache (which establishes the pair) before
+            ValueError: If no descriptor is registered for the namespace. Callers
+                must register the KV cache (which establishes the namespace) before
                 looking up its windows.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size).attn_desc
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).attn_desc
 
     def find_shard_replication_desc(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> ShardReplicationDesc:
         """Look up how each object group is spread over the kv ranks.
 
         Args:
             model_name: The model name.
             world_size: The world size.
+            cache_format: Opaque precision token from registration or the
+                request's ``kv_format`` tag. Empty selects legacy layouts.
 
         Returns:
-            The :class:`ShardReplicationDesc` registered for the pair; the default
-            (every group stored per rank) when the registration gave none.
+            The namespace's :class:`ShardReplicationDesc`; the default (every
+            group stored per rank) when the registration gave none.
 
         Raises:
-            ValueError: If no descriptor is registered for the pair.
+            ValueError: If no descriptor is registered for the namespace.
         """
         with self._lock:
-            return self._registered_entry(model_name, world_size).shard_replication_desc
+            return self._registered_entry(
+                model_name, world_size, cache_format
+            ).shard_replication_desc
 
-    def _registered_entry(self, model_name: str, world_size: int) -> _LayoutDescEntry:
-        """The pair's registration; ``ValueError`` if none. Call under
+    def _registered_entry(
+        self, model_name: str, world_size: int, cache_format: str
+    ) -> _LayoutDescEntry:
+        """The namespace's registration; ``ValueError`` if none. Call under
         ``_lock``."""
-        entry = self._registry.get((model_name, world_size))
+        entry = self._registry.get((model_name, world_size, cache_format))
         if entry is None:
             raise ValueError(
                 f"No KV cache registered for model {model_name!r} with world "
-                f"size {world_size}"
+                f"size {world_size} and cache format {cache_format!r}"
             )
         return entry
 
@@ -561,17 +624,18 @@ class MPCacheServerContext:
 
         Raises:
             ValueError: If ``key.worker_id`` is ``None``, no KV cache is
-                registered for the key's ``(model_name, world_size)``, or
+                registered for the key's model, world size and precision, or
                 the key carries chunk hashes while cache events need token
                 ids or not one per complete chunk of ``[0, end)`` (see
                 :func:`check_chunk_hash_key`).
         """
         check_chunk_hash_key(self, key)
+        cache_format = get_request_cache_format(key)
         chunk_size = self.layout_desc_registry.get_chunk_size(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         token_hasher = self.layout_desc_registry.get_token_hasher(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.update_from_key(key)
@@ -587,7 +651,7 @@ class MPCacheServerContext:
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         shard_replication_desc = self.layout_desc_registry.find_shard_replication_desc(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         return ipc_key_to_object_keys(
             key, chunk_hashes, object_group_ids, shard_replication_desc
@@ -617,8 +681,9 @@ class MPCacheServerContext:
         """
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
+        cache_format = get_request_cache_format(key)
         token_hasher = self.layout_desc_registry.get_token_hasher(
-            key.model_name, key.world_size
+            key.model_name, key.world_size, cache_format
         )
         session = self.session_manager.get_or_create(key.request_id, token_hasher)
         session.set_tokens(key.token_bytes)
@@ -630,7 +695,7 @@ class MPCacheServerContext:
                 [unfull_hash],
                 object_group_ids,
                 self.layout_desc_registry.find_shard_replication_desc(
-                    key.model_name, key.world_size
+                    key.model_name, key.world_size, cache_format
                 ),
                 chunk_size,
             )

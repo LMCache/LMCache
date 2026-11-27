@@ -852,6 +852,7 @@ class QRingBufferAdapter:
                 self._adapter._mq_timeout,
                 layout_hints=vllm_layout_hints(),
                 engine_group_infos=self.q_engine_group_infos,
+                cache_format=self._adapter.cache_format,
             )
         except TimeoutError:
             raise ConnectionError(

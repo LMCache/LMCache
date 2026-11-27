@@ -95,6 +95,7 @@ def _scheduler_connector(scheduler_adapter: MagicMock) -> LMCacheMPConnector:
     """A scheduler-side connector whose server calls go to the mock."""
     scheduler_adapter.lmcache_tokens_per_chunk = 64
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._kv_format = ""
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = False

@@ -40,7 +40,10 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.mp_coordinator.api import BlendNamespace
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.engine_context import finish_lookup_read
+from lmcache.v1.multiprocess.engine_context import (
+    finish_lookup_read,
+    get_request_cache_format,
+)
 from lmcache.v1.multiprocess.modules.blend.matcher import (
     _unique_token_coverage,
     covered_chunks,
@@ -153,9 +156,9 @@ class LookupMixin:
         return kept
 
     def _resolve_cb_read_layouts(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> "tuple[_BlendReadGroups, dict[int, MemoryLayoutDesc], AttnWindowDesc] | None":
-        """Resolve blend's read set and layouts for ``(model_name, world_size)``.
+        """Resolve blend's read set and layouts for the registered precision format.
 
         Returns ``(read_groups, group_layout_descs, attn_desc)`` — the FULL
         registration descriptor; each leg narrows it to its own gids — or
@@ -165,10 +168,10 @@ class LookupMixin:
             RuntimeError: If the layout has no resolvable blend read set.
         """
         registry = self._ctx.layout_desc_registry
-        layouts = registry.find_group_layout_descs(model_name, world_size)
+        layouts = registry.find_group_layout_descs(model_name, world_size, cache_format)
         if not layouts:
             return None
-        attn_desc = registry.find_attn_desc(model_name, world_size)
+        attn_desc = registry.find_attn_desc(model_name, world_size, cache_format)
         read = _classify_cb_read_groups(
             attn_desc.num_object_groups, attn_desc.group_kinds
         )
@@ -214,7 +217,7 @@ class LookupMixin:
             layouts,
             attn_desc,
             self._ctx.layout_desc_registry.find_shard_replication_desc(
-                key.model_name, key.world_size
+                key.model_name, key.world_size, get_request_cache_format(key)
             ),
         )
         # "full" fetching rejects windowed rows.
@@ -373,7 +376,9 @@ class LookupMixin:
             Event(event_type=EventType.CB_PREFIX_LOOKUP_START, session_id=rid)
         )
 
-        resolved = self._resolve_cb_read_layouts(model_name, world_size)
+        resolved = self._resolve_cb_read_layouts(
+            model_name, world_size, get_request_cache_format(key)
+        )
         if resolved is None:
             logger.error(
                 "No CB GPU context for model %s ws %d during prefix lookup!",
@@ -420,7 +425,7 @@ class LookupMixin:
                 layouts,
                 attn_desc,
                 self._ctx.layout_desc_registry.find_shard_replication_desc(
-                    key.model_name, key.world_size
+                    key.model_name, key.world_size, get_request_cache_format(key)
                 ),
             ),
             fetching_policy="prefix",
@@ -525,7 +530,9 @@ class LookupMixin:
             )
             # Segmented prefix is forced OFF when any prefix row is windowed:
             # only its in-window suffix is loaded, so a gap must truncate.
-            resolved_pre = self._resolve_cb_read_layouts(key.model_name, key.world_size)
+            resolved_pre = self._resolve_cb_read_layouts(
+                key.model_name, key.world_size, get_request_cache_format(key)
+            )
             use_segmented = self._segmented_prefix and not (
                 resolved_pre is not None
                 and any(
@@ -626,7 +633,9 @@ class LookupMixin:
             # so the winner is chosen among chunks that can actually be fetched.
             job.non_prefix = [c for c in candidates if c.cur_st >= prefix_tokens]
             if job.non_prefix:
-                resolved = self._resolve_cb_read_layouts(key.model_name, key.world_size)
+                resolved = self._resolve_cb_read_layouts(
+                    key.model_name, key.world_size, get_request_cache_format(key)
+                )
                 if resolved is not None:
                     (
                         job.handle,

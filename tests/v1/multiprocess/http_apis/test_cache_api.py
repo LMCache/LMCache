@@ -442,27 +442,31 @@ class _FakeLayoutRegistry:
     registers a model that does not separate its object groups."""
 
     layout: Optional[object] = None
-    lookup_calls: list[tuple[str, int]] = field(default_factory=list)
+    lookup_calls: list[tuple[str, int, str]] = field(default_factory=list)
 
     def find_group_layout_descs(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> Optional[dict[int, object]]:
-        self.lookup_calls.append((model_name, world_size))
+        self.lookup_calls.append((model_name, world_size, cache_format))
         return None if self.layout is None else {0: self.layout}
 
-    def find_attn_desc(self, model_name: str, world_size: int) -> AttnWindowDesc:
+    def find_attn_desc(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> AttnWindowDesc:
         if self.layout is None:
             raise ValueError(f"no attention-window descriptor for {model_name!r}")
         return replace(DEFAULT_ATTN_WINDOW_DESC, world_size=world_size)
 
     def find_shard_replication_desc(
-        self, model_name: str, world_size: int
+        self, model_name: str, world_size: int, cache_format: str = ""
     ) -> ShardReplicationDesc:
         if self.layout is None:
             raise ValueError(f"no shard replication descriptor for {model_name!r}")
         return ShardReplicationDesc()
 
-    def get_token_hasher(self, model_name: str, world_size: int) -> "_FakeTokenHasher":
+    def get_token_hasher(
+        self, model_name: str, world_size: int, cache_format: str = ""
+    ) -> "_FakeTokenHasher":
         return _FakeTokenHasher()
 
 
@@ -581,7 +585,7 @@ class TestPrefetchEndpoint:
         assert body["status"] == "submitted"
         assert body["chunks"] == 2
         assert body["request_id"]
-        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert ("m", 2, "") in ctx.layout_desc_registry.lookup_calls
         assert all(
             dict(key.identity.tags) == tags
             for key in ctx.storage_manager.submit_calls[0]["keys"]
@@ -626,7 +630,7 @@ class TestPrefetchEndpoint:
         )
         assert resp.status_code == 202, resp.text
         assert resp.json()["chunks"] == 1
-        assert ("m", 2) in ctx.layout_desc_registry.lookup_calls
+        assert ("m", 2, "") in ctx.layout_desc_registry.lookup_calls
         assert {
             key.chunk_hash for key in ctx.storage_manager.submit_calls[0]["keys"]
         } == {(1).to_bytes(4, "big")}

@@ -104,7 +104,9 @@ class CommittedKVResidency:
             Different L1 tags may supply different required objects.
         """
         world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
-        geometry = self._layouts.find_group_shard_geometry(key.model_name, world_size)
+        geometry = self._layouts.find_group_shard_geometry(
+            key.model_name, world_size, key.identity.tags.get("kv_format", "")
+        )
         if not world_size or geometry is None:
             return False
         groups, replication = geometry

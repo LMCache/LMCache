@@ -206,6 +206,7 @@ class ContextEntry:
         event_backend: Cached event backend selected for this context's device.
         event_profile: Native identity contract retained until unregister, reap
             or shutdown. None retains current event behavior.
+        cache_format: Opaque precision token selecting this registration's layout.
     """
 
     cache_context: BaseCacheContext
@@ -216,6 +217,7 @@ class ContextEntry:
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
     event_profile: KVEventProfile | None = None
+    cache_format: str = ""
 
 
 class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -456,7 +458,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
+                entry.model_name, entry.world_size, entry.cache_format
             )
         del entry
         entries.clear()
@@ -518,6 +520,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         engine_group_infos: list[EngineGroupInfo],
         event_profile: KVEventProfile | None,
         chunk_size: int | None = None,
+        cache_format: str = "",
     ) -> KVEventProfile | None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -538,6 +541,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 whether a profile is present. This does not change event output.
             chunk_size: Effective logical tokens per LMCache chunk, or
                 ``None`` to use the server default.
+            cache_format: Configured KV precision identity; empty selects
+                legacy layouts, matching requests without a precision tag.
 
         Returns:
             The profile recorded for this registration, or None when absent.
@@ -605,12 +610,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     existing.model_name != model_name
                     or existing.world_size != world_size
                     or existing.chunk_size != chunk_size
+                    or existing.cache_format != cache_format
                 ):
                     raise ValueError(
                         f"Instance {instance_id} is already registered with "
                         f"model={existing.model_name!r}, "
                         f"world_size={existing.world_size}, "
-                        f"chunk_size={existing.chunk_size}"
+                        f"chunk_size={existing.chunk_size}, "
+                        f"cache_format={existing.cache_format!r}"
                     )
                 existing.last_seen = now
                 logger.info(
@@ -657,6 +664,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 shard_replication_desc=_fold_shard_replication_desc(
                     kv_groups_manager.object_groups, engine_group_infos
                 ),
+                cache_format=cache_format,
             )
         except ValueError:
             cache_context.close()
@@ -672,6 +680,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 has_liveness_signal=False,
                 event_backend=event_backend,
                 event_profile=event_profile,
+                cache_format=cache_format,
             )
 
         logger.info(

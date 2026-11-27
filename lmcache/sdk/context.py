@@ -131,6 +131,7 @@ class LMCacheSDKContext:
         # the L1 object layouts the server stores them with.
         self._engine_meta_conf: dict[str, Any] = {}
         self._object_layouts: list[dict[str, Any]] = []
+        self._cache_format: str = ""
         # L1 read-lock TTL in seconds, from /status (the server default if absent).
         self._read_ttl = 300
         try:
@@ -195,8 +196,8 @@ class LMCacheSDKContext:
 
         Raises:
             LMCacheSDKError: If no engine registered this kind's layout for
-                the model, the layout is unsupported, or no Q ring is
-                registered.
+                the model, multiple formats match, the layout is unsupported,
+                or no Q ring is registered.
         """
         entry = next(
             (
@@ -250,20 +251,23 @@ class LMCacheSDKContext:
 
         Raises:
             LMCacheSDKError: If the server does not report the model's object
-                layout, the layout is not a single full-attention object, is
-                compressed or not chunk-aligned, KV runs with TP > 1, or no Q
-                ring is registered.
+                layout, multiple formats match, the layout is not a single
+                uncompressed, chunk-aligned full-attention object, KV runs
+                with TP > 1, or no Q ring is registered.
         """
         is_kv = self._kind is LMCacheSDKCacheKind.KV
-        object_groups = next(
-            (
-                entry["object_groups"]
-                for entry in self._object_layouts
-                if entry.get("model_name") == self._model_name
-                and int(entry.get("world_size", 0)) == self._world_size
-            ),
-            None,
-        )
+        layouts = [
+            entry
+            for entry in self._object_layouts
+            if entry.get("model_name") == self._model_name
+            and int(entry.get("world_size", 0)) == self._world_size
+        ]
+        if len(layouts) > 1:
+            raise LMCacheSDKError(
+                f"Multiple cache formats registered for {self._model_name!r}, "
+                f"world_size={self._world_size}; the SDK requires a single layout"
+            )
+        object_groups = layouts[0]["object_groups"] if layouts else None
         if not object_groups:
             raise LMCacheSDKError(
                 "the server reports no object layout for "
@@ -330,6 +334,7 @@ class LMCacheSDKContext:
             self._mq_timeout,
             writable=is_kv,
         )
+        self._cache_format = layouts[0].get("cache_format", "")
         logger.info(
             "Transferring %s through vLLM's Q ring on %s: %d bytes per chunk object",
             self._model_name,
@@ -778,6 +783,15 @@ class LMCacheSDKContext:
         Returns:
             IPCCacheServerKey: The constructed key.
         """
+        configs: dict[str, object] | None = request_configs
+        if configs is not None and "lmcache.tag.kv_format" in configs:
+            if configs["lmcache.tag.kv_format"] != self._cache_format:
+                raise LMCacheSDKError("Request KV format does not match the SDK layout")
+        elif self._cache_format:
+            configs = {
+                **(request_configs or {}),
+                "lmcache.tag.kv_format": self._cache_format,
+            }
         return IPCCacheServerKey.from_token_ids(
             model_name=self._model_name,
             world_size=self._world_size,
@@ -787,5 +801,5 @@ class LMCacheSDKContext:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
-            request_configs=request_configs,
+            request_configs=configs,
         )

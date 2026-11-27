@@ -55,6 +55,7 @@ def _payload(
     instance: int = 1,
     profile: KVEventProfile | None = PROFILE,
     chunk_size: int | None = None,
+    cache_format: str = "",
 ) -> tuple[Any, ...]:
     return (
         instance,
@@ -66,6 +67,7 @@ def _payload(
         [GROUP],
         profile,
         chunk_size,
+        cache_format,
     )
 
 
@@ -313,6 +315,7 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
         [],
         None,
         None,
+        "",
     )
     request = codec.request_encoder(payload, {})
     assert request.SerializeToString() == old.SerializeToString()
@@ -326,7 +329,7 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     qstore = get_method_codec_registry().by_full_name[
         "lmcache.mp.QStoreService.RegisterQCache"
     ]
-    qstore_payload = (*payload[:7], None)
+    qstore_payload = (*payload[:7], None, "")
     assert (
         qstore.request_encoder(qstore_payload, {}).SerializeToString()
         == old.SerializeToString()
@@ -339,8 +342,13 @@ def test_none_profile_preserves_protobuf_request_and_success_bytes() -> None:
     assert qstore.response_decoder(qstore.response_encoder(None)) is None
     native = codec.request_encoder(_payload(), {})
     decoded = codec.request_decoder(native)
-    assert decoded[-2] == PROFILE
-    assert decoded[-1] is None
+    assert decoded[-3] == PROFILE
+    assert decoded[-2] is None
+    assert decoded[-1] == ""
+    tagged = (*_payload()[:-1], "fp8")
+    assert codec.request_decoder(codec.request_encoder(tagged, {})) == tagged
+    tagged_q = (*qstore_payload[:-1], "fp8")
+    assert qstore.request_decoder(qstore.request_encoder(tagged_q, {})) == tagged_q
 
 
 def test_zmq_missing_profile_reports_arity_not_union_attribute_error() -> None:

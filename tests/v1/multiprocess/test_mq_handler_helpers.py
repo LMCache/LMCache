@@ -47,6 +47,7 @@ def register_kv_cache_handler(
     engine_group_infos: list[EngineGroupInfo],
     event_profile: KVEventProfile | None,
     chunk_size: int | None = None,
+    cache_format: str = "",
 ) -> KVEventProfile | None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -62,6 +63,7 @@ def register_kv_cache_handler(
             msgspec-decoded from the request payload.
         event_profile: Optional identity contract echoed by this test handler.
         chunk_size: Effective logical tokens per LMCache chunk.
+        cache_format: Precision identity; empty selects the legacy namespace.
 
     Returns:
         The supplied profile, or None when absent.

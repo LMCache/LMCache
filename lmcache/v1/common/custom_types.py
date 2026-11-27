@@ -363,6 +363,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
+        cache_format: Opaque precision token matching the request's
+            ``lmcache.tag.kv_format`` tag; empty selects legacy layouts.
     """
 
     instance_id: int
@@ -376,6 +378,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     chunk_size: int
     num_physical_slots: int
     group_layouts: list[GroupLayout] = []
+    cache_format: str = ""
 
 
 @dataclass

@@ -33,7 +33,10 @@ from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+from lmcache.v1.multiprocess.engine_context import (
+    MPCacheServerContext,
+    get_request_cache_format,
+)
 from lmcache.v1.multiprocess.engine_module import (
     DiscoverableModule,
     EngineModule,
@@ -360,7 +363,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         for entry in entries:
             entry.cache_context.close()
             self._ctx.layout_desc_registry.unregister(
-                entry.model_name, entry.world_size
+                entry.model_name, entry.world_size, entry.cache_format
             )
         del entry
         entries.clear()
@@ -406,27 +409,30 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         registry), for the engine's KV models and the Q rings alike.
 
         Returns:
-            One entry per registered ``(model_name, world_size)``: its object
-            groups' kind, window in chunks, and one chunk's tensor shapes and
-            dtypes.
+            One entry per model/world-size/precision namespace: the format
+            token (empty for legacy layouts), object groups' kind, window in
+            chunks, and one chunk's tensor shapes and dtypes.
         """
         entries = list(self.context_entries_snapshot().values())
         if self._kv_module is not None:
             entries += self._kv_module.context_entries_snapshot().values()
         registry = self._ctx.layout_desc_registry
         layouts = []
-        for model_name, world_size in sorted(
-            {(e.model_name, e.world_size) for e in entries}
+        for model_name, world_size, cache_format in sorted(
+            {(e.model_name, e.world_size, e.cache_format) for e in entries}
         ):
-            group_layouts = registry.find_group_layout_descs(model_name, world_size)
+            group_layouts = registry.find_group_layout_descs(
+                model_name, world_size, cache_format
+            )
             if group_layouts is None:
                 continue
-            attn_desc = registry.find_attn_desc(model_name, world_size)
+            attn_desc = registry.find_attn_desc(model_name, world_size, cache_format)
             kinds = attn_desc.group_kinds or ("attention",) * len(group_layouts)
             layouts.append(
                 {
                     "model_name": model_name,
                     "world_size": world_size,
+                    "cache_format": cache_format,
                     "object_groups": [
                         {
                             "object_group_idx": group_id,
@@ -464,6 +470,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
         chunk_size: int | None = None,
+        cache_format: str = "",
     ) -> None:
         """Register the paged Q ring tensors for a given worker instance ID.
 
@@ -480,6 +487,8 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 (already msgspec-decoded by the message queue).
             chunk_size: Effective logical tokens per LMCache chunk, or
                 ``None`` to use the server default.
+            cache_format: Configured precision identity shared with the
+                worker's KV registration; empty selects legacy layouts.
 
         Raises:
             ValueError: If the chunk size is invalid, conflicts with an
@@ -501,12 +510,14 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                     existing.model_name != model_name
                     or existing.world_size != world_size
                     or existing.chunk_size != chunk_size
+                    or existing.cache_format != cache_format
                 ):
                     raise ValueError(
                         f"Instance {instance_id} Q ring is already registered "
                         f"with model={existing.model_name!r}, "
                         f"world_size={existing.world_size}, "
-                        f"chunk_size={existing.chunk_size}"
+                        f"chunk_size={existing.chunk_size}, "
+                        f"cache_format={existing.cache_format!r}"
                     )
                 existing.last_seen = now
                 logger.info(
@@ -540,6 +551,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 chunk_size,
                 self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
+                cache_format=cache_format,
             )
         except ValueError:
             cache_context.close()
@@ -554,6 +566,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                cache_format=cache_format,
             )
             self._q_rings[instance_id] = _QRingState(
                 q_caches=list(q_caches),
@@ -884,21 +897,20 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
 
     # SDK transfers: the engine's L1 objects through the Q ring, as bytes.
 
-    def _layout_entry(self, model_name: str, world_size: int) -> ContextEntry | None:
-        """Return a registration of the model, for its object layout.
-
-        KV objects follow the engine's KV registration; query objects
-        (``<model>##query``) follow the Q ring's own, which ``store_q`` stored
-        them with. Every registration of a model has the same layout (the
-        server keeps one per model), so any matching one serves.
-        """
+    def _layout_entry(self, key: IPCCacheServerKey) -> ContextEntry | None:
+        """Select the KV or query registration that owns this object's layout."""
+        cache_format = get_request_cache_format(key)
         kv_entries = (
             self._kv_module.context_entries_snapshot().values()
             if self._kv_module is not None
             else ()
         )
         for entry in [*kv_entries, *self.context_entries_snapshot().values()]:
-            if entry.model_name == model_name and entry.world_size == world_size:
+            if (
+                entry.model_name == key.model_name
+                and entry.world_size == key.world_size
+                and entry.cache_format == cache_format
+            ):
                 return entry
         return None
 
@@ -923,7 +935,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             of range, repeated, or in a block vLLM holds.
         """
         ring = self.get_and_touch_context_entry(instance_id)
-        kv = self._layout_entry(key.model_name, key.world_size)
+        kv = self._layout_entry(key)
         used: set[int] | None = None
         with self._lock:
             state = self._q_rings.get(instance_id)
@@ -1072,7 +1084,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             key: The rejected retrieve's key.
             object_group_ids: The object groups it asked for.
         """
-        kv = self._layout_entry(key.model_name, key.world_size)
+        kv = self._layout_entry(key)
         if kv is None:
             return
         num_object_groups = kv.cache_context.kv_layer_groups_manager.num_object_groups

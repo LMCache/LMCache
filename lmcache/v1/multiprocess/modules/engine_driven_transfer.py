@@ -64,6 +64,7 @@ class EngineDrivenContextEntry:
             instance (register, PING, prepare/commit). Drives reaping.
         has_liveness_signal: True once the instance has sent at least one
             PING. Selects the reap window. Latched only by PING.
+        cache_format: Opaque precision token selecting this registration's layout.
     """
 
     metadata: EngineDrivenContextMetadata
@@ -72,6 +73,7 @@ class EngineDrivenContextEntry:
     chunk_size: int
     last_seen: float = 0.0
     has_liveness_signal: bool = False
+    cache_format: str = ""
 
 
 class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
@@ -300,7 +302,9 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if obj_keys:
                 self._ctx.storage_manager.finish_read_prefetched(obj_keys)
 
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._ctx.layout_desc_registry.unregister(
+            entry.model_name, entry.world_size, entry.cache_format
+        )
 
     @staticmethod
     def _make_transfer_key(key: IPCCacheServerKey, instance_id: int) -> TransferKey:
@@ -377,12 +381,14 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     existing.model_name != payload.model_name
                     or existing.world_size != payload.world_size
                     or existing.chunk_size != payload.chunk_size
+                    or existing.cache_format != payload.cache_format
                 ):
                     raise ValueError(
                         f"Instance {payload.instance_id} is already registered "
                         f"with model={existing.model_name!r}, "
                         f"world_size={existing.world_size}, "
-                        f"chunk_size={existing.chunk_size}"
+                        f"chunk_size={existing.chunk_size}, "
+                        f"cache_format={existing.cache_format!r}"
                     )
                 existing.last_seen = now
                 logger.info(
@@ -467,6 +473,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             chunk_size=payload.chunk_size,
             last_seen=now,
             has_liveness_signal=False,
+            cache_format=payload.cache_format,
         )
         strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
@@ -507,6 +514,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 self._ctx.hash_algorithm_name,
                 attn_desc=attn_desc,
                 group_layout_descs=dict(enumerate(group_layouts)),
+                cache_format=payload.cache_format,
             )
         else:
             self._ctx.layout_desc_registry.register(
@@ -515,6 +523,7 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 layout_desc,
                 payload.chunk_size,
                 self._ctx.hash_algorithm_name,
+                cache_format=payload.cache_format,
             )
         with self._lock:
             self._engine_driven_contexts[payload.instance_id] = entry
