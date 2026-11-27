@@ -1,0 +1,12 @@
+# Paste into the Buildkite pipeline's Steps editor.
+agents:
+  queue: "k3-h200-local"
+
+steps:
+  - label: ":pipeline: Upload token-dropping GPU pipeline"
+    command: |
+      if [[ -f .buildkite/k3_tests/token-dropping/upload.sh ]]; then
+        bash .buildkite/k3_tests/token-dropping/upload.sh
+      else
+        echo "Token-dropping GPU lane not present in this checkout; no GPU allocated"
+      fi
