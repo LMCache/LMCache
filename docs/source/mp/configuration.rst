@@ -1222,14 +1222,20 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.use_vmm_api``
      - auto-detected
      - Selects VMM IPC when the engine allocates its KV cache through the
-       CUDA VMM API. LMCache detects vLLM's ``--enable-cumem-allocator`` and
+       CUDA or HIP VMM API. LMCache detects vLLM's ``--enable-cumem-allocator`` and
        resolved extensible-KV-cache mode automatically; set this key to
        ``true`` or ``false`` only to override that result. VMM memory has no
        legacy CUDA IPC handle, so KV-cache registration exports it via
        ``cuMemExportToShareableHandle`` instead (a fabric handle when
        the allocation is fabric-exportable -- requires an IMEX channel
        device, e.g. ``NVIDIA_IMEX_CHANNELS=0`` -- or a POSIX fd
-       otherwise). POSIX fds reach the server over its fd channel,
+       otherwise). On ROCm the same wrapper calls the HIP VMM API
+       through ``rocm.bindings`` (``VmmRocmIPCWrapper`` is a
+       ``VmmCudaIPCWrapper`` subclass); HIP export supports POSIX fd
+       only (``hipMemExportToShareableHandle`` returns
+       ``hipErrorNotSupported`` for ``FABRIC``), so a HIP VMM pool
+       under ``lmcache.mp.isolated_ipc`` is rejected at registration.
+       POSIX fds reach the server over its fd channel,
        ``/dev/shm/lmcache_fd_<port>.sock``, so the engine and the
        server must share ``/dev/shm`` (``--ipc host``) and the server
        URL must name a TCP port. The fd channel is Linux-only; on other
