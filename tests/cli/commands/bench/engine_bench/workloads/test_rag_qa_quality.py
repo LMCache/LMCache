@@ -13,6 +13,7 @@ import pytest
 # First Party
 from lmcache.cli.commands.bench.engine_bench.config import WarmupPolicy
 from lmcache.cli.commands.bench.engine_bench.quality import alignment
+from lmcache.cli.commands.bench.engine_bench.quality.prompts import STORE_PROMPT_END
 from lmcache.cli.commands.bench.engine_bench.stats import RequestResult
 from lmcache.cli.commands.bench.engine_bench.workloads import rag_qa_quality
 from lmcache.cli.commands.bench.engine_bench.workloads.rag_qa_quality import (
@@ -382,7 +383,9 @@ class TestWarmup:
         await workload.warmup()
         content = sender.send_warmup_request.await_args_list[0].args[1][0]["content"]
         assert content.startswith(workload._system_block)
-        assert content[len(workload._system_block) :] in workload._corpus
+        assert content.endswith(STORE_PROMPT_END)
+        passage = content[len(workload._system_block) : -len(STORE_PROMPT_END)]
+        assert passage in workload._corpus
 
 
 class TestStep:

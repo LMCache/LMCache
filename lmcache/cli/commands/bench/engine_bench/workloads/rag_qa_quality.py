@@ -32,6 +32,7 @@ from lmcache.cli.commands.bench.engine_bench.quality.dataset import (
 from lmcache.cli.commands.bench.engine_bench.quality.prompts import (
     QA_QUESTION_TEMPLATE,
     QA_SYSTEM_PROMPT,
+    STORE_PROMPT_END,
     compose_qa_messages,
     compose_store_messages,
 )
@@ -335,7 +336,9 @@ class RagQaQualityWorkload(BaseWorkload):
         total = len(self._corpus)
         for index, block in enumerate(self._corpus):
             request_id = f"{_PREFILL_REQUEST_PREFIX}{index}"
-            messages = compose_store_messages(self._system_block, [block])
+            messages = compose_store_messages(
+                self._system_block, [block], STORE_PROMPT_END
+            )
             self._progress_monitor.log_message(f"Prefill {index + 1}/{total}")
             self._progress_monitor.on_request_sent(request_id)
             result = await self._request_sender.send_warmup_request(
