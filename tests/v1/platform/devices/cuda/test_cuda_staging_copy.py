@@ -13,6 +13,7 @@ import torch
 from lmcache.lmcache_native import TransferDirection
 from lmcache.v1.gpu_connector import gpu_ops
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform.devices.cuda import device_ops
 from lmcache.v1.platform.torch_ops import mem_kernels
 
@@ -56,21 +57,22 @@ def test_cuda_pointer_copy_uses_current_stream_and_splits_registrations(
 def test_lazy_cuda_staging_preserves_stream_order(
     monkeypatch: pytest.MonkeyPatch, direction: TransferDirection
 ) -> None:
-    """Lazy staging observes earlier work before copying or reusing a slot."""
+    """Lazy staging preserves stream order across a registration boundary."""
     # A fresh ops instance keeps the Python fallback active in native builds.
     monkeypatch.setattr(gpu_ops, "device_ops", device_ops.CudaDeviceOps())
     registration_size = LazyMemoryAllocator.PIN_CHUNK_SIZE
     allocator = LazyMemoryAllocator(2 * registration_size, 2 * registration_size)
     chunk_bytes = 28 << 20
-    objects = []
+    objects: list[MemoryObj] = []
     stream = torch.cuda.Stream()
     try:
         for _ in range(3):
-            memory_obj = allocator.allocate(
+            allocated = allocator.allocate(
                 torch.Size((chunk_bytes // 2,)), torch.bfloat16
             )
-            assert memory_obj is not None
-            objects.append(memory_obj)
+            assert allocated is not None
+            objects.append(allocated)
+        memory_obj = objects[-1]
         host = memory_obj.raw_tensor
         assert host is not None
         assert memory_obj.meta.address < registration_size
