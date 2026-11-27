@@ -4,12 +4,15 @@
 # Standard
 from typing import TYPE_CHECKING, Any
 import ctypes
+import ctypes.util
+import importlib.util
 import os
 
 # Third Party
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.gpu_connector.gds_backends._driver import SharedDriver
 from lmcache.v1.gpu_connector.gds_backends._file import FDGDSHandle, FileGDSBackend
 from lmcache.v1.gpu_connector.gds_backends.base import Submission
@@ -66,6 +69,30 @@ def _check(err: "CUfileError", op: str) -> None:
 _STREAM_REGISTER_FLAGS = 0x7
 
 
+def _on_ld_library_path(filename: str) -> bool:
+    """Whether ``filename`` is in a directory listed in ``LD_LIBRARY_PATH``.
+
+    ``dlopen`` searches these directories, but ``find_library`` only does so
+    through the ``ld`` linker, which slim runtime images often lack.
+    """
+    return any(
+        directory and os.path.isfile(os.path.join(directory, filename))
+        for directory in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+    )
+
+
+def _xpu_shim_discoverable() -> bool:
+    """Whether the cuFile bindings and a ``libcufile`` shim can be found.
+
+    Locates both without importing or loading them: ``cufile.bindings`` loads
+    ``libcufile.so`` at import time, and selection must not load drivers.
+    """
+    return importlib.util.find_spec("cufile") is not None and (
+        _on_ld_library_path("libcufile.so")
+        or ctypes.util.find_library("cufile") is not None
+    )
+
+
 class Backend(FileGDSBackend):
     """Own the cufile driver and its registration operations."""
 
@@ -74,11 +101,26 @@ class Backend(FileGDSBackend):
 
     @classmethod
     def is_default(cls) -> bool:
-        return torch.version.cuda is not None and torch.version.hip is None
+        """Default on CUDA, or on XPU when the xFile cuFile shim is present.
+
+        ROCm defers to hipfile. An XPU build without the shim is left to the
+        other backends so ``auto`` fails at selection, not at first I/O.
+        """
+        if torch.version.hip is not None:
+            return False
+        if torch.version.cuda is not None:
+            return True
+        return torch.version.xpu is not None and _xpu_shim_discoverable()
 
     def validate_environment(self) -> None:
-        if torch.version.cuda is None:
-            raise ValueError("cufile requires a CUDA PyTorch build")
+        """Accept a CUDA/XPU build. XPU reuses the same cuFile API/ABI."""
+        if torch.version.cuda is not None or torch.version.xpu is not None:
+            return
+        raise ValueError(
+            "cufile requires a CUDA PyTorch build, or an XPU build with a "
+            "cuFile-compatible xFile shim; "
+            f"detected device type {torch_device_type!r}"
+        )
 
     def open_handle(self, fd: int, path: str) -> "AsyncHandle":
         try:
@@ -103,8 +145,11 @@ class Backend(FileGDSBackend):
 
     def register_buffer(self, buf: torch.Tensor) -> None:
         """Use the raw API to preserve cuFile status codes in raised errors."""
-        if not buf.is_cuda:
-            raise ValueError("register_buffer: tensor must be on CUDA")
+        # ROCm tensors report is_cuda; XPU is served by the xFile shim.
+        if not (buf.is_cuda or buf.device.type == "xpu"):
+            raise ValueError(
+                f"register_buffer: tensor must be on CUDA or XPU; got {buf.device.type}"
+            )
         self._ensure_driver_open()
         # Third Party
         from cufile.bindings import libcufile
