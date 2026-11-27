@@ -34,7 +34,9 @@ def earlier_checkpoint_keys(
     Raises:
         ValueError: If the prefix or resolved object geometry is invalid.
     """
-    chunk_size = context.chunk_size
+    chunk_size = context.layout_desc_registry.get_chunk_size(
+        key.model_name, key.world_size
+    )
     if (
         key.worker_id is not None
         or key.world_size < 1

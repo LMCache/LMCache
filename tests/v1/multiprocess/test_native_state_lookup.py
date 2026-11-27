@@ -299,7 +299,8 @@ def test_endpoint_limit_bounds_sparse_checkpoint_lookup() -> None:
 
 def test_history_plan_uses_all_ranks_and_preserves_primary_endpoint() -> None:
     key = replace(_key(world_size=2), end=3 * CHUNK)
-    context = MagicMock(spec=MPCacheServerContext, chunk_size=CHUNK)
+    context = MagicMock(spec=MPCacheServerContext)
+    context.layout_desc_registry.get_chunk_size.return_value = CHUNK
     context.layout_desc_registry.find_attn_desc.return_value = _groups().get_attn_desc()
     rows = [
         [ObjectKey(bytes([index]), "native-state", rank, 1) for index in range(3)]

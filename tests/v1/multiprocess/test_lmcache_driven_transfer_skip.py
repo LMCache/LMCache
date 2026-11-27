@@ -308,6 +308,7 @@ def test_primary_returns_before_history_is_published(
     module._recurrent_history = RecurrentReservations()
     context = module._ctx
     context.chunk_size = 16
+    context.layout_desc_registry.get_chunk_size.return_value = 16
     desc = SimpleNamespace(
         group_kinds=["attention", "recurrent"], num_chunks_in_sw=[-1, 1]
     )
@@ -385,12 +386,12 @@ def test_primary_returns_before_history_is_published(
     scheduler = RecurrentHistoryScheduler(pool, adapter, [1])
     if real_connector:
         pytest.importorskip("vllm")
+        # First Party
         from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
         from lmcache.integration.vllm.lmcache_mp_metadata import (
-            LMCacheMPRequestState,
             LMCacheMPConnectorMetadata,
+            LMCacheMPRequestState,
         )
-
         from lmcache.integration.vllm.vllm_multi_process_adapter import (
             LMCacheMPWorkerAdapter,
         )
