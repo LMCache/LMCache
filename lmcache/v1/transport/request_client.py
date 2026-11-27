@@ -146,11 +146,13 @@ class RequestClient(Protocol):
     def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[None]: ...
 
     @rpc_method
-    def query_prefetch_status(self, request_id: str) -> MessagingFuture[int | None]: ...
+    def query_prefetch_status(
+        self, request_id: str, lookup_id: str = ""
+    ) -> MessagingFuture[int | None]: ...
 
     @rpc_method
     def wait_prefetch_status(
-        self, request_id: str, timeout: float
+        self, request_id: str, timeout: float, lookup_id: str = ""
     ) -> MessagingFuture[int | None]: ...
 
     @rpc_method
@@ -162,7 +164,9 @@ class RequestClient(Protocol):
     ) -> MessagingFuture[None]: ...
 
     @rpc_method
-    def end_session(self, request_id: str) -> MessagingFuture[None]: ...
+    def end_session(
+        self, request_id: str, lookup_id: str = ""
+    ) -> MessagingFuture[None]: ...
 
     @rpc_method
     def register_kv_cache_engine_driven_context(

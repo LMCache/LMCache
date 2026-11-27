@@ -281,7 +281,7 @@ class L1ManagerInterface(Protocol):
         ...
 
     def reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1OperationResult]:
         """Take ``read_locks`` read locks on each resident key."""
         ...
@@ -291,9 +291,22 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self, keys: list[ObjectKey], read_locks: int = 1, read_owner: str = ""
     ) -> dict[ObjectKey, L1Error]:
         """Release ``read_locks`` read locks on each key."""
+        ...
+
+    def acquire_read(
+        self,
+        keys: list[ObjectKey],
+        read_owner: str,
+        consumer_id: int | None = None,
+    ) -> tuple[dict[ObjectKey, L1OperationResult], list[int]]:
+        """Promote ``read_owner``'s named lease into untimed active-read handles."""
+        ...
+
+    def finish_active_reads(self, handles: list[int]) -> None:
+        """Release untimed active-read handles previously returned by acquire_read."""
         ...
 
     def reserve_write(
@@ -316,7 +329,11 @@ class L1ManagerInterface(Protocol):
         ...
 
     def finish_write_and_reserve_read(
-        self, keys: list[ObjectKey], read_locks: int = 1, tag: str = ""
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        tag: str = "",
+        read_owner: str = "",
     ) -> dict[ObjectKey, L1OperationResult]:
         """Commit ``tag``'s buffers and read-lock the resident objects."""
         ...

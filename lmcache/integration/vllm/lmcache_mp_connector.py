@@ -1102,6 +1102,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         ops = []
         cache_salts = []
         request_configs_list = []
+        lookup_ids = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
@@ -1110,18 +1111,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
+            lookup_ids.append(meta.lookup_id)
 
         if len(request_ids) == 0:
             return
 
         event = self.worker_adapter.create_recorded_event()
 
+        retrieve_kwargs: dict[str, Any] = {
+            "cache_salts": cache_salts,
+            "request_configs_list": request_configs_list,
+        }
+        if any(lookup_ids):
+            retrieve_kwargs["lookup_ids"] = lookup_ids
         self.worker_adapter.batched_submit_retrieve_requests(
             request_ids,
             ops,
             event,
-            cache_salts=cache_salts,
-            request_configs_list=request_configs_list,
+            **retrieve_kwargs,
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -1438,6 +1445,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "the prompt will be recomputed locally.",
                 request.request_id,
             )
+            self._end_tracker_lookup(tracker)
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.allocated_block_ids.clear()
             tracker.num_stored_tokens = 0
@@ -1479,6 +1487,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # boundary the in-flight lookup never used.
         if submitted:
             tracker.apc_covered_tokens = lookup_start
+            raw_lid = self.scheduler_adapter.get_active_lookup_id(request.request_id)
+            tracker.lookup_id = raw_lid if isinstance(raw_lid, str) else ""
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
         if ret is None:
@@ -1513,7 +1523,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 tracker.num_vllm_hit_tokens,
                 tracker.apc_covered_tokens,
             )
-            if ret > tracker.apc_covered_tokens:
+            if tracker.lookup_id:
+                self._end_tracker_lookup(tracker)
+            elif ret > tracker.apc_covered_tokens:
                 tracker.pending_free_ranges.append((tracker.apc_covered_tokens, ret))
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.need_full_lookup = True
@@ -1532,6 +1544,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 include_unfull_chunk=self._save_unfull_chunk,
             ):
                 tracker.lookup_started_at = time.monotonic()
+                raw_lid = self.scheduler_adapter.get_active_lookup_id(
+                    request.request_id
+                )
+                tracker.lookup_id = raw_lid if isinstance(raw_lid, str) else ""
             return None, True
 
         if ret == 0:
@@ -1600,7 +1616,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self._get_or_create_request_tracker(request)
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
-        self.scheduler_adapter.maybe_submit_lookup_request(
+        submitted = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             packed_token_ids=tracker.packed_token_ids(),
             cache_salt=tracker.cache_salt,
@@ -1608,6 +1624,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             reserve_last_token=self._reserve_last_token_for_lookup,
             include_unfull_chunk=self._save_unfull_chunk,
         )
+        if submitted:
+            raw_lid = self.scheduler_adapter.get_active_lookup_id(request.request_id)
+            tracker.lookup_id = raw_lid if isinstance(raw_lid, str) else ""
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -1669,6 +1688,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 
+            if not condition and tracker.lookup_id:
+                self._end_tracker_lookup(tracker)
+                tracker.pending_free_ranges = []
+                return
+
             # Free locks on chunks that vLLM already computed and won't
             # retrieve from LMCache, plus any ranges left locked by this
             # request's abandoned lookups (APC shrink re-lookups).
@@ -1687,15 +1711,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     free_end = tracker.num_vllm_hit_tokens
 
             if free_end > 0 or tracker.pending_free_ranges:
-                self.scheduler_adapter.free_lookup_locks(
-                    packed_token_ids=tracker.packed_token_ids(),
-                    start=0,
-                    end=free_end,
-                    request_id=request.request_id,
-                    cache_salt=tracker.cache_salt,
-                    request_configs=tracker.request_configs,
-                    extra_ranges=tuple(tracker.pending_free_ranges),
-                )
+                free_kwargs: dict[str, Any] = {
+                    "packed_token_ids": tracker.packed_token_ids(),
+                    "start": 0,
+                    "end": free_end,
+                    "request_id": request.request_id,
+                    "cache_salt": tracker.cache_salt,
+                    "request_configs": tracker.request_configs,
+                    "extra_ranges": tuple(tracker.pending_free_ranges),
+                }
+                if tracker.lookup_id:
+                    free_kwargs["lookup_id"] = tracker.lookup_id
+                self.scheduler_adapter.free_lookup_locks(**free_kwargs)
                 tracker.pending_free_ranges = []
                 logger.debug(
                     "Free locks of tokens %d-%d since it is cached by vLLM.",
@@ -1804,6 +1831,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # request starts over with a new tracker on its next lookup.
         tracker = self.request_trackers.get(request.request_id)
         delay_free = tracker is not None and tracker.store_scheduled
+        if tracker is not None:
+            self._end_tracker_lookup(tracker)
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
@@ -2189,6 +2218,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # will only do the remove if the tracker is not in the "fresh"
             # state, i.e., PREFETCHING
             if tracker.state != LMCacheMPRequestState.PREFETCHING:
+                self._end_tracker_lookup(tracker)
                 self.request_trackers.pop(request_id)
                 if self.lazy_offload:
                     # The recreated tracker restarts at token zero, so its
@@ -2204,6 +2234,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._apply_revision_tag(new_tracker)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
+
+    def _end_tracker_lookup(self, tracker: LMCacheMPRequestTracker) -> None:
+        """Tear down ``tracker``'s active named lookup attempt, if any."""
+        lookup_id = tracker.lookup_id
+        if not lookup_id:
+            return
+        tracker.lookup_id = ""
+        self.scheduler_adapter.end_lookup(tracker.request_id, lookup_id)
 
     def _apply_revision_tag(self, tracker: LMCacheMPRequestTracker) -> None:
         """Carry the engine revision as an ``lmcache.tag.revision`` tag.

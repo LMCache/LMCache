@@ -24,7 +24,11 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ShardReplicationDesc,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
+from lmcache.v1.distributed.storage_manager import (
+    ActiveReadCompletion,
+    L1WriteCompletion,
+    l1_owners_of,
+)
 from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -48,6 +52,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
 )
+from lmcache.v1.multiprocess.read_completion import ActiveReadCompletionTracker
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
@@ -285,6 +290,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             payload_type=tuple[int, int],
         )
         self._device_host_func_dispatcher.start()
+        self._active_read_tracker = ActiveReadCompletionTracker(
+            self._ctx.storage_manager.finish_active_reads
+        )
 
         # None when no path is configured, the platform is unsupported, or
         # channel initialization fails. Workers without fd handles do not need it.
@@ -494,6 +502,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        # Drain untimed active reads first so no async H2D reads freed L1 memory.
+        self._active_read_tracker.close()
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -1176,16 +1186,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             raise RuntimeError("Registered cache context has no event backend")
 
         num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
-        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
-            key, list(range(num_object_groups))
-        )
-        unfull_obj_keys = (
-            self._ctx.resolve_unfull_chunk_obj_keys(
-                key, list(range(num_object_groups)), chunk_size
+        try:
+            obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
+                key, list(range(num_object_groups))
             )
-            if key.has_unfull_chunk(chunk_size)
-            else []
-        )
+            unfull_obj_keys = (
+                self._ctx.resolve_unfull_chunk_obj_keys(
+                    key, list(range(num_object_groups)), chunk_size
+                )
+                if key.has_unfull_chunk(chunk_size)
+                else []
+            )
+        except KeyError:
+            logger.info(
+                "Skipping RETRIEVE for closed lookup session %s", key.session_key
+            )
+            return b"", False
         num_chunks = len(obj_keys_per_obj_group[0])
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
@@ -1252,28 +1268,6 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 event_backend.record_event(event, cache_context.stream)
                 return event_backend.export_event(event, cache_context.device), False
 
-            # Cut and stage all block_ids to GPU once before the transfer
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
-            producer_event = event_backend.import_event(
-                event_ipc_handle, cache_context.device
-            )
-            event_backend.wait_event(producer_event, cache_context.stream)
-            import_token = cache_context.hold_imported_event(producer_event)
-            submit_callback_to_stream(
-                cache_context.cupy_stream,
-                "release_imported_event",
-                (instance_id, import_token),
-            )
-
-            # Per object group, the prefetch only locked the in-window suffix
-            # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
-            # attention, where the value is < 0). Read and transfer only those.
-            # Aux (connector-private) groups are never served by the
-            # std retrieve: the lookup does not lock their keys and their
-            # block-id entry is a placeholder -- reading them would be an
-            # unlocked read of a plane nobody consumes here.
             attn_desc = cache_context.kv_layer_groups_manager.get_attn_desc()
             skipped_groups = {
                 g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
@@ -1294,21 +1288,61 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             )
 
             prefetched_keys: list[ObjectKey] = []
-            read_owners = self._ctx.get_read_owners(key.request_id)
+            read_owners = self._ctx.get_read_owners(key.session_key)
             retained_keys = [
                 obj_key
                 for group, keys in enumerate(obj_keys_per_obj_group)
                 if group not in skipped_groups
                 for obj_key in keys[group_skips[group] :]
             ] + unfull_retained_keys
-            # Capture every retained lock before enqueuing GPU work, including
-            # groups that a later transfer failure may leave unvisited.
-            read_completion = self._ctx.storage_manager.prepare_read_completion(
-                retained_keys, read_owners
-            )
+
+            active_completion: ActiveReadCompletion | None = None
+            acquired_by_key: dict[ObjectKey, MemoryObj] | None = None
+            read_completion = None
+            if key.lookup_id:
+                acquired_objs, active_completion = (
+                    self._ctx.storage_manager.acquire_read(
+                        retained_keys,
+                        read_owner=key.read_owner,
+                        consumer_id=key.worker_id,
+                        l1_owners=read_owners,
+                    )
+                )
+                if acquired_objs is None:
+                    logger.info(
+                        "Named retrieve missed or expired for session %s",
+                        key.session_key,
+                    )
+                    return b"", False
+                acquired_by_key = dict(zip(retained_keys, acquired_objs, strict=True))
+                if retained_keys:
+                    self._ctx.storage_manager.touch_cached_keys(retained_keys)
+            else:
+                # Capture every retained lock before enqueuing GPU work, including
+                # groups that a later transfer failure may leave unvisited.
+                read_completion = self._ctx.storage_manager.prepare_read_completion(
+                    retained_keys, read_owners
+                )
+
             total_bytes = 0
             retrieve_succeeded = True
+            copy_enqueued = False
             try:
+                # Cut and stage all block_ids to GPU once before the transfer
+                block_ids_per_group_gpu = downsample_and_stage_block_ids(
+                    cache_context, gpu_block_ids
+                )
+                producer_event = event_backend.import_event(
+                    event_ipc_handle, cache_context.device
+                )
+                event_backend.wait_event(producer_event, cache_context.stream)
+                import_token = cache_context.hold_imported_event(producer_event)
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "release_imported_event",
+                    (instance_id, import_token),
+                )
+
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
                         continue
@@ -1317,13 +1351,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     # Only an unfull chunk: no full chunk to read.
                     if unfull_obj_keys and (not in_window_keys):
                         continue
-                    found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
-                        in_window_keys, l1_owners=read_owners
-                    )
-                    if not window_objs or found_keys != in_window_keys:
-                        logger.error("Some keys not found during retrieve!")
-                        retrieve_succeeded = False
-                        break
+                    if acquired_by_key is not None:
+                        window_objs = [acquired_by_key[k] for k in in_window_keys]
+                    else:
+                        found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
+                            in_window_keys, l1_owners=read_owners
+                        )
+                        if not window_objs or found_keys != in_window_keys:
+                            logger.error("Some keys not found during retrieve!")
+                            retrieve_succeeded = False
+                            break
 
                     total_bytes += sum(mo.get_size() for mo in window_objs)
                     # None-pad the skipped prefix so block-id slicing is unchanged.
@@ -1338,8 +1375,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         transfer_key=transfer_key,
                         block_ids_host=gpu_block_ids,
                     )
+                    copy_enqueued = True
                     prefetched_keys.extend(in_window_keys)
                 if retrieve_succeeded and unfull_retained_keys:
+                    pre_unfull = (
+                        [acquired_by_key[k] for k in unfull_retained_keys]
+                        if acquired_by_key is not None
+                        else None
+                    )
                     total_bytes += self._retrieve_unfull_chunk_objects(
                         cache_context,
                         key,
@@ -1352,14 +1395,25 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         unfull_block_ids,
                         max(0, skip_first_n_tokens - num_chunks * chunk_size),
                         chunk_size,
+                        pre_acquired_objs=pre_unfull,
                     )
+                    copy_enqueued = True
                     prefetched_keys.extend(unfull_retained_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
+                if active_completion is not None:
+                    if copy_enqueued:
+                        self._active_read_tracker.defer(
+                            active_completion,
+                            cache_context.device,
+                            cache_context.stream,
+                        )
+                    else:
+                        self._ctx.storage_manager.finish_active_reads(active_completion)
                 event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
+                if read_completion is not None and retained_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_by_owner",
@@ -1566,40 +1620,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         block_ids: list[list[int]],
         skip_first_n_tokens: int,
         chunk_size: int,
+        pre_acquired_objs: list[MemoryObj] | None = None,
     ) -> int:
-        """Copy an unfull chunk's read-locked objects into the GPU blocks.
-
-        Runs inside a retrieve transaction, on its stream, after the producer
-        event was waited on; the transaction releases the read locks.
-
-        Args:
-            cache_context: The worker's cache context.
-            key: The retrieve key; it addresses the unfull chunk.
-            obj_keys: The unfull chunk's object keys, one per entry of
-                ``obj_group_ids``.
-            obj_group_ids: The object groups to retrieve.
-            block_ids: The unfull chunk's block IDs per kernel group.
-            skip_first_n_tokens: Leading tokens of the unfull chunk not to
-                write: the engine's prefix cache holds them in shared blocks.
-            chunk_size: Effective logical tokens per registered chunk.
-
-        Returns:
-            The bytes copied.
-
-        Raises:
-            ValueError: If an object is missing or does not fit the staging
-                buffer (a store never keeps one that does not), or a kernel
-                group has no block for the unfull chunk.
-        """
+        """Copy an unfull chunk's read-locked objects into the GPU blocks."""
         block_ids_gpu, skip_blocks, lead_blocks = trim_and_stage_unfull_chunk_block_ids(
             cache_context,
             block_ids,
             key.end % chunk_size,
             skip_first_n_tokens,
         )
-        found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
-            obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
-        )
+        if pre_acquired_objs is not None:
+            found_keys, memory_objs = obj_keys, pre_acquired_objs
+        else:
+            found_keys, memory_objs = self._ctx.storage_manager.unsafe_read(
+                obj_keys, l1_owners=self._ctx.get_read_owners(key.request_id)
+            )
         object_buffers: list[torch.Tensor] = []
         for obj_group_id in obj_group_ids:
             object_buffer = get_unfull_chunk_staging_buffer(cache_context, obj_group_id)

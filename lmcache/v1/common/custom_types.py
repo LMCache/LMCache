@@ -102,6 +102,10 @@ class IPCCacheServerKey:
     # instead of token_bytes. Defaulted, so payloads without it decode to b"".
     chunk_hashes: bytes = b""
 
+    # Optional per-lookup identifier for read_lifetime_v1 session isolation.
+    # Not part of cache identity; empty string uses legacy request-level locks.
+    lookup_id: str = field(default="", compare=False)
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
@@ -143,6 +147,7 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        lookup_id: str = "",
     ) -> "IPCCacheServerKey":
         """Create a key from unpacked token ids.
 
@@ -159,6 +164,7 @@ class IPCCacheServerKey:
             request_id: Request the key belongs to.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs.
+            lookup_id: Optional per-lookup isolation identifier.
 
         Returns:
             The key, with ``token_ids`` packed into ``token_bytes``.
@@ -173,6 +179,7 @@ class IPCCacheServerKey:
             request_id=request_id,
             cache_salt=cache_salt,
             request_configs=request_configs,
+            lookup_id=lookup_id,
         )
 
     @classmethod
@@ -187,6 +194,7 @@ class IPCCacheServerKey:
         request_id: str = "",
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        lookup_id: str = "",
     ) -> "IPCCacheServerKey":
         """Create a key from client-computed chunk hashes.
 
@@ -202,6 +210,7 @@ class IPCCacheServerKey:
             request_id: Request the key belongs to.
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs.
+            lookup_id: Optional per-lookup isolation identifier.
 
         Returns:
             The key, with the hashes concatenated into ``chunk_hashes``.
@@ -217,6 +226,7 @@ class IPCCacheServerKey:
             cache_salt=cache_salt,
             request_configs=request_configs,
             chunk_hashes=b"".join(chunk_hashes),
+            lookup_id=lookup_id,
         )
 
     @property
@@ -263,6 +273,18 @@ class IPCCacheServerKey:
             for offset in range(0, len(hashes), CHUNK_HASH_BYTES)
         ]
 
+    @property
+    def session_key(self) -> "SessionKey":
+        """Return the session-table key: ``(request_id, lookup_id)`` when named."""
+        return (self.request_id, self.lookup_id) if self.lookup_id else self.request_id
+
+    @property
+    def read_owner(self) -> str:
+        """Return an injective L1 ``read_owner`` key when ``lookup_id`` is set."""
+        if not self.lookup_id:
+            return ""
+        return f"{len(self.request_id)}:{self.request_id}:{self.lookup_id}"
+
     def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
         return IPCCacheServerKey(
@@ -276,6 +298,7 @@ class IPCCacheServerKey:
             cache_salt=self.cache_salt,
             request_configs=self.request_configs,
             chunk_hashes=self.chunk_hashes,
+            lookup_id=self.lookup_id,
         )
 
     def has_unfull_chunk(self, chunk_size: int) -> bool:
@@ -301,6 +324,13 @@ class IPCCacheServerKey:
 # Size of one client-computed (blake3) chunk hash in
 # IPCCacheServerKey.chunk_hashes.
 CHUNK_HASH_BYTES = 32
+
+# Session key type: ``request_id`` for legacy sessions, ``(request_id, lookup_id)``
+# for named read_lifetime_v1 lookup sessions.
+SessionKey = str | tuple[str, str]
+
+# Experimental capability string advertised by LookupModule via GET_EXPERIMENTAL.
+READ_LIFETIME_V1 = "read_lifetime_v1"
 
 
 class GroupLayout(msgspec.Struct):

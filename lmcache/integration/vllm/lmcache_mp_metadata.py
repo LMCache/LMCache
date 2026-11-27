@@ -132,6 +132,9 @@ class LMCacheMPRequestTracker:
     # Lock ranges left by abandoned lookups, released with the next FREE.
     pending_free_ranges: list[tuple[int, int]] = field(default_factory=list)
 
+    # Per-lookup identity when read_lifetime_v1 is active (empty on legacy).
+    lookup_id: str = ""
+
     mm_adjusted_prompt_ids: list[int] = field(default_factory=list)
 
     # Packed prefix of the logical token sequence, grown in place. A request
@@ -165,6 +168,7 @@ class LMCacheMPRequestTracker:
         self.apc_covered_tokens = 0
         self.need_full_lookup = False
         self.pending_free_ranges = []
+        self.lookup_id = ""
         self.state = LMCacheMPRequestState.PREFETCHING
         self.packed_tokens = bytearray()
         self.mm_adjusted_prompt_ids = []
@@ -346,6 +350,7 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    lookup_id: str = ""
 
     @staticmethod
     def GetStoreMetadata(
@@ -660,6 +665,7 @@ class LMCacheMPRequestMetadata:
                 op=op,
                 cache_salt=tracker.cache_salt,
                 request_configs=tracker.request_configs,
+                lookup_id=tracker.lookup_id,
             )
             return ret
 

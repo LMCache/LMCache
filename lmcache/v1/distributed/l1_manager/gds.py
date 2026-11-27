@@ -69,5 +69,6 @@ class GdsL1Manager(BaseL1Manager):
 
     def close(self) -> None:
         """Close the GDS context, then free objects and the slab address space."""
+        self._begin_close()
         close_l1_gds_context(self.l1_manager_id)
         super().close()

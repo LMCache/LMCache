@@ -746,6 +746,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ValueError: If no non-GPU context is registered for the given
                 instance ID, or the page is outside the key's chunks.
         """
+        if key.lookup_id:
+            raise ValueError("read_lifetime_v1 requires lmcache_driven transfer")
         entry, strategy = self._resolve_for_transfer(instance_id)
         chunk_size = entry.chunk_size
         start, end = self._page_range(key, chunk_start, chunk_count, chunk_size)
