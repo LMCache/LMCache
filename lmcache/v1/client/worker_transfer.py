@@ -48,6 +48,7 @@ from lmcache.v1.platform import (
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
+    peer_event_ipc_backend,
 )
 from lmcache.v1.platform.kv_wrap import kv_wrapper_fds_delivered, wrap_kv_caches
 from lmcache.v1.platform.transfer_mode import MPTransferMode
@@ -632,7 +633,8 @@ class LMCacheDrivenTransferContext(TransferContext):
         if self._is_closed():
             return
         self._device = device
-        self._event_backend = event_backend
+        # Per registration: a server that restarted is a new peer.
+        self._event_backend = peer_event_ipc_backend(event_backend)
         self._mq_timeout = mq_timeout
         self._chunk_size = lmcache_chunk_tokens
 

@@ -146,3 +146,104 @@ def test_imported_event_orders_consumer_behind_producer(
         if producer.is_alive():
             producer.terminate()
             producer.join(timeout=10)
+
+
+def _rerecording_producer(
+    buf: torch.Tensor, handle_q: "mp.Queue", go_q: "mp.Queue"
+) -> None:
+    """Record one event twice; only the second record is behind a slow write.
+
+    Mirrors a producer that reuses its interprocess events: the consumer opens
+    the handle after the first record and keeps the imported event.
+
+    Args:
+        buf: Device buffer shared with the parent process, filled with
+            ``MAGIC`` by the second transfer.
+        handle_q: Sends the handle after the first record, then ``"recorded"``
+            once the second record is enqueued.
+        go_q: The parent's signal that it has imported the handle.
+    """
+    device = buf.device
+    torch.cuda.set_device(device)
+    backend = get_event_ipc_backend(device)
+    stream = torch.cuda.Stream(device=device)
+
+    buf.fill_(0.0)  # warm the fill kernel, see ``_producer``
+    torch.cuda.synchronize()
+
+    event = backend.create_event(device)
+    backend.record_event(event, stream)  # first transfer: nothing pending
+    stream.synchronize()
+    handle_q.put(bytes(backend.export_event(event, device)))
+
+    go_q.get(timeout=HANDLE_TIMEOUT_S)
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(SLEEP_CYCLES)
+        buf.fill_(MAGIC)
+        backend.record_event(event, stream)  # second transfer, same event
+    handle_q.put("recorded")
+    stream.synchronize()
+
+
+@requires_event_ipc
+def test_already_imported_event_orders_consumer_behind_a_later_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An event imported once must follow the producer's next record of it.
+
+    Event reuse depends on this: the consumer keeps the imported event and
+    waits on it again for a later transfer that the producer recorded on the
+    same event. If the kept import still showed the first (finished) record,
+    the wait would be a no-op and the consumer would read zeros.
+
+    Args:
+        monkeypatch: Used to clear ``CUDA_LAUNCH_BLOCKING`` for the child.
+    """
+    monkeypatch.delenv("CUDA_LAUNCH_BLOCKING", raising=False)
+
+    device = torch.device("cuda:0")
+    backend = get_event_ipc_backend(device)
+
+    buf = torch.zeros(NUMEL, device=device)
+    buf.share_memory_()
+
+    ctx = mp.get_context("spawn")
+    handle_q: "mp.Queue" = ctx.Queue()
+    go_q: "mp.Queue" = ctx.Queue()
+    producer = ctx.Process(target=_rerecording_producer, args=(buf, handle_q, go_q))
+    producer.start()
+    try:
+        handle = handle_q.get(timeout=HANDLE_TIMEOUT_S)
+        imported = backend.import_event(handle, device)  # opened once
+
+        consumer_stream = torch.cuda.Stream(device=device)
+        backend.wait_event(imported, consumer_stream)  # first record: finished
+        consumer_stream.synchronize()
+
+        go_q.put("go")
+        assert handle_q.get(timeout=HANDLE_TIMEOUT_S) == "recorded"
+
+        if torch.version.hip is not None:
+            # On HIP an imported event reports the producer's progress (on
+            # CUDA ``query`` of an imported event is per-process bookkeeping).
+            # The ROCm host event wait polls exactly this.
+            assert not backend.query_event(imported), (
+                "the imported event reports complete while the producer's "
+                "second record is still pending"
+            )
+
+        backend.wait_event(imported, consumer_stream)
+        with torch.cuda.stream(consumer_stream):
+            observed = buf.clone()
+        consumer_stream.synchronize()
+
+        unwritten = int((observed != MAGIC).sum().item())
+        assert unwritten == 0, (
+            f"consumer read {unwritten}/{NUMEL} elements before the producer's "
+            "second record finished"
+        )
+    finally:
+        producer.join(timeout=60)
+        if producer.is_alive():
+            producer.terminate()
+            producer.join(timeout=10)

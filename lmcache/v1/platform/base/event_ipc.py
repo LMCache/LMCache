@@ -290,3 +290,20 @@ def get_event_ipc_backend(device: object) -> EventIPCBackend:
     if backend is None:
         raise RuntimeError(f"Device type {device_type!r} does not support event IPC.")
     return backend
+
+
+def peer_event_ipc_backend(backend: EventIPCBackend) -> EventIPCBackend:
+    """Return the backend to use for one registration of one peer process.
+
+    A backend that keeps state per peer (ROCm keeps the events it imported
+    from it) returns a view that holds that state, so it is dropped with the
+    registration. Any other backend is returned as is.
+
+    Args:
+        backend: The device's event IPC backend.
+
+    Returns:
+        The backend the registration should use for its event calls.
+    """
+    for_peer = getattr(backend, "for_peer", None)
+    return backend if for_peer is None else for_peer()

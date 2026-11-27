@@ -112,6 +112,7 @@ lmcache/v1/platform/devices/cpu/__init__.py      # CPU stub backend registration
 lmcache/v1/platform/devices/cuda/__init__.py     # CUDA backend registration
 lmcache/v1/platform/devices/musa/event_ipc.py    # MUSA capability gate and adapter
 lmcache/v1/platform/devices/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
+lmcache/v1/platform/devices/rocm/event_reuse.py  # ROCm event pool and per-peer imports
 ```
 
 ### Default backend
@@ -153,6 +154,23 @@ and backend do. If the opt-in MUSA event API is unavailable,
 `check_event_support()` raises a device-named `RuntimeError`. Memory IPC and
 server-side block transfer are separate capabilities and are not required to
 validate the standalone event backend.
+
+### Event reuse on ROCm
+
+`ReusingEventIPCBackend` (`lmcache/v1/platform/devices/rocm/event_reuse.py`)
+lets a consumer open each IPC handle once instead of once per transfer. Other
+devices keep one event per transfer.
+
+- Producer: `create_event` hands out a pooled event whose last record has
+  finished. The event leaves the pool there and returns in `record_event`, so
+  an event that was handed out and not recorded yet is never handed to a second
+  transfer. An event that is never recorded does not return to the pool.
+- Consumer: `peer_event_ipc_backend(backend)` returns the backend one
+  registration of one peer uses. For ROCm it is a view that keeps the events
+  imported from that peer. The server asks for one per registered instance and
+  the engine for one per `register()`, so the imports of an unregistered or
+  restarted peer are dropped with its registration and are never served to the
+  next one. Backends without per-peer state are returned unchanged.
 
 ## Registration
 

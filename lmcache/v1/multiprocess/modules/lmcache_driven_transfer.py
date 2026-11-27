@@ -53,6 +53,7 @@ from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
     get_event_ipc_backend,
+    peer_event_ipc_backend,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -613,6 +614,11 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         f"chunk_size={existing.chunk_size}"
                     )
                 existing.last_seen = now
+                # The sender may be a restarted peer under the same ID: do not
+                # serve it the events imported from the previous one.
+                existing.event_backend = peer_event_ipc_backend(
+                    get_event_ipc_backend(existing.cache_context.device)
+                )
                 logger.info(
                     "Instance %d already registered; refreshing liveness",
                     instance_id,
@@ -632,6 +638,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         num_object_groups = kv_groups_manager.num_object_groups
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
+        # Per registration: its imported events go away with the entry.
+        event_backend = peer_event_ipc_backend(event_backend)
         layout_desc = get_layout_desc(cache_context, chunk_size, object_group_id=0)
         # One layout per object group, also in the single-group case: no
         # None special-casing downstream (group 0 maps to the merged layout).
