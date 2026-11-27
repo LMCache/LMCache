@@ -3,6 +3,7 @@
 
 # Standard
 from argparse import Namespace
+from collections.abc import Mapping
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
@@ -18,6 +19,7 @@ from lmcache.cli.commands.describe import (
     DescribeError,
     fetch_health,
     fetch_json,
+    fetch_metric_totals,
     fetch_running_requests,
     fmt_health,
     normalize_url,
@@ -696,6 +698,183 @@ class TestFetchRunningRequests:
 
     def test_connection_refused(self):
         assert fetch_running_requests("http://127.0.0.1:19999/metrics") is None
+
+
+# ---------------------------------------------------------------------------
+# describe kvcache: cache hits from /metrics
+# ---------------------------------------------------------------------------
+
+# Two series per counter (two cache salts), grouped per family as the MP
+# server's OpenTelemetry Prometheus exporter writes them. The trailing
+# ``_created`` block is what native ``prometheus_client`` counters add.
+_HIT_SERIES = {
+    "requested": (600, 424),
+    "hit": (500, 268),
+    "hit_l1": (400, 112),
+    "hit_l2": (100, 156),
+    "prompt": (610, 420),
+    "request_hit": (520, 280),
+}
+
+
+def _lookup_metrics_text(series: Mapping[str, tuple[float, float]]) -> bytes:
+    """Render lookup counters in Prometheus text format, one series per salt."""
+    lines = []
+    for short, values in series.items():
+        family = f"lmcache_mp_lookup_{short}_tokens"
+        salts = [f'{{cache_salt="{salt}",model_name="m"}}' for salt in ("a", "b")]
+        lines.append(f"# TYPE {family}_total counter")
+        for labels, value in zip(salts, values, strict=True):
+            lines.append(f"{family}_total{labels} {float(value)}")
+        lines.append(f"# TYPE {family}_created gauge")
+        lines.extend(f"{family}_created{labels} 1.7e9" for labels in salts)
+    return ("\n".join(lines) + "\n").encode()
+
+
+class _KVCacheServer:
+    """Serve ``/status`` JSON and a ``/metrics`` response on a free port.
+
+    A ``metrics_length`` larger than the body makes ``/metrics`` close before
+    its declared length, as a server that dies mid-response does.
+    """
+
+    def __init__(
+        self,
+        metrics_body: bytes,
+        metrics_code: int = 200,
+        metrics_length: int | None = None,
+    ) -> None:
+        status_body = json.dumps(SAMPLE_STATUS).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                length = None
+                if self.path == "/status":
+                    code, body = 200, status_body
+                elif self.path == "/metrics":
+                    code, body = metrics_code, metrics_body
+                    length = metrics_length
+                else:
+                    code, body = 404, b""
+                self.send_response(code)
+                self.send_header("Content-Length", str(length or len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args) -> None:
+                pass
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_KVCacheServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _describe_kvcache_json(url: str) -> dict:
+    """Run ``describe kvcache --format json`` against *url*; return metrics."""
+    # Standard
+    import io
+
+    args = Namespace(target="kvcache", url=url, format="json", output=None)
+    buf = io.StringIO()
+    with patch("sys.stdout", buf):
+        DescribeCommand().execute(args)
+    return json.loads(buf.getvalue())["metrics"]
+
+
+_NA_HITS = {
+    "lookup_requested_tokens": None,
+    "lookup_hit_tokens": None,
+    "lookup_hit_rate": None,
+    "l1_hit_tokens": None,
+    "l2_hit_tokens": None,
+    "request_hit_rate": None,
+}
+
+
+class TestDescribeKvcacheCacheHits:
+    """``describe kvcache`` reports lookup hits from the server's ``/metrics``."""
+
+    def test_sums_series_and_derives_rates(self) -> None:
+        with _KVCacheServer(_lookup_metrics_text(_HIT_SERIES)) as server:
+            metrics = _describe_kvcache_json(server.url)
+
+        assert metrics["cache_hits"] == {
+            "lookup_requested_tokens": 1024,
+            "lookup_hit_tokens": 768,
+            "lookup_hit_rate": 75.0,
+            "l1_hit_tokens": 512,
+            "l2_hit_tokens": 256,
+            "request_hit_rate": 77.7,  # 800 / 1030
+        }
+        # The /status sections are unaffected.
+        assert metrics["health"] == "OK"
+        assert metrics["cached_objects"] == 1024
+
+    @pytest.mark.parametrize(
+        ("body", "code", "length"),
+        [
+            pytest.param(b"", 404, None, id="metrics-endpoint-missing"),
+            pytest.param(b"not { prometheus\n", 200, None, id="unparsable"),
+            pytest.param(b"other_metric_total 1.0\n", 200, None, id="counters-absent"),
+            pytest.param(
+                _lookup_metrics_text(_HIT_SERIES)[:40], 200, 4096, id="truncated"
+            ),
+            # Valid exposition values that no token count can hold.
+            pytest.param(
+                _lookup_metrics_text({s: (float("nan"), 1) for s in _HIT_SERIES}),
+                200,
+                None,
+                id="nan",
+            ),
+            pytest.param(
+                _lookup_metrics_text({s: (float("inf"), 1) for s in _HIT_SERIES}),
+                200,
+                None,
+                id="inf",
+            ),
+        ],
+    )
+    def test_unavailable_hits_show_na(
+        self, body: bytes, code: int, length: int | None
+    ) -> None:
+        with _KVCacheServer(body, metrics_code=code, metrics_length=length) as server:
+            metrics = _describe_kvcache_json(server.url)
+
+        assert metrics["cache_hits"] == _NA_HITS
+        assert metrics["health"] == "OK"
+
+    def test_rates_na_before_first_lookup(self) -> None:
+        zeros = {short: (0, 0) for short in _HIT_SERIES}
+        with _KVCacheServer(_lookup_metrics_text(zeros)) as server:
+            hits = _describe_kvcache_json(server.url)["cache_hits"]
+
+        assert hits["lookup_requested_tokens"] == 0
+        assert hits["lookup_hit_tokens"] == 0
+        assert hits["lookup_hit_rate"] is None
+        assert hits["request_hit_rate"] is None
+
+
+class TestFetchMetricTotals:
+    def test_reads_counter_families_and_omits_absent(self) -> None:
+        with _KVCacheServer(_lookup_metrics_text(_HIT_SERIES)) as server:
+            totals = fetch_metric_totals(
+                f"{server.url}/metrics",
+                ["lmcache_mp_lookup_hit_tokens", "lmcache_mp_not_exported"],
+            )
+
+        # ``_created`` timestamps are not added to the counter's sum.
+        assert totals == {"lmcache_mp_lookup_hit_tokens": 768.0}
+
+    def test_connection_refused(self) -> None:
+        assert fetch_metric_totals("http://127.0.0.1:19999/metrics", ["x"]) == {}
 
 
 # ---------------------------------------------------------------------------
