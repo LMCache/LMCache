@@ -7,8 +7,10 @@ Usage::
 """
 
 # Standard
+from http.client import IncompleteRead
 from typing import TYPE_CHECKING, Iterable
 import argparse
+import math
 import sys
 import urllib.error
 import urllib.request
@@ -138,8 +140,9 @@ def fetch_metric_totals(
 
     Returns:
         A mapping from each requested family found on the page to its sum.
-        Families absent from the page are omitted, and an unreachable or
-        unparsable page yields an empty mapping.
+        Families absent from the page or with a non-finite sum (``NaN`` or
+        ``Inf``) are omitted, and an unreachable, truncated or unparsable
+        page yields an empty mapping.
     """
     wanted = set(names)
     try:
@@ -147,7 +150,7 @@ def fetch_metric_totals(
             urllib.request.Request(url), timeout=timeout
         ) as resp:
             text = resp.read().decode()
-    except (urllib.error.URLError, OSError, UnicodeDecodeError):
+    except (urllib.error.URLError, OSError, IncompleteRead, UnicodeDecodeError):
         return {}
 
     totals: dict[str, float] = {}
@@ -167,7 +170,8 @@ def fetch_metric_totals(
     except ValueError:
         # Malformed exposition text; treat the whole page as unavailable.
         return {}
-    return totals
+    # The exposition format allows NaN and +/-Inf, which no count can hold.
+    return {name: total for name, total in totals.items() if math.isfinite(total)}
 
 
 def fmt_bytes(n: int) -> str:

@@ -3,6 +3,7 @@
 
 # Standard
 from argparse import Namespace
+from collections.abc import Mapping
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Event, Thread
@@ -716,7 +717,7 @@ _HIT_SERIES = {
 }
 
 
-def _lookup_metrics_text(series: dict[str, tuple[int, int]]) -> bytes:
+def _lookup_metrics_text(series: Mapping[str, tuple[float, float]]) -> bytes:
     """Render lookup counters in Prometheus text format, one series per salt."""
     lines = []
     for short, values in series.items():
@@ -731,21 +732,32 @@ def _lookup_metrics_text(series: dict[str, tuple[int, int]]) -> bytes:
 
 
 class _KVCacheServer:
-    """Serve ``/status`` JSON and a ``/metrics`` response on a free port."""
+    """Serve ``/status`` JSON and a ``/metrics`` response on a free port.
 
-    def __init__(self, metrics_body: bytes, metrics_code: int = 200) -> None:
+    A ``metrics_length`` larger than the body makes ``/metrics`` close before
+    its declared length, as a server that dies mid-response does.
+    """
+
+    def __init__(
+        self,
+        metrics_body: bytes,
+        metrics_code: int = 200,
+        metrics_length: int | None = None,
+    ) -> None:
         status_body = json.dumps(SAMPLE_STATUS).encode()
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                length = None
                 if self.path == "/status":
                     code, body = 200, status_body
                 elif self.path == "/metrics":
                     code, body = metrics_code, metrics_body
+                    length = metrics_length
                 else:
                     code, body = 404, b""
                 self.send_response(code)
-                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Length", str(length or len(body)))
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -807,15 +819,33 @@ class TestDescribeKvcacheCacheHits:
         assert metrics["cached_objects"] == 1024
 
     @pytest.mark.parametrize(
-        ("body", "code"),
+        ("body", "code", "length"),
         [
-            pytest.param(b"", 404, id="metrics-endpoint-missing"),
-            pytest.param(b"not { prometheus\n", 200, id="unparsable"),
-            pytest.param(b"other_metric_total 1.0\n", 200, id="counters-absent"),
+            pytest.param(b"", 404, None, id="metrics-endpoint-missing"),
+            pytest.param(b"not { prometheus\n", 200, None, id="unparsable"),
+            pytest.param(b"other_metric_total 1.0\n", 200, None, id="counters-absent"),
+            pytest.param(
+                _lookup_metrics_text(_HIT_SERIES)[:40], 200, 4096, id="truncated"
+            ),
+            # Valid exposition values that no token count can hold.
+            pytest.param(
+                _lookup_metrics_text({s: (float("nan"), 1) for s in _HIT_SERIES}),
+                200,
+                None,
+                id="nan",
+            ),
+            pytest.param(
+                _lookup_metrics_text({s: (float("inf"), 1) for s in _HIT_SERIES}),
+                200,
+                None,
+                id="inf",
+            ),
         ],
     )
-    def test_unavailable_hits_show_na(self, body: bytes, code: int) -> None:
-        with _KVCacheServer(body, metrics_code=code) as server:
+    def test_unavailable_hits_show_na(
+        self, body: bytes, code: int, length: int | None
+    ) -> None:
+        with _KVCacheServer(body, metrics_code=code, metrics_length=length) as server:
             metrics = _describe_kvcache_json(server.url)
 
         assert metrics["cache_hits"] == _NA_HITS

@@ -304,7 +304,7 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 | Connection refused / timeout | Print error to stderr, exit 1 |
 | HTTP 503 (engine not initialized) | Print "Server unhealthy: engine not initialized", exit 1 |
 | Missing fields in response | Display as `N/A` (Metrics default for `None` values) |
-| `/metrics` unreachable, unparsable, or missing a hit counter | Affected `cache_hits` rows are `N/A`; exit code unchanged |
+| `/metrics` unreachable, truncated, unparsable, missing a hit counter, or reporting `NaN`/`Inf` | Affected `cache_hits` rows are `N/A`; exit code unchanged |
 
 ---
 
