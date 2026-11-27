@@ -40,8 +40,8 @@ class P2PStorePolicy(StorePolicy):
     Keep objects local below a DRAM usage threshold, store them into a peer
     above it.
 
-    A store task goes to at most one peer: the write-enabled P2P adapters take
-    turns. A P2P adapter with writes disabled never gets a task.
+    A store task goes to at most one peer: write-enabled P2P adapters whose
+    thresholds are met take turns. A peer below its threshold is skipped.
 
     Args:
         l1_managers: Every L1 manager of the storage manager, in
@@ -62,8 +62,8 @@ class P2PStorePolicy(StorePolicy):
         adapters: list[L2AdapterDescriptor],
     ) -> dict[int, list[ObjectKey]]:
         """
-        Send the keys to every non-P2P adapter and, above the usage
-        threshold, to one write-enabled peer.
+        Send the keys to every non-P2P adapter and the next write-enabled peer
+        whose usage threshold is met, in round-robin order.
 
         Args:
             keys: Keys that were just written to L1.
@@ -87,11 +87,14 @@ class P2PStorePolicy(StorePolicy):
         if not peers or self._local_dram_l1 is None:
             return targets
 
-        peer_index, peer_config = peers[self._next_peer % len(peers)]
         used_bytes, total_bytes = self._local_dram_l1.get_memory_usage()
-        if used_bytes >= peer_config.write_l1_usage_threshold * total_bytes:
-            self._next_peer += 1
-            targets[peer_index] = list(keys)
+        for offset in range(len(peers)):
+            position = (self._next_peer + offset) % len(peers)
+            peer_index, peer_config = peers[position]
+            if used_bytes >= peer_config.write_l1_usage_threshold * total_bytes:
+                self._next_peer = position + 1
+                targets[peer_index] = list(keys)
+                break
         return targets
 
     def select_l1_deletions(

@@ -71,10 +71,11 @@ only one whose objects a P2P adapter can send.
 | P2P adapter with `write_enabled=False` | Never. (Under `default` it gets a task that the adapter completes as a 0-byte no-op.) |
 | P2P adapters with `write_enabled=True` | Exactly **one** of them, and only when `used / total` of the local DRAM L1 is at or above that adapter's `write_l1_usage_threshold` |
 
-The write-enabled peers take turns: a counter advances each time a task is
-sent to a peer, so tasks spread evenly without the policy tracking peer
-capacity. A task is not retried on another peer when the chosen one rejects
-it; the objects then simply stay local.
+Selection scans write-enabled peers in round-robin order, skipping peers whose
+thresholds are above the current local usage. After selecting a peer, the next
+call starts after it. If no peer meets its threshold, no peer gets a task.
+A task is not retried on another peer when the chosen one rejects it; the
+objects then simply stay local.
 
 `select_l1_deletions(keys, adapter)` returns every key when `adapter` is a
 write-enabled P2P adapter and nothing otherwise. The store controller defers
