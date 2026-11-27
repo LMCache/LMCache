@@ -31,6 +31,11 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
   power of two.
 - ``header_bytes``: Per-slot header reservation (default ``4096``).
 - ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
+  The region holds two checkpoint copies, and each copy must fit the whole
+  index. A checkpoint larger than one copy is skipped, so newer entries are
+  lost on restart; the core logs a warning when a checkpoint passes 80% of a
+  copy. Changing this value changes the device layout, so the existing cache
+  is not recovered.
 - ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
 - ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
