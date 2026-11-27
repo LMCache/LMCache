@@ -1,0 +1,3 @@
+This temporary file verifies the deprecated-module warning comment.
+It intentionally stays below the 200-line auto-close threshold.
+Do not merge this test change.
