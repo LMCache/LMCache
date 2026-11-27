@@ -20,6 +20,7 @@ only the attributes the seeding code touches are populated.
 
 # Standard
 import asyncio
+import logging
 import threading
 
 # Third Party
@@ -531,8 +532,17 @@ def test_checkpoint_writes_when_sidecar_is_absent_or_older(running_loop):
     assert _lru_index_writer(bucket[_SIDECAR]) == (200.0, "new")
 
 
+class _CaptureHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
 def test_rolling_restart_old_adapter_does_not_overwrite_its_replacement(
-    running_loop, caplog
+    running_loop,
 ):
     """The old adapter keeps running after its replacement takes over the
     sidecar; neither its periodic nor its final checkpoint may replace the
@@ -549,12 +559,17 @@ def test_rolling_restart_old_adapter_does_not_overwrite_its_replacement(
     newer_body = bucket[_SIDECAR]
 
     _accessed(old, 3)
-    with caplog.at_level("WARNING"):
+    # The adapter's logger does not propagate, so pytest's caplog misses it.
+    handler = _CaptureHandler()
+    s3mod.logger.addHandler(handler)
+    try:
         assert old._checkpoint_lru_index() is False
         assert old._checkpoint_lru_index(timeout=5.0) is False  # close()
+    finally:
+        s3mod.logger.removeHandler(handler)
     assert bucket[_SIDECAR] == newer_body
     assert old.puts == 1
-    assert sum("newer adapter" in r.getMessage() for r in caplog.records) == 1
+    assert sum("newer adapter" in r.getMessage() for r in handler.records) == 1
 
     # The replacement keeps writing.
     _accessed(new, 4)
