@@ -5,6 +5,7 @@
 #include "event_recorder.h"
 
 #include <exception>
+#include <utility>
 
 namespace {
 
@@ -33,6 +34,28 @@ void release_context(PhaseTimingRecord& record) {
   }
   record.ctx.reset();
 }
+
+// Declare this before the queue lock so CUDA cleanup runs after unlocking,
+// including when a later queue allocation throws.
+class EvictedRecords {
+ public:
+  void trim(std::deque<PhaseTimingRecord>& pending, size_t limit) {
+    while (pending.size() > limit) {
+      records_.push_back(std::move(pending.front()));
+      pending.pop_front();
+    }
+  }
+
+  ~EvictedRecords() {
+    for (auto& record : records_) {
+      destroy_phase_timing_events(record.start, record.end);
+      release_context(record);
+    }
+  }
+
+ private:
+  std::vector<PhaseTimingRecord> records_;
+};
 
 // Host callback enqueued right after the anchor event: stamps the wall
 // clock. Owns and frees the shared_ptr copy it was handed.
@@ -212,9 +235,10 @@ void PhaseTimingRecorder::push_batch(
   if (records.empty()) {
     return;
   }
+  EvictedRecords evicted;
   std::lock_guard<std::mutex> lock(mutex_);
   for (const auto& record : records) {
-    evict_until_below_cap(1);
+    evicted.trim(pending_, kMaxPending - 1);
     pending_.push_back(record);
   }
 }
@@ -253,20 +277,12 @@ std::vector<PhaseTimingSample> PhaseTimingRecorder::pop_completed() {
   // Not-yet-completed records go back at the front: they predate anything
   // pushed while the queue was unlocked, keeping eviction oldest-first.
   if (!not_ready.empty()) {
+    EvictedRecords evicted;
     std::lock_guard<std::mutex> lock(mutex_);
     pending_.insert(pending_.begin(), not_ready.begin(), not_ready.end());
-    evict_until_below_cap(0);
+    evicted.trim(pending_, kMaxPending);
   }
   return samples;
-}
-
-void PhaseTimingRecorder::evict_until_below_cap(size_t headroom) {
-  while (pending_.size() + headroom > kMaxPending) {
-    PhaseTimingRecord& oldest = pending_.front();
-    destroy_phase_timing_events(oldest.start, oldest.end);
-    release_context(oldest);
-    pending_.pop_front();
-  }
 }
 
 std::vector<PhaseTimingSample> pop_completed_phase_timings() {
