@@ -658,7 +658,34 @@ def test_launcher_skips_start_when_server_already_healthy(monkeypatch) -> None:
     popen_mock.assert_not_called()
 
 
-def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
+def test_launcher_without_server_package_fails_before_spawning(monkeypatch) -> None:
+    """With no server to start, the error names the full distribution."""
+    popen_mock = MagicMock()
+    monkeypatch.setattr(
+        launcher_mod,
+        "is_mp_server_healthy",
+        lambda server_url, zmq_context, **_: False,
+    )
+    monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
+    # As under lmcache-client, which has no lmcache.v1.multiprocess.
+    monkeypatch.setitem(sys.modules, "lmcache.v1.multiprocess", None)
+    config = MPServerAutostartConfig.from_extra_config(
+        extra_config={"lmcache.mp.autostart": True},
+        server_host="grpc://localhost",
+        server_port=5555,
+    )
+
+    with pytest.raises(RuntimeError, match="full lmcache distribution"):
+        MPServerLauncher(config).start("grpc://localhost:5555", MagicMock())
+
+    popen_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("transport", ["grpc", "zmq"])
+def test_launcher_starts_command_and_waits_until_healthy(
+    monkeypatch, transport: str
+) -> None:
+    """The launcher passes the transport its endpoint names."""
     health_results = iter([False, True])
     process = FakeProcess()
     popen_mock = MagicMock(return_value=process)
@@ -668,13 +695,15 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         lambda server_url, zmq_context, **_: next(health_results),
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
+    scheme = "grpc" if transport == "grpc" else "tcp"
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": True},
-        server_host="tcp://localhost",
+        server_host=f"{scheme}://localhost",
         server_port=5555,
+        transport=transport,
     )
 
-    MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
+    MPServerLauncher(config).start(f"{scheme}://localhost:5555", MagicMock())
 
     popen_mock.assert_called_once()
     command = popen_mock.call_args.args[0]
@@ -691,7 +720,7 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         "--http-host",
         "localhost",
         "--transport",
-        "zmq",
+        transport,
     ]
 
 

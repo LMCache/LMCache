@@ -8,14 +8,16 @@ name: PR Full Build
 # check that wheels still build.
 #
 # No tests, no code-quality checks, no publishing — those are covered by
-# test.yml / code_quality_checks.yml (per-PR) and publish.yml (on merge).
+# code_quality_checks.yml (per-PR) and publish.yml (on merge).
 
 on:
     pull_request:
         branches:
             - dev
             - "release-**"
-        types: [opened, synchronize, reopened, labeled, ready_for_review]
+        # converted_to_draft starts a run that skips every job, so the
+        # concurrency group cancels the builds in flight.
+        types: [opened, synchronize, reopened, labeled, ready_for_review, converted_to_draft]
 
 # Cancel older in-flight runs on the same PR. github.ref is
 # refs/pull/<N>/merge on pull_request events, so each PR gets its own group.
@@ -64,6 +66,13 @@ jobs:
             contains(github.event.pull_request.labels.*.name, 'full') &&
             github.event.pull_request.draft != true
         uses: ./.github/workflows/build_cpu_artifacts.yml
+
+    build-client:
+        name: Build client
+        if: >-
+            contains(github.event.pull_request.labels.*.name, 'full') &&
+            github.event.pull_request.draft != true
+        uses: ./.github/workflows/build_client_artifacts.yml
 
     build-rocm:
         name: Build ROCm

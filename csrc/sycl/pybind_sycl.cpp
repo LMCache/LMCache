@@ -67,8 +67,6 @@ PYBIND11_MODULE(xpu_ops, m) {
       py::arg("slot_mapping"), py::arg("direction"),
       py::arg("engine_kv_format"), py::arg("token_major") = false,
       py::call_guard<py::gil_scoped_release>());
-  m.def("load_and_reshape_flash", &load_and_reshape_flash);
-  m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def(
       "lmcache_memcpy_async",
       [](uintptr_t dest, uintptr_t src, size_t nbytes, int direction,

@@ -2,9 +2,10 @@
 
 ## Background
 
-The LMCache multiprocess (MP) server currently uses one global chunk size.
-Initial negotiation may change that global value, which prevents one MP server
-from serving inference deployments that require different chunk sizes.
+Before multi-chunk-size support, the LMCache multiprocess (MP) server used one
+global chunk size. Initial server-side negotiation could change that value,
+which prevented one MP server from serving inference deployments that required
+different chunk sizes.
 
 `LayoutDescRegistry` already uses `(model_name, world_size)` to connect worker
 registration metadata with scheduler lookups. A worker computes its KV layout
@@ -24,17 +25,17 @@ parallelism, it can also own the metadata needed for multiple chunk sizes.
 - **Registration key**: The `(model_name, world_size)` pair that uniquely
   identifies shared registration metadata.
 
-## Existing Flow
+## Previous Flow
 
-The MP server does not create layouts at startup. A worker creates them when it
-registers its KV cache:
+The legacy MP server did not create layouts at startup. A worker created them
+when it registered its KV cache:
 
 ```text
 MP server starts
     |
     `-- ctx.chunk_size = configured server default
             |
-            `-- global negotiation may change ctx.chunk_size
+            `-- server-side negotiation could change ctx.chunk_size
                     |
 worker register_kv_cache()
     |
@@ -45,15 +46,15 @@ worker register_kv_cache()
             `-- store the computed layout
 ```
 
-`MemoryLayoutDesc` stores shapes and dtypes but does not explicitly store a
-chunk size. However, `get_layout_desc(cache_context, chunk_size, ...)` uses the
-chunk size to compute those shapes, so every layout already depends implicitly
+`MemoryLayoutDesc` stored shapes and dtypes but did not explicitly store a
+chunk size. However, `get_layout_desc(cache_context, chunk_size, ...)` used the
+chunk size to compute those shapes, so every layout already depended implicitly
 on the chunk size used to create it.
 
 Scheduler lookup and prefetch subsequently read layouts from the registry,
-while store, retrieve, and other data paths still use the global
-`ctx.chunk_size` and `ctx.token_hasher`. Adding fields to the registry is
-therefore insufficient by itself: the normal data paths must also select
+while store, retrieve, and other data paths still used the global
+`ctx.chunk_size` and `ctx.token_hasher`. Adding fields to the registry was
+therefore insufficient by itself: the normal data paths also needed to select
 metadata by registration key.
 
 ## Goals
@@ -281,17 +282,11 @@ agree on the effective chunk size:
 
 ## Unfull-Chunk Compatibility
 
-`lmcache.mp.save_unfull_chunk` does not initially support multiple effective
-chunk sizes. When it is enabled, every registration must use the MP server's
-configured `--chunk-size`; the server rejects a registration that resolves to
-a different value. MP servers that share an L2 cache must also use the same
-configured chunk size.
-
-An unfull chunk's object key does not currently encode the chunk size. The same
-short token sequence can therefore produce the same key under two chunk sizes
-even though the corresponding object layouts differ. Restricting the feature
-to one chunk size prevents an object written with one layout from being read
-with another.
+An unfull chunk's `ObjectKey` includes the registration's effective full chunk
+size as the identity tag `chunk_size`. Full-chunk keys
+remain unchanged. The tag participates in equality, hashing, L2 key encoding,
+and internal wire serialization, so unfull objects created for different chunk
+sizes cannot match each other or a full object with the same content hash.
 
 For example, consider the following sequence for the same
 `(model_name, world_size)` registration key:
@@ -301,13 +296,16 @@ For example, consider the following sequence for the same
 3. Unregister the final worker, then register again with a chunk size of 256.
 4. Look up the same 256-token prompt, which is now one full chunk.
 
-Both objects currently receive the same `ObjectKey`, although the first was
-allocated using the 512-token layout and the second registration expects the
-256-token layout. The lookup can therefore report a false hit and retrieve an
-object whose size and layout do not match the current registration.
+The first object is tagged with `chunk_size=512`, while the
+second is an untagged full-chunk object. They therefore have different keys,
+and the lookup cannot retrieve an object whose size and layout belong to the
+previous registration.
 
-TODO(chunxiaozheng): Include the effective chunk size in the object-key or hash
-namespace, then allow `lmcache.mp.save_unfull_chunk` with multiple chunk sizes.
+**Upgrade note:** Unfull chunks stored by an older LMCache version do not have
+the `chunk_size` identity tag and can still collide with full chunks after the
+effective chunk size changes. Before the first chunk-size change after an
+upgrade, clear the existing L2 cache. If the L2 cache cannot be cleared, keep
+the previous chunk size until its old objects have been removed.
 
 ## Coordinator and CacheBlend
 
@@ -317,11 +315,9 @@ support model-specific effective chunk sizes. While either feature is enabled:
 - the MP server requires each registration's effective chunk size to equal its
   configured `--chunk-size` and rejects mismatches;
 - an MP server registering with Coordinator continues to report its configured
-  `--chunk-size`. The existing `PUT /config/chunk-size` binding and the
-  `chunk_size` field in `POST /instances` remain part of the registration
-  protocol;
+  `--chunk-size` through the `chunk_size` field in `POST /instances`;
 - Coordinator returns HTTP 409 when a server reports a value different from
-  the fleet's finalized global chunk size, so the mismatched server is not
+  the Coordinator's configured global chunk size, so the mismatched server is not
   registered; and
 - deployments must configure the MP servers and Coordinator with one chunk size
   that satisfies every connected model.

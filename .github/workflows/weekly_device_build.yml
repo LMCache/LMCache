@@ -1,0 +1,71 @@
+name: Weekly full build (device runner)
+
+# Reusable runner shared by per-device weekly workflows
+# (weekly_full_build_<device>.yml), invoked by the weekly_full_build.yml
+# orchestrator after its prepare job fast-forwards ci-weekly-full.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: Human-readable device label (e.g. CUDA, XPU, AMD, RBLN)
+        required: true
+        type: string
+      manifest:
+        description: Path to the device weekly manifest JSON
+        required: true
+        type: string
+      out_dir:
+        description: Output directory for report.json, summary.md, and logs
+        required: true
+        type: string
+      artifact:
+        description: GitHub Actions artifact name prefix
+        required: true
+        type: string
+      timeout_minutes:
+        description: Buildkite gate polling timeout in minutes
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  full-build:
+    name: Weekly full build (${{ inputs.label }})
+    if: github.repository == 'LMCache/LMCache'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Run and check the ${{ inputs.label }} full build on Buildkite
+        env:
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          MANIFEST_PATH: ${{ inputs.manifest }}
+          OUT_DIR: ${{ inputs.out_dir }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          python3 .github/scripts/weekly_full_build.py \
+            --manifest "${MANIFEST_PATH}" \
+            --commit "${SOURCE_COMMIT}" \
+            --out-dir "${OUT_DIR}" \
+            --timeout-minutes "${TIMEOUT_MINUTES}"
+
+      - name: Keep the report and failed-job logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: ${{ inputs.artifact }}-${{ github.run_number }}
+          path: ${{ inputs.out_dir }}/
+          if-no-files-found: warn
+          retention-days: 90

@@ -108,8 +108,12 @@ inherit from ``ConnectorBase<YourConnectionType>``. You need to override 4 requi
       // 5. DELETE: remove key (optional, has default no-op)
       bool do_single_delete(MyConn& conn,
                             const std::string& key) override {
-        // send DELETE, return true if deleted, false if not found
+        // send DELETE, return true if deleted, false otherwise
       }
+      // If the backend can tell an absent key from a failed delete,
+      // override do_single_delete_result() instead and return
+      // DeleteResult::NOT_FOUND for an absent key, so eviction stops
+      // tracking it.
 
       // Optional: clean shutdown
       void shutdown_connections() override {

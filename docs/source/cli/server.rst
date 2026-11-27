@@ -48,14 +48,17 @@ Commonly used flags include:
    * - Flag
      - Description
    * - ``--transport {zmq,grpc}``
-     - Request transport exposed by the server (default: ``zmq``).
+     - Request transport exposed by the server (default: ``grpc``).
+       ``zmq`` is deprecated and will be removed in a future release; see
+       :ref:`mp-migrating-from-zmq`.
    * - ``--host HOST``
      - Bind address for the server.
    * - ``--port PORT``
      - Request-transport port.
    * - ``--chunk-size N``
      - Minimum KV cache chunk size in tokens. The vLLM MP connector may
-       negotiate it upward; see :doc:`/mp/chunk_size_negotiation`.
+       resolve a larger model-specific effective size; see
+       :doc:`/mp/chunk_size_negotiation`.
    * - ``--l1-size-gb GB``
      - L1 (CPU/DRAM) cache capacity in GB.
    * - ``--eviction-policy POLICY``

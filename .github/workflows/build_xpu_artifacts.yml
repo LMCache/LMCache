@@ -116,7 +116,13 @@ jobs:
 
                 for module, required in (
                     (native, ("TransferDirection", "EngineKVFormat")),
-                    (ops, ("multi_layer_kv_transfer",)),
+                    (ops, (
+                        "multi_layer_block_kv_transfer",
+                        "multi_layer_kv_transfer",
+                        "single_layer_kv_transfer",
+                        "xpu_host_register",
+                        "xpu_host_unregister",
+                    )),
                     (fs, ("LMCacheFSClient",)),
                     (redis, ("LMCacheRedisClient",)),
                 ):
@@ -125,7 +131,6 @@ jobs:
                         raise RuntimeError(module.__name__ + " is missing: " + ", ".join(missing))
                 print("LMCache XPU extension API surface OK")
                 PY
-                    python3 -c "import lmcache.xpu_ops as ops, lmcache.lmcache_native as native; missing = [n for n in (\"multi_layer_kv_transfer\", \"single_layer_kv_transfer\", \"xpu_host_register\", \"xpu_host_unregister\") if not hasattr(ops, n)] + [n for n in (\"TransferDirection\", \"EngineKVFormat\") if not hasattr(native, n)]; assert not missing, f\"XPU API surface is missing {missing}\"; print(\"LMCache XPU extension API surface OK\")"
                     python3 -c "import lmcache, torch; print(\"LMCache import OK\"); print(\"Torch:\", torch.__version__)"
                   '
 

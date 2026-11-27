@@ -219,9 +219,16 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 - `lmcache/v1/client/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
 - `lmcache/v1/client/transfer_context/inline.py`:
   `EngineDrivenContextInline` using the safe inline tensor codec
-- `lmcache/v1/client/transfer_context/tensor_wire.py`: versioned tensor
+- `lmcache/v1/common/transfer_context.py`: `EngineDrivenContextMetadata`
+  and `ShmSlotDescriptor`, shared by workers and the server
+- `lmcache/v1/transport/tensor_wire.py`: versioned tensor
   metadata and raw-byte encoding with strict layout validation
 - `lmcache/v1/client/transfer_context/shm.py`: `EngineDrivenContextShm`
+
+The server imports transfer metadata from `common` and tensor codecs from
+`transport`, without loading worker contexts. Consumers use these shared modules
+directly; the old client tensor-codec module and package-level metadata exports
+are removed.
 
 ## 3. Protocol & Data Flow
 
@@ -261,9 +268,8 @@ single compressed group. Retrieve converts a logical prefix skip to blocks
 using `tokens_per_block`, not the tensor's slot count.
 
 This applies to both SHM and inline, including asynchronous stores. No
-model-specific copy kernel is needed. Workers and servers must both support
-the physical-slot field for compressed transfers; omitted fields retain the
-uncompressed layout for older workers.
+model-specific copy kernel is needed. Workers must report the physical-slot
+count for every registered layout.
 
 Store:
 1. Worker `prepare_store` RPC.

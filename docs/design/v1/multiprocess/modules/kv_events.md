@@ -52,6 +52,31 @@ a newer count and triggers another reset. A surviving queued completion cannot
 reconstruct readiness across a dropped eviction. Every required object must
 subsequently report a committed copy before another Stored is emitted.
 
+## Token bindings
+
+A Stored record carries the chunk's tokens and parent hash, so a complete chunk
+is announced only if `MP_TOKENS` has bound its hash. Two operations publish
+that binding, each before its writes can finish:
+
+| Operation | Chunks it binds | Condition |
+| --- | --- | --- |
+| LMCache-driven STORE | the complete chunks it is about to write | always |
+| LOOKUP | the range it submits to prefetch | the load policy accepted the request and the server has an L2 adapter |
+
+LOOKUP binds because its prefetch can commit chunks that this server's engine
+never stored: objects loaded from a shared L2, or from a P2P peer attached as
+an L2 adapter. Such a copy is readable in the local L1 and is announced like a
+stored one. A binding is not residency: a lookup that misses, or a load that
+completes only some of a chunk's required objects, publishes no record.
+
+A temporary prefetch copy (`skip_l1`, which `--enable-p2p-write` selects) is
+announced when admitted and removed when its reader releases it.
+
+A chunk that commits without a binding is counted in `unbound_stores` and is
+not announced. This still applies to an engine-driven STORE, a qstore plugin
+store, a P2P peer write on the receiving server, a warm prefetch
+(`POST /cache/prefetches`) and a load submitted by the CacheBlend lookup.
+
 This implements the residency step of [issue #5932](https://github.com/LMCache/LMCache/issues/5932).
 The wire format, chunk hashes, token bindings, subscriptions, and engine
 publication hooks remain the existing contract. Native block identities and
