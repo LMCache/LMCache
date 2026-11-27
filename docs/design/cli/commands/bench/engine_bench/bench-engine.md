@@ -604,6 +604,12 @@ filler word fuses with the next document's first word (`wordvienna`) into one
 pre-token, the junction re-tokenizes, and every later document lands
 off-phase.
 
+The prefill ends with `End of passages.` (`STORE_PROMPT_END`) for the same
+reason the question template follows the documents in the composite: chat
+templates that trim user content (Llama 3 Instruct) would otherwise drop the
+last document's `BLOCK_END` in the prefill but keep it in the composite, and
+that document's last chunk would not match.
+
 The padding lives in `quality/alignment.py` (`ChunkAligner`) and the prompt
 text in `quality/prompts.py`, shared with `lmcache bench quality`
 (`docs/design/cli/commands/bench/quality_bench/bench-quality.md`), which

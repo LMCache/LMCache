@@ -12,6 +12,7 @@ from lmcache.cli.commands.bench.engine_bench.quality.alignment import (
 )
 from lmcache.cli.commands.bench.engine_bench.quality.prompts import (
     QA_SYSTEM_PROMPT,
+    STORE_PROMPT_END,
     compose_qa_messages,
     compose_store_messages,
 )
@@ -117,6 +118,30 @@ class TestChunkAligner:
         passages = [aligner.passage_block(p) for p in _PASSAGES]
         messages = compose_store_messages(system, passages)
         _assert_passages_on_chunk_boundaries(aligner, messages, system, passages)
+
+    def test_trimming_template_keeps_store_and_measured_blocks_identical(
+        self, monkeypatch
+    ) -> None:
+        """A template that trims content must not drop the last BLOCK_END.
+
+        Llama 3 Instruct trims user content; if a store prompt ended with
+        its last passage, the trailing newline would be dropped there but
+        kept before the question, and that passage's last chunk would differ.
+        """
+        monkeypatch.setattr(alignment, "_FILLER_VOCAB_SIZE", 200)
+        aligner = ChunkAligner(
+            make_fake_tokenizer(trim_content=True), "fake-model", _CHUNK, seed=7
+        )
+        system = aligner.system_block(QA_SYSTEM_PROMPT)
+        passages = [aligner.passage_block(p) for p in _PASSAGES]
+        prompts = [
+            compose_store_messages(system, passages, STORE_PROMPT_END),
+            compose_qa_messages(system, passages, "Where is Vienna?"),
+        ]
+        store, measured = (aligner.place_blocks(m, passages)[1] for m in prompts)
+        assert [p.problem for p in store] == [""] * len(passages)
+        assert [p.problem for p in measured] == [""] * len(passages)
+        assert [p.tokens for p in store] == [p.tokens for p in measured]
 
 
 def _framed(filler: alignment.Filler, seed: int = 7) -> ChunkAligner:

@@ -32,6 +32,13 @@ QA_QUESTION_TEMPLATE = (
     "Question: {question}\nAnswer:"
 )
 
+# Ends a store prompt, so its last passage is never at the end of the user
+# content: chat templates that trim content (Llama 3 Instruct) would drop
+# that passage's trailing ``BLOCK_END`` there but keep it before the
+# question, and its last chunk would differ. Starts with a letter for the
+# same reason as :data:`QA_QUESTION_TEMPLATE`.
+STORE_PROMPT_END = "End of passages."
+
 
 @dataclass(frozen=True)
 class QAPrompt:
@@ -91,7 +98,7 @@ def compose_qa_messages(
 
 
 def compose_store_messages(
-    system_block: str, passage_blocks: list[str]
+    system_block: str, passage_blocks: list[str], end: str = ""
 ) -> list[dict[str, str]]:
     """Build the chat messages that store passages in the cache.
 
@@ -101,8 +108,14 @@ def compose_store_messages(
     Args:
         system_block: The chunk-aligned system block.
         passage_blocks: Chunk-aligned passages to store, in order.
+        end: Text after the passages. Blocks that end with whitespace
+            (the ``words`` filler's ``BLOCK_END``) need
+            :data:`STORE_PROMPT_END` here, or a template that trims content
+            changes the last one; framed blocks end with a digit and need
+            nothing.
 
     Returns:
-        A single user message: ``[system block][passage]…[passage]``.
+        A single user message: ``[system block][passage]…[passage][end]``.
     """
-    return [{"role": "user", "content": system_block + "".join(passage_blocks)}]
+    content = system_block + "".join(passage_blocks) + end
+    return [{"role": "user", "content": content}]

@@ -45,6 +45,7 @@ class FakeTokenizer:
         marker: str = " ",
         space_is_token: bool = False,
         bpe_pieces: bool = False,
+        trim_content: bool = False,
     ) -> None:
         """Build a vocabulary from ``words`` plus some unusable entries.
 
@@ -66,6 +67,9 @@ class FakeTokenizer:
                 (case changes, digits and punctuation start new pieces), so
                 tests that check where prompt blocks land in the token
                 stream see realistic boundaries.
+            trim_content: Strip whitespace around the message content in
+                :meth:`apply_chat_template`, as Llama 3 Instruct's template
+                does (``message['content'] | trim``).
         """
         self._marker = marker
         self._space_is_token = space_is_token
@@ -79,6 +83,7 @@ class FakeTokenizer:
         self._text_to_id = {t: i for i, t in self._id_to_text.items()}
         self._split = {f" {w}" for w in split_words}
         self._piece_re = _BPE_PIECE_RE if bpe_pieces else _PIECE_RE
+        self._trim_content = trim_content
         self.all_special_ids: list[int] = []
 
     def get_vocab(self) -> dict[str, int]:
@@ -97,7 +102,9 @@ class FakeTokenizer:
 
         Only the shape matters to callers that measure how many tokens the
         template inserts ahead of the content, so this renders a fixed
-        role prefix and suffix rather than any real model's template.
+        role prefix and suffix rather than any real model's template.  With
+        ``trim_content`` the content is stripped first, as Llama 3 Instruct
+        does.
 
         Args:
             messages: Chat messages; only the first one's content is used.
@@ -109,7 +116,10 @@ class FakeTokenizer:
         Returns:
             The rendered text.
         """
-        return "user\n" + messages[0]["content"] + "<|end|>\nassistant\n"
+        content = messages[0]["content"]
+        if self._trim_content:
+            content = content.strip()
+        return "user\n" + content + "<|end|>\nassistant\n"
 
     def batch_decode(self, ids_list: list[list[int]]) -> list[str]:
         return [self.decode(ids) for ids in ids_list]
