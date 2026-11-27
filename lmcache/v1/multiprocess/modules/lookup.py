@@ -207,6 +207,7 @@ class LookupModule(DiscoverableModule):
         self._load_policy = load_policy
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
+        ctx.session_manager.destroy_listeners.append(self._release_unconsumed_lookup)
         self._setup_metrics()
 
     @property
@@ -225,8 +226,10 @@ class LookupModule(DiscoverableModule):
         }
 
     def close(self) -> None:
-        """Release resources owned by this module (no-op)."""
-        pass
+        """Stop releasing the unconsumed lookups of destroyed sessions."""
+        listeners = self._ctx.session_manager.destroy_listeners
+        if self._release_unconsumed_lookup in listeners:
+            listeners.remove(self._release_unconsumed_lookup)
 
     # -----------------------------------------------------------------
     # Handlers
@@ -1044,6 +1047,30 @@ class LookupModule(DiscoverableModule):
             if hit:
                 return boundary, num_checked, result.l1_owners
         return 0, len(candidate_boundaries), {}
+
+    def _release_unconsumed_lookup(self, session: Session) -> None:
+        """Drop the destroyed session's lookup job if its result was never
+        queried, and release the read locks it retained.
+
+        A queried lookup has no job left: the retrieve or FREE_LOOKUP_LOCKS
+        releases it, and releasing here too could strip another reader's lock.
+
+        Raises:
+            ValueError: If locks are handed back but the session has no
+                lookup key to release them with.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.pop(session.request_id, None)
+        if job is None:
+            return
+        l1_owners = self._ctx.storage_manager.abandon_prefetch_task(job.handle)
+        if not l1_owners:
+            return
+        if session.lookup_ipc_key is None:
+            raise ValueError(f"Session {session.request_id} has no lookup key")
+        finish_lookup_read(
+            self._ctx, session.lookup_ipc_key, list(l1_owners), l1_owners
+        )
 
     def _active_prefetch_count(self) -> int:
         """Return the number of active prefetch jobs (thread-safe)."""

@@ -4,6 +4,7 @@ Unit tests for StorageManager.
 """
 
 # Standard
+import dataclasses
 import time
 
 # Third Party
@@ -419,6 +420,30 @@ class TestStorageManagerBasic:
         # Remaining 4 objects should be unlocked (i.e., no dangling read locks)
         assert storage_manager.delete_l1_keys(object_keys[1:]) == (4, 0)
         storage_manager.close()
+
+
+@pytest.mark.parametrize("task_age_ttls", [0, 1], ids=["fresh", "past_read_ttl"])
+def test_abandon_prefetch_task_hands_over_unexpired_locks(
+    basic_storage_manager_config, basic_l1_config, basic_layout, task_age_ttls
+):
+    """An abandoned finished task loses its result and hands its read locks
+    to the caller, unless it is older than the read-lock TTL: such a lock may
+    belong to a later reader."""
+    sm = StorageManager(basic_storage_manager_config)
+    keys = [make_object_key(i) for i in range(3)]
+    ret = sm.reserve_write(keys, basic_layout)
+    sm.finish_write(list(ret), l1_owners_of(ret))
+    handle = sm.submit_prefetch_task(single_row_spec(keys, basic_layout))
+    task_age = task_age_ttls * basic_l1_config.read_ttl_seconds
+
+    l1_owners = sm.abandon_prefetch_task(
+        dataclasses.replace(handle, submit_time=handle.submit_time - task_age)
+    )
+
+    assert set(l1_owners) == (set() if task_age_ttls else set(keys))
+    assert sm.query_prefetch_status(handle) is None
+    assert sm.delete_l1_keys(keys) == (0, len(keys))
+    sm.close()
 
 
 # =============================================================================
