@@ -18,11 +18,11 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 import argparse
 import functools
+import http.client
 import math
 import re
 import time
-import urllib.error
-import urllib.request
+import urllib.parse
 
 # Prometheus names of the MP server's OTel counters; see
 # docs/design/v1/mp_observability/METRICS.md. A counter with several label
@@ -94,6 +94,9 @@ class DrainResult:
 def fetch_metrics(base_url: str, timeout: float = 5.0) -> str:
     """Return the text of ``GET <base_url>/metrics``.
 
+    ``timeout`` bounds the whole request, including a body the server sends
+    slowly, not just each socket operation.
+
     Args:
         base_url: Base URL of the LMCache MP HTTP server, for example
             ``http://localhost:8080``.
@@ -103,29 +106,57 @@ def fetch_metrics(base_url: str, timeout: float = 5.0) -> str:
         The Prometheus exposition text.
 
     Raises:
-        MetricsReadTimeoutError: If the read does not finish within
+        MetricsReadTimeoutError: If the request does not finish within
             ``timeout``.
-        MetricsEndpointError: If the endpoint cannot be reached.
+        MetricsEndpointError: If the endpoint cannot be reached or does not
+            answer with HTTP 200.
     """
     url = base_url.rstrip("/") + "/metrics"
+    parts = urllib.parse.urlsplit(url)
+    connection_class = (
+        http.client.HTTPSConnection
+        if parts.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    deadline = time.monotonic() + timeout
+    connection = connection_class(parts.netloc, timeout=timeout)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            return response.read().decode("utf-8", errors="replace")
-    except OSError as exc:
-        # A timeout while reading the body is raised as TimeoutError; one while
-        # connecting arrives wrapped in URLError.
-        timed_out = isinstance(exc, TimeoutError) or (
-            isinstance(exc, urllib.error.URLError)
-            and isinstance(exc.reason, TimeoutError)
-        )
-        if timed_out:
-            raise MetricsReadTimeoutError(
-                f"Reading {url} took longer than {timeout:g}s."
-            ) from exc
+        connection.request("GET", parts.path)
+        # Kept before getresponse(): the connection hands the socket to the
+        # response and drops its own reference when the server will close it.
+        sock = connection.sock
+        response = connection.getresponse()
+        if response.status != 200:
+            raise MetricsEndpointError(
+                f"Cannot read {url}: HTTP {response.status}. --lmcache-url must be "
+                "the base URL of the LMCache MP HTTP server (port 8080 by default)."
+            )
+        chunks = []
+        # The response closes its socket once the whole body has been read.
+        while not response.isclosed():
+            # A socket timeout applies to each receive, so a server that sends
+            # small pieces just inside it could hold the read forever. Shrink
+            # it to the time left before every receive instead.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            sock.settimeout(remaining)
+            chunk = response.read1(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+    except TimeoutError as exc:
+        raise MetricsReadTimeoutError(
+            f"Reading {url} took longer than {timeout:g}s."
+        ) from exc
+    except (OSError, http.client.HTTPException) as exc:
         raise MetricsEndpointError(
             f"Cannot read {url}: {exc}. --lmcache-url must be the base URL of the "
             "LMCache MP HTTP server (port 8080 by default)."
         ) from exc
+    finally:
+        connection.close()
 
 
 def parse_counter(text: str, name: str) -> Optional[float]:
@@ -385,20 +416,21 @@ def wait_for_store_drain(
 
 
 def low_speedup_warning(
-    warmup_ttft: float, query_ttft: float, threshold: float
+    warmup_ttft: float, query_ttft: float, threshold: Optional[float]
 ) -> Optional[str]:
     """Return a warning if the query round is barely faster than warm-up.
 
     Args:
         warmup_ttft: Mean TTFT of the warm-up round, in seconds.
         query_ttft: Mean TTFT of the query round, in seconds.
-        threshold: Minimum warm-up/query ratio considered healthy.
+        threshold: Minimum warm-up/query ratio considered healthy, or None
+            when the warning is not enabled (``--warn-speedup-below`` unset).
 
     Returns:
-        A warning message, or None if the ratio reaches ``threshold`` or either
-        TTFT is not a positive number.
+        A warning message, or None if ``threshold`` is None, the ratio reaches
+        it, or either TTFT is not a positive number.
     """
-    if not (warmup_ttft > 0 and query_ttft > 0):
+    if threshold is None or not (warmup_ttft > 0 and query_ttft > 0):
         return None
     ratio = warmup_ttft / query_ttft
     if ratio >= threshold:

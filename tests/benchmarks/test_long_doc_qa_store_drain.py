@@ -352,6 +352,15 @@ def test_low_speedup_warning(warmup: float, query: float, expect_warning: bool) 
     assert (message is not None) == expect_warning
 
 
+def test_low_speedup_warning_is_off_without_a_threshold() -> None:
+    """The warning is opt-in: with no --warn-speedup-below it never fires.
+
+    Existing runs that pass neither new flag must not gain new stderr output,
+    even for a query round that is barely faster than the warm-up round.
+    """
+    assert drain.low_speedup_warning(10.0, 9.8, threshold=None) is None
+
+
 @pytest.mark.parametrize(
     ("sleep_seconds", "url", "expect_warning"),
     [
@@ -467,6 +476,46 @@ def _unused_url() -> str:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     return f"http://127.0.0.1:{port}"
+
+
+def test_fetch_metrics_bounds_the_whole_read_not_each_chunk() -> None:
+    """A server that streams the body slowly cannot hold a read past its timeout.
+
+    A socket timeout alone applies to each receive, so a body sent in small
+    pieces 0.3 s apart never trips a 1 s timeout and the read takes as long
+    as the server likes (about 6 s here). The read must instead stop when its
+    total budget runs out.
+    """
+    body = _metrics(14, 10).encode() * 20
+    piece = max(1, len(body) // 20)
+
+    class Dripping(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 (http.server API)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for start in range(0, len(body), piece):
+                self.wfile.write(body[start : start + piece])
+                self.wfile.flush()
+                time.sleep(0.3)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Dripping)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        start = time.monotonic()
+        with pytest.raises(drain.MetricsReadTimeoutError):
+            drain.fetch_metrics(f"http://127.0.0.1:{server.server_address[1]}", 1.0)
+        elapsed = time.monotonic() - start
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+    # Stopped at the 1 s budget, not after the roughly 6 s drip.
+    assert elapsed < 2.0
 
 
 def test_fetch_metrics_reports_an_unreachable_server() -> None:

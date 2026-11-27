@@ -56,7 +56,8 @@ Commandline arguments:
 
     --warn-speedup-below: Print a warning if the query round's mean TTFT is
                          less than this many times lower than the warm-up
-                         round's. (Optional, default: 1.2)
+                         round's. (Optional, off unless set; 1.2 is a
+                         reasonable value)
 
     --output: Filename to write all responses to. If omitted, writes to stdout.
 
@@ -822,9 +823,9 @@ def create_argument_parser():
     parser.add_argument(
         "--warn-speedup-below",
         type=float,
-        default=1.2,
+        default=None,
         help="Warn if the query round's mean TTFT is less than this many times "
-        "lower than the warm-up round's",
+        "lower than the warm-up round's (off unless set; 1.2 is a reasonable value)",
     )
 
     parser.add_argument(
