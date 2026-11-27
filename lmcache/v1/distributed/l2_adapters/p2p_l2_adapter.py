@@ -32,6 +32,7 @@ The request client and the transfer-channel client lock internally.
 
 # Standard
 from abc import abstractmethod
+from collections.abc import Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -113,11 +114,19 @@ class PeerL2AdapterConfigBase(L2AdapterConfigBase):
     Fields:
     - peer_mq_server_url: Peer request server URL (lookup/unlock RPCs).
     - lookup_timeout_s: deadline for a lookup result before it counts as a miss.
+    - api_key_files: the local server's key files; the first key authenticates
+      the peer RPCs. Empty falls back to the shared environment sources.
     """
 
-    def __init__(self, peer_mq_server_url: str, lookup_timeout_s: float) -> None:
+    def __init__(
+        self,
+        peer_mq_server_url: str,
+        lookup_timeout_s: float,
+        api_key_files: Sequence[str] = (),
+    ) -> None:
         self.peer_mq_server_url = peer_mq_server_url
         self.lookup_timeout_s = lookup_timeout_s
+        self.api_key_files = tuple(api_key_files)
 
 
 class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
@@ -132,6 +141,8 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
     - store_timeout_s: deadline for a store before it counts as a failure.
     - write_l1_usage_threshold: used fraction of the local DRAM L1 at which
       the ``p2p`` store policy starts storing objects into this peer.
+    - api_key_files: the local server's key files; the first key authenticates
+      the peer RPCs. Empty falls back to the shared environment sources.
     """
 
     def __init__(
@@ -143,8 +154,9 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         write_enabled: bool = False,
         store_timeout_s: float = 10.0,
         write_l1_usage_threshold: float = 0.7,
+        api_key_files: Sequence[str] = (),
     ) -> None:
-        super().__init__(peer_mq_server_url, lookup_timeout_s)
+        super().__init__(peer_mq_server_url, lookup_timeout_s, api_key_files)
         self.peer_transfer_channel_server_url = peer_transfer_channel_server_url
         self.load_timeout_s = load_timeout_s
         self.write_enabled = write_enabled
@@ -274,6 +286,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
         with ExitStack() as resources:
             self._req_client: P2PClient = P2PClient(
                 config.peer_mq_server_url,
+                api_key_files=config.api_key_files,
             )
             resources.callback(self._req_client.close)
             self._store_efd = create_event_notifier()

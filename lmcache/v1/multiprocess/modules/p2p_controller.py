@@ -2,6 +2,7 @@
 """P2PController: peer discovery, adapter lifecycle, lookup and write serving."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
@@ -179,6 +180,8 @@ class P2PController(DiscoverableModule):
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
+        api_key_files: MP server key files; the first key authenticates the
+            RPCs this server sends to its peers.
     """
 
     module_name = "p2p_controller"
@@ -192,6 +195,7 @@ class P2PController(DiscoverableModule):
             build_ctx.mp_config.p2p_config,
             build_ctx.coordinator_config,
             build_ctx.mp_config.instance_id,
+            api_key_files=build_ctx.mp_config.api_key_files,
         )
 
     def __init__(
@@ -200,10 +204,12 @@ class P2PController(DiscoverableModule):
         p2p_config: P2PConfig,
         coordinator_config: CoordinatorConfig,
         instance_id: str,
+        api_key_files: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._p2p_config = p2p_config
         self._instance_id = instance_id
+        self._api_key_files = tuple(api_key_files)
         self._next_task_id = 0
         self._jobs: dict[int, _P2PLookupJob] = {}
         self._job_lock = threading.Lock()
@@ -783,6 +789,7 @@ class P2PController(DiscoverableModule):
             write_enabled=self._p2p_config.enable_write,
             store_timeout_s=self._p2p_config.store_timeout,
             write_l1_usage_threshold=self._p2p_config.write_l1_usage_threshold,
+            api_key_files=self._api_key_files,
         )
         try:
             adapter_id = self._ctx.storage_manager.add_l2_adapter(config)

@@ -286,6 +286,27 @@ def test_factory_creates_adapter():
         adapter.close()
 
 
+def test_adapter_authenticates_peer_rpcs_with_the_config_key_files() -> None:
+    """The peer RPC client sends the key from the config's key files, the
+    only source a server started with ``--api-key-file`` has."""
+    with (
+        patch.object(
+            p2p_mod, "P2PClient", return_value=MagicMock(spec=P2PClient)
+        ) as client_cls,
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=MagicMock()),
+        patch.object(p2p_mod, "PeriodicEventNotifier") as mock_pen,
+    ):
+        mock_pen.get.return_value = MagicMock()
+        config = P2PL2AdapterConfig(
+            "grpc://peer:9555", "peer:7600", api_key_files=["/run/secrets/fleet.key"]
+        )
+        P2PL2Adapter(config).close()
+
+    client_cls.assert_called_once_with(
+        "grpc://peer:9555", api_key_files=("/run/secrets/fleet.key",)
+    )
+
+
 def test_failed_region_registration_releases_rpc_resources() -> None:
     """A failed transfer-channel handshake unwinds the RPC client, event fds
     and notifier registrations acquired before it."""

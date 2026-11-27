@@ -539,6 +539,24 @@ def test_new_peer_adapter_follows_the_p2p_write_settings():
     assert config.write_l1_usage_threshold == 0.5
 
 
+def test_new_peer_adapter_authenticates_with_the_server_key_files():
+    """The adapter created for a peer sends this server's key, so a fleet
+    configured only with ``--api-key-file`` can call its peers."""
+    ctx = MagicMock()
+    controller = P2PController(
+        ctx,
+        P2PConfig(),
+        CoordinatorConfig(),
+        instance_id="self",
+        api_key_files=["/run/secrets/fleet.key"],
+    )
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert config.api_key_files == ("/run/secrets/fleet.key",)
+
+
 def test_peer_adapter_does_not_write_by_default():
     controller, ctx = _make_controller()
 

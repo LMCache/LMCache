@@ -179,8 +179,22 @@ def test_independent_peer_channel(
     peer_mode: Literal["sync", "aio", "native"],
     unused_tcp_port_factory: Callable[[], int],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P2P has its own port and lifetime with either worker transport."""
+    """P2P has its own port and lifetime with either worker transport.
+
+    The peer client gets only the key files from the server config, as in a
+    deployment where every server is started with only ``--api-key-file``.
+    """
+    # The server also accepts environment keys and the client falls back to
+    # them, so an environment key would hide a client that ignores its key files.
+    for name in (
+        "LMCACHE_API_KEY",
+        "LMCACHE_API_KEY_FILE",
+        "LMCACHE_HTTP_API_KEY",
+        "LMCACHE_HTTP_API_KEY_FILE",
+    ):
+        monkeypatch.delenv(name, raising=False)
     keys = [ObjectKey(b"chunk", "model", 0)]
     layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
     addresses = [TransferChannelAddress(offset=8, size=16)]
@@ -268,7 +282,7 @@ def test_independent_peer_channel(
     worker_client = RequestClientFactory.create(
         f"{scheme}://127.0.0.1:{config.port}", api_key="secret"
     )
-    client = P2PClient(peer_url, api_key="secret")
+    client = P2PClient(peer_url, api_key_files=config.api_key_files)
     unauthorized = P2PClient(peer_url, api_key="wrong")
     try:
         assert worker_client.noop().result(5) == "worker"
