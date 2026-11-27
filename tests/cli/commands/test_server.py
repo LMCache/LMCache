@@ -16,6 +16,7 @@ import pytest
 # First Party
 from lmcache.cli.commands import base, server
 from lmcache.cli.commands.server import ServerCommand
+from lmcache.v1.memory_orchestrator import _proto_gen as orchestrator_proto_gen
 from lmcache.v1.multiprocess.config import parse_args_to_p2p_config
 from lmcache.v1.transport.grpc import _proto_gen
 from tests.import_utils import lmcache_subprocess_env
@@ -303,6 +304,32 @@ class TestServerCommandExecute:
         args = parser.parse_args(["server"])
         with (
             patch.dict(sys.modules, {"lmcache.v1.distributed.config": None}),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            ServerCommand().execute(args)
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "lmcache.v1.distributed.config" in err
+        assert "pip install lmcache" in err
+        assert "_generate.py" not in err
+
+    @pytest.mark.skipif(
+        importlib.util.find_spec("lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2")
+        is None,
+        reason="Requires the generated transport gRPC bindings",
+    )
+    def test_execute_ignores_bindings_its_import_does_not_need(
+        self,
+        parser: argparse.ArgumentParser,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Missing orchestrator bindings do not explain a failing server import."""
+        args = parser.parse_args(["server"])
+        with (
+            patch.dict(sys.modules, {"lmcache.v1.distributed.config": None}),
+            patch.object(orchestrator_proto_gen, "__path__", [str(tmp_path)]),
             pytest.raises(SystemExit) as excinfo,
         ):
             ServerCommand().execute(args)

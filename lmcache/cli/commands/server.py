@@ -10,6 +10,8 @@ from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
+_PROTO_PACKAGES = ("lmcache.v1.transport.grpc._proto_gen",)
+
 
 class ServerCommand(BaseCommand):
     """CLI command that launches the LMCache request server and HTTP API."""
@@ -61,7 +63,7 @@ class ServerCommand(BaseCommand):
             add_observability_args(parser)
             add_coordinator_args(parser)
         except ImportError as e:
-            advice = missing_grpc_bindings_hint() or (
+            advice = missing_grpc_bindings_hint(_PROTO_PACKAGES) or (
                 "install the full lmcache package to use 'server' and 'bench'"
             )
             logger.warning("Cannot load the 'server' runtime (%s); %s.", e, advice)
@@ -95,7 +97,7 @@ class ServerCommand(BaseCommand):
         except ImportError as e:
             print(
                 f"The 'lmcache server' command cannot load its runtime: {e}",
-                missing_grpc_bindings_hint()
+                missing_grpc_bindings_hint(_PROTO_PACKAGES)
                 or "Install the full lmcache package with: pip install lmcache",
                 sep="\n",
                 file=sys.stderr,

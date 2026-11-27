@@ -63,14 +63,8 @@ def nonnegative_int(value: str) -> int:
     return count
 
 
-_GENERATED_GRPC_PACKAGES = (
-    "lmcache.v1.transport.grpc._proto_gen",
-    "lmcache.v1.memory_orchestrator._proto_gen",
-)
-
-
-def missing_grpc_bindings_hint() -> str | None:
-    """Return how to produce the generated gRPC bindings, or ``None``.
+def missing_grpc_bindings_hint(generated_packages: tuple[str, ...]) -> str | None:
+    """Return how to produce the bindings *generated_packages* lack, or ``None``.
 
     An editable ``pip install -e .`` runs the generator from ``build_py``, but
     setuptools downgrades a failing custom ``build_py`` to a warning, so a
@@ -80,22 +74,29 @@ def missing_grpc_bindings_hint() -> str | None:
     is only offered for a package installed from a source checkout, where
     ``requirements/proto.txt`` sits next to it; the ``lmcache-cli`` wheel ships
     without the bindings too, and its users get ``None`` so that the caller's
-    reinstall advice stands.
+    reinstall advice stands. Callers pass the ``_proto_gen`` packages their own
+    import chain loads, so the hint is offered only when the missing bindings
+    explain that import's failure.
 
     Note:
         Imports each ``_proto_gen`` package to list its modules. Callers run
         this inside an ``except ImportError`` handler, so it relies on those
         packages and their parents importing nothing beyond their docstrings.
 
+    Args:
+        generated_packages: Dotted names of the ``_proto_gen`` packages the
+            failing import needs.
+
     Returns:
         The remedy, or ``None`` when the package is not installed from a
-        source checkout or both generated packages hold ``*_pb2`` modules.
+        source checkout or every package in *generated_packages* holds
+        ``*_pb2`` modules.
     """
     # <repository>/lmcache/cli/commands/base.py
     repository_root = Path(__file__).resolve().parents[3]
     if not (repository_root / "requirements" / "proto.txt").is_file():
         return None
-    for package in _GENERATED_GRPC_PACKAGES:
+    for package in generated_packages:
         search_path = importlib.import_module(package).__path__
         if not any(m.name.endswith("_pb2") for m in pkgutil.iter_modules(search_path)):
             return (

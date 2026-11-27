@@ -2,6 +2,7 @@
 
 # Standard
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 import argparse
 import importlib.util
@@ -24,7 +25,7 @@ def test_memory_command_reports_ungenerated_bindings_at_registration(
     """A build that skipped the gRPC generator names it, not a reinstall."""
     with (
         patch.dict(sys.modules, {"lmcache.v1.memory_orchestrator.server": None}),
-        patch.object(transport_proto_gen, "__path__", [str(tmp_path)]),
+        patch.object(orchestrator_proto_gen, "__path__", [str(tmp_path)]),
         patch.object(memory.logger, "warning") as mock_warning,
     ):
         MemoryCommand().add_arguments(argparse.ArgumentParser())
@@ -41,7 +42,7 @@ def test_memory_command_explains_ungenerated_bindings(
     command.register(argparse.ArgumentParser().add_subparsers())
     with (
         patch.dict(sys.modules, {"lmcache.v1.memory_orchestrator.server": None}),
-        patch.object(transport_proto_gen, "__path__", [str(tmp_path)]),
+        patch.object(orchestrator_proto_gen, "__path__", [str(tmp_path)]),
         pytest.raises(SystemExit) as excinfo,
     ):
         command.execute(argparse.Namespace())
@@ -56,15 +57,20 @@ def test_memory_command_explains_ungenerated_bindings(
     is None,
     reason="Requires the generated transport gRPC bindings",
 )
-def test_memory_command_names_the_generator_when_only_its_bindings_are_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "package",
+    [orchestrator_proto_gen, transport_proto_gen],
+    ids=["orchestrator", "transport"],
+)
+def test_memory_command_names_the_generator_when_either_bindings_are_missing(
+    package: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Hiding only the orchestrator bindings still points at the generator."""
+    """Hiding either package the orchestrator imports still points at the generator."""
     command = MemoryCommand()
     command.register(argparse.ArgumentParser().add_subparsers())
     with (
         patch.dict(sys.modules, {"lmcache.v1.memory_orchestrator.server": None}),
-        patch.object(orchestrator_proto_gen, "__path__", [str(tmp_path)]),
+        patch.object(package, "__path__", [str(tmp_path)]),
         pytest.raises(SystemExit) as excinfo,
     ):
         command.execute(argparse.Namespace())
