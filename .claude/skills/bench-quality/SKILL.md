@@ -47,8 +47,10 @@ candidate under the reference's name (vLLM: `--served-model-name`).
 | Another KV cache optimization | Same model, vLLM, prefix caching off | The stack under test | `--chunk-size` if it caches by chunk |
 
 - **Control arm (optional):** `--control-url`, pointing at the reference with prefix
-  caching **on**. It should match the reference exactly, so a gap points at the
-  harness or the engine. Add it when a surprising result needs ruling out.
+  caching **on**. It should match the reference closely. A cache hit and a full
+  recompute can give slightly different logits, so some answers may differ; a gap
+  beyond the tolerance points at the harness or the engine. Add it when a surprising
+  result needs ruling out.
 - **Scenario** (`--scenario`): `independent` (default; passages cached alone, then
   combined), `reordered` (cached together, measured in a new order), `concatenated`
   (whole contexts cached after unrelated ones). For a blend candidate, run at least
@@ -60,7 +62,7 @@ candidate under the reference's name (vLLM: `--served-model-name`).
 - **Reasoning models:** pass `--template-kwargs reasoning_effort=low` (or the model's
   equivalent), and leave `--max-output-tokens` (default 2048) room for the reasoning.
 - **Blend server settings** are not visible to the bench, so record the ones that change
-  what is measured: `--enable-dedup-content`, `--enable-blend-reorder`,
+  what is measured: `--enable-dedup-content-fingerprint`, `--enable-blend-reorder`,
   `--enable-segmented-prefix`, and the chunk size. Ask the user if you do not know them.
 
 ## 2. Preflight (before spending GPU time)
@@ -257,7 +259,7 @@ Expected reused tokens {reuse.expected_tokens}; observed {reuse.observed_tokens}
 |---|---|---|---|---|
 {one row per arm}
 
-- Blend server flags: {chunk size, --enable-dedup-content, --enable-blend-reorder, --enable-segmented-prefix \| n/a \| unknown}
+- Blend server flags: {chunk size, --enable-dedup-content-fingerprint, --enable-blend-reorder, --enable-segmented-prefix \| n/a \| unknown}
 - Evidence sources: dataset {n}, answer_string {n}, none {n}
 - Padding: {padding.filler}, {padding.share} of measured prompt tokens
 - plan_fingerprint `{plan_fingerprint}`
@@ -342,5 +344,5 @@ For an `INVALID` verdict, replace the Scores and Losses lines with
 | `INVALID`: no successful request | An engine was unreachable or rejected the `--model` name (`--served-model-name`). |
 | Judge sanity check fails | The judge is a thinking model without `--reasoning-parser`, or it is the wrong model. |
 | Many `empty` answers | Reasoning used up the budget. Lower the reasoning effort or raise `--max-output-tokens`. |
-| Control differs from the reference | A harness or engine nondeterminism problem. Report it in Notes, and don't attribute the gap to the candidate. |
+| Control differs from the reference beyond the tolerance | A harness or engine nondeterminism problem. Report it in Notes, and don't attribute the gap to the candidate. |
 | `summary.json` missing but `report.md` present | A role was rerun after the report was written. Run `analyze` again and regenerate the report. |

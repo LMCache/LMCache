@@ -3,6 +3,9 @@
 Unit tests for :class:`IsolatedLRUEvictionPolicy`.
 """
 
+# Standard
+import tracemalloc
+
 # Third Party
 import pytest
 
@@ -136,6 +139,61 @@ class TestEvictionAmount:
             key_eligible_filter=lambda k: k == k2,
         )
         assert actions[0].keys == [k2]
+
+
+@pytest.mark.parametrize("ratio", [0.0, 1e-10])
+def test_small_selection_has_bounded_temporary_memory(ratio: float) -> None:
+    """Selecting zero or one victim must not allocate a full-bucket snapshot."""
+    policy = IsolatedLRUEvictionPolicy()
+    policy.on_keys_created([_key(i, "alice") for i in range(16384)])
+
+    tracemalloc.start()
+    try:
+        actions = policy.get_eviction_actions(ratio, cache_salt="alice")
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert [key for action in actions for key in action.keys] == (
+        [_key(16383, "alice")] if ratio else []
+    )
+    # Leave ample room for the result, but not a 128 KiB list of all keys.
+    assert peak_bytes < 32 * 1024
+
+
+@pytest.mark.parametrize("ratio", [-1.0, 0.0, 1e-10, 0.3, 1.0, 2.0])
+@pytest.mark.parametrize("eligible_ids", [None, {0, 1, 2}, {0, 3, 6, 9}, set()])
+def test_selection_preserves_order_and_state(
+    ratio: float, eligible_ids: set[int] | None
+) -> None:
+    """Filtered plans preserve recency and isolation until removal is notified."""
+    policy = IsolatedLRUEvictionPolicy()
+    alice = [_key(i, "alice") for i in range(10)]
+    bob = [_key(i, "bob") for i in range(10)]
+    policy.on_keys_created(alice + bob)
+    policy.on_keys_touched([alice[9]])
+    policy.on_keys_removed([alice[4]])
+    eviction_order = [alice[i] for i in (8, 7, 6, 5, 3, 2, 1, 0, 9)]
+    eligible = set(alice) if eligible_ids is None else {alice[i] for i in eligible_ids}
+    target = max(1, int(9 * min(ratio, 1.0))) if ratio > 0 else 0
+    expected = [key for key in eviction_order if key in eligible][:target]
+    before = policy.capture()
+
+    for _ in range(2):
+        actions = policy.get_eviction_actions(
+            ratio,
+            key_eligible_filter=None if eligible_ids is None else eligible.__contains__,
+            cache_salt="alice",
+        )
+        assert [key for action in actions for key in action.keys] == expected
+        assert policy.capture() == before
+
+    assert policy.get_num_tracked_keys("bob") == len(bob)
+    policy.on_keys_removed(expected)
+    remaining = policy.get_eviction_actions(1.0, cache_salt="alice")
+    assert [key for action in remaining for key in action.keys] == [
+        key for key in eviction_order if key not in expected
+    ]
 
 
 class TestDurableState:

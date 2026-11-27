@@ -12,12 +12,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import (
-    get_customized_decoder,
-    get_customized_encoder,
-)
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import common_pb2
-from lmcache.v1.multiprocess.transport.grpc_impl.codecs.common import get_message_codecs
 from lmcache.v1.platform.base.ipc_wire import (
     CpuShmIPCData,
     CudaIPCData,
@@ -27,12 +21,17 @@ from lmcache.v1.platform.base.ipc_wire import (
     RawCudaIPCData,
     TensorMetadata,
     VmmCudaIPCData,
+    VmmRocmIPCData,
     WireIPCData,
 )
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 from lmcache.v1.platform.devices.cpu.shm import CpuShmTensorWrapper
-
-pytestmark = pytest.mark.no_shared_allocator
+from lmcache.v1.transport.grpc._proto_gen import common_pb2
+from lmcache.v1.transport.grpc.codecs.common import get_message_codecs
+from lmcache.v1.transport.zmq.codec import (
+    get_customized_decoder,
+    get_customized_encoder,
+)
 
 METADATA = TensorMetadata("float32", (2, 3), (3, 1), 0, "device-uuid")
 DESCRIPTORS = [
@@ -75,6 +74,16 @@ DESCRIPTORS = [
     CpuShmIPCData(version=1, metadata=METADATA, shm_name="/lmcache_test", nbytes=24),
     MusaIPCData(
         version=1, metadata=METADATA, handle={"token": b"handle", "dims": [2, 3]}
+    ),
+    VmmRocmIPCData(
+        version=1,
+        metadata=METADATA,
+        export_id=b"i" * 16,
+        kind="posix_fd",
+        fabric_blob=None,
+        alloc_size=4096,
+        alloc_offset=16,
+        nbytes=24,
     ),
 ]
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Blend matcher tests: optimized vs current lookup equivalence, and
-content-fingerprint dedup (``--enable-dedup-content``).
+content-fingerprint dedup (``--enable-dedup-content-fingerprint``).
 
 Merged from test_optimized_lookup.py and test_blend_dedup_content.py in
 the blend package split.
@@ -33,14 +33,27 @@ import numpy as np
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import CBMatchResult
+from lmcache.v1.common.token_hasher import rolling_hash_windows_numba
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import CBMatchResult
-from lmcache.v1.multiprocess.modules.blend.matcher import BlendTokenRangeMatcher
-from lmcache.v1.multiprocess.token_hasher import rolling_hash_windows_numba
+from lmcache.v1.multiprocess.modules.blend.matcher import (
+    BlendTokenRangeMatcher,
+    _unique_token_coverage,
+    covered_chunks,
+    merge_intervals,
+)
 
 CHUNK_SIZE = 256
 # vLLM v1's typical paged-block size; retrieve drops cur_st % BLOCK_SIZE != 0.
 BLOCK_SIZE = 16
+COMPACT_ID_TEST_TABLE_SIZE = 8
+
+
+class _SmallTableBlendTokenRangeMatcher(BlendTokenRangeMatcher):
+    """Use a small direct-address table for compact-ID lifecycle tests."""
+
+    _TABLE_BITS: int = 3
+    _TABLE_SIZE: int = COMPACT_ID_TEST_TABLE_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -809,7 +822,7 @@ class TestOptimalLookupAlignedTiming:
 
 
 # ---------------------------------------------------------------------------
-# Content-fingerprint dedup (--enable-dedup-content)
+# Content-fingerprint dedup (--enable-dedup-content-fingerprint)
 # ---------------------------------------------------------------------------
 
 # Standard
@@ -864,6 +877,39 @@ def test_duplicate_content_registers_twice_by_default():
     matcher.remove_chunks([second])
     assert matcher.match_sub_sequence(_content_chunk(1)) == []
     assert first not in _matched_hashes(matcher, _content_chunk(1))
+
+
+def test_evicting_an_older_duplicate_keeps_the_newer_one():
+    """Evicting the older copy of a text must not hide the newer copy that
+    holds the slot."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    first, second = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+
+    _register_content(matcher, _content_chunk(1), [101])
+    _register_content(matcher, _content_chunk(1), [202], position_offset=CHUNK_SIZE)
+
+    assert matcher.remove_chunks([first]) == 1
+    matches = matcher.match_sub_sequence(_content_chunk(1))
+    assert [m.hash for m in matches] == [second]
+    assert matches[0].old_st == CHUNK_SIZE
+
+    assert matcher.remove_chunks([second]) == 1
+    assert matcher.match_sub_sequence(_content_chunk(1)) == []
+
+
+def test_evicting_a_shadowed_collision_keeps_the_slot_holder():
+    """Evicting a chunk whose slot a colliding chunk took over must not hide
+    that chunk."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    older_token, newer_token = 1, 1 + COMPACT_ID_TEST_TABLE_SIZE
+    older, newer = ObjectKey.IntHash2Bytes(101), ObjectKey.IntHash2Bytes(202)
+    assert matcher.on_new_token_hashes([older_token], [older]) == 1
+    assert matcher.on_new_token_hashes([newer_token], [newer]) == 1
+    # The two tokens share a slot: the newer chunk shadows the older one.
+    assert matcher.match_sub_sequence([older_token]) == []
+
+    assert matcher.remove_chunks([older]) == 1
+    assert _matched_hashes(matcher, [newer_token]) == {newer}
 
 
 # -- Enabled ------------------------------------------------------------------
@@ -944,6 +990,157 @@ def test_repeated_registration_of_same_hash_is_idempotent():
     assert matches[0].old_st == 0
 
 
+# -- Compact-ID reuse --------------------------------------------------------
+
+
+def test_blend_compact_ids_are_reused_after_repeated_removal() -> None:
+    """Repeated removals free capacity for new chunks over the table lifetime."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+
+    for token_id in range(1, 2 * COMPACT_ID_TEST_TABLE_SIZE + 1):
+        token_hash = ObjectKey.IntHash2Bytes(token_id)
+        assert matcher.on_new_token_hashes([token_id], [token_hash]) == 1
+        matches = matcher.match_sub_sequence([token_id])
+        assert [match.hash for match in matches] == [token_hash]
+
+        matcher.remove_chunks([token_hash])
+        assert matcher.match_sub_sequence([token_id]) == []
+
+    fresh_hash = ObjectKey.IntHash2Bytes(1000)
+    assert matcher.on_new_token_hashes([1000], [fresh_hash], position_offset=17) == 1
+    fresh_match = matcher.match_sub_sequence([1000])
+    assert [match.hash for match in fresh_match] == [fresh_hash]
+    assert fresh_match[0].old_st == 17
+
+
+def test_blend_compact_id_batch_uses_recycled_and_fresh_ids() -> None:
+    """A batch can use one freed ID and one ID beyond the previous high-water mark."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    live_tokens = list(range(1, COMPACT_ID_TEST_TABLE_SIZE))
+    live_hashes = [ObjectKey.IntHash2Bytes(100 + token_id) for token_id in live_tokens]
+    assert matcher.on_new_token_hashes(live_tokens, live_hashes) == len(live_tokens)
+
+    matcher.remove_chunks([live_hashes[0]])
+
+    new_tokens = [COMPACT_ID_TEST_TABLE_SIZE, COMPACT_ID_TEST_TABLE_SIZE + 1]
+    new_hashes = [ObjectKey.IntHash2Bytes(200 + token_id) for token_id in new_tokens]
+    assert matcher.on_new_token_hashes(new_tokens, new_hashes) == len(new_tokens)
+
+    for token_id, token_hash in zip(new_tokens, new_hashes, strict=True):
+        matches = matcher.match_sub_sequence([token_id])
+        assert [match.hash for match in matches] == [token_hash]
+
+
+def test_blend_compact_id_capacity_recovers_after_removal() -> None:
+    """A full live table rejects another chunk, then accepts one after removal."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    live_tokens = list(range(1, COMPACT_ID_TEST_TABLE_SIZE + 1))
+    live_hashes = [ObjectKey.IntHash2Bytes(300 + token_id) for token_id in live_tokens]
+    assert matcher.on_new_token_hashes(live_tokens, live_hashes) == len(live_tokens)
+
+    new_token = COMPACT_ID_TEST_TABLE_SIZE + 1
+    new_hash = ObjectKey.IntHash2Bytes(400 + new_token)
+    assert matcher.on_new_token_hashes([new_token], [new_hash]) == 0
+    assert matcher.match_sub_sequence([new_token]) == []
+
+    matcher.remove_chunks([live_hashes[0]])
+    assert matcher.on_new_token_hashes([new_token], [new_hash]) == 1
+    matches = matcher.match_sub_sequence([new_token])
+    assert [match.hash for match in matches] == [new_hash]
+
+
+def test_blend_duplicate_removal_does_not_duplicate_a_free_id() -> None:
+    """Removing one key twice cannot make its compact ID alias two later chunks."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    live_tokens = list(range(1, COMPACT_ID_TEST_TABLE_SIZE - 1))
+    live_hashes = [ObjectKey.IntHash2Bytes(500 + token_id) for token_id in live_tokens]
+    assert matcher.on_new_token_hashes(live_tokens, live_hashes) == len(live_tokens)
+
+    removed_hash = live_hashes[0]
+    matcher.remove_chunks([removed_hash])
+    matcher.remove_chunks([removed_hash])
+
+    # These tokens occupy the two empty probe slots. A duplicated free ID would
+    # make both slots point at the same row, hiding one of the later chunks.
+    new_tokens = [COMPACT_ID_TEST_TABLE_SIZE - 1, COMPACT_ID_TEST_TABLE_SIZE]
+    new_hashes = [ObjectKey.IntHash2Bytes(600 + token_id) for token_id in new_tokens]
+    assert matcher.on_new_token_hashes(new_tokens, new_hashes) == len(new_tokens)
+    matcher.remove_chunks([removed_hash])
+
+    for token_id, token_hash in zip(new_tokens, new_hashes, strict=True):
+        matches = matcher.match_sub_sequence([token_id])
+        assert [match.hash for match in matches] == [token_hash]
+
+
+def test_blend_oversized_compact_id_batch_is_atomic_and_recoverable() -> None:
+    """An oversized batch leaves available IDs and existing matches untouched."""
+    matcher = _SmallTableBlendTokenRangeMatcher(chunk_size=1)
+    live_tokens = list(range(1, COMPACT_ID_TEST_TABLE_SIZE))
+    live_hashes = [ObjectKey.IntHash2Bytes(800 + token_id) for token_id in live_tokens]
+    assert matcher.on_new_token_hashes(live_tokens, live_hashes) == len(live_tokens)
+
+    matcher.remove_chunks([live_hashes[0]])
+
+    # Only two IDs are available: one was freed and one remains above the
+    # high-water mark. The third token shares a slot with a live token, so a
+    # rejected batch must not partially overwrite the table either.
+    oversized_tokens = [
+        COMPACT_ID_TEST_TABLE_SIZE,
+        COMPACT_ID_TEST_TABLE_SIZE + 1,
+        COMPACT_ID_TEST_TABLE_SIZE + 2,
+    ]
+    oversized_hashes = [
+        ObjectKey.IntHash2Bytes(900 + token_id) for token_id in oversized_tokens
+    ]
+    assert matcher.on_new_token_hashes(oversized_tokens, oversized_hashes) == 0
+    for token_id in oversized_tokens:
+        assert matcher.match_sub_sequence([token_id]) == []
+    assert [match.hash for match in matcher.match_sub_sequence([live_tokens[1]])] == [
+        live_hashes[1]
+    ]
+
+    recovery_tokens = oversized_tokens[:2]
+    recovery_hashes = oversized_hashes[:2]
+    assert matcher.on_new_token_hashes(recovery_tokens, recovery_hashes) == len(
+        recovery_tokens
+    )
+    for token_id, token_hash in zip(recovery_tokens, recovery_hashes, strict=True):
+        matches = matcher.match_sub_sequence([token_id])
+        assert [match.hash for match in matches] == [token_hash]
+
+
+@pytest.mark.parametrize("dedup_content", [False, True])
+def test_blend_compact_id_reuse_resets_same_hash_row(
+    dedup_content: bool,
+) -> None:
+    """Re-registration refreshes the reused row's fingerprint and position."""
+    matcher = _SmallTableBlendTokenRangeMatcher(
+        chunk_size=1, dedup_content=dedup_content
+    )
+    live_tokens = list(range(1, COMPACT_ID_TEST_TABLE_SIZE + 1))
+    live_hashes = [ObjectKey.IntHash2Bytes(700 + token_id) for token_id in live_tokens]
+    assert matcher.on_new_token_hashes(live_tokens, live_hashes) == len(live_tokens)
+
+    old_token_id = live_tokens[0]
+    token_hash = live_hashes[0]
+    matcher.remove_chunks([token_hash])
+    assert matcher.match_sub_sequence([old_token_id]) == []
+
+    assert (
+        matcher.on_new_token_hashes(
+            [old_token_id + COMPACT_ID_TEST_TABLE_SIZE],
+            [token_hash],
+            position_offset=23,
+        )
+        == 1
+    )
+    new_token_id = old_token_id + COMPACT_ID_TEST_TABLE_SIZE
+    assert matcher.match_sub_sequence([old_token_id]) == []
+    matches = matcher.match_sub_sequence([new_token_id])
+    assert [match.hash for match in matches] == [token_hash]
+    assert matches[0].old_st == 23
+
+
 # -- Config -------------------------------------------------------------------
 
 
@@ -954,8 +1151,79 @@ def _parse_mp(argv: list[str]) -> MPServerConfig:
 
 
 @pytest.mark.parametrize(
-    "argv, expected",
-    [([], False), (["--enable-dedup-content"], True)],
+    "argv, fingerprint, kv",
+    [
+        ([], False, False),
+        (["--enable-dedup-content-fingerprint"], True, False),
+        (["--enable-dedup-content-kv"], False, True),
+        (
+            ["--enable-dedup-content-fingerprint", "--enable-dedup-content-kv"],
+            True,
+            True,
+        ),
+    ],
 )
-def test_enable_dedup_content_flag(argv, expected):
-    assert _parse_mp(argv).enable_dedup_content is expected
+def test_dedup_content_flags(argv, fingerprint, kv):
+    config = _parse_mp(argv)
+    assert config.enable_dedup_content_fingerprint is fingerprint
+    assert config.enable_dedup_content_kv is kv
+    # Read-only alias kept for callers of the old attribute name.
+    assert config.enable_dedup_content is fingerprint
+
+
+def test_deprecated_enable_dedup_content_flag_sets_fingerprint():
+    config = _parse_mp(["--enable-dedup-content"])
+    assert config.enable_dedup_content_fingerprint is True
+    assert config.enable_dedup_content_kv is False
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([], []),
+        # Abutting ranges merge (a shifted document's back-to-back matches).
+        ([(100, 356), (356, 612)], [(100, 612)]),
+        # Overlapping and unsorted ranges merge; gaps stay separate.
+        ([(20, 30), (0, 10), (5, 12)], [(0, 12), (20, 30)]),
+        ([(0, 10), (3, 6)], [(0, 10)]),
+    ],
+)
+def test_merge_intervals(ranges, expected):
+    results = [CBMatchResult(s, e, s, e, b"") for s, e in ranges]
+    assert merge_intervals(results) == expected
+    assert _unique_token_coverage(results) == sum(e - s for s, e in expected)
+
+
+def _ranges(*rs):
+    return [CBMatchResult(s, e, s, e, b"") for s, e in rs]
+
+
+@pytest.mark.parametrize(
+    ("ranges", "expected"),
+    [
+        ([], set()),
+        # Shifted doc: back-to-back off-grid matches cover the interior chunks.
+        ([(100, 356), (356, 612), (612, 868)], {1, 2}),
+        # Grid-aligned match covers exactly its chunk.
+        ([(256, 512)], {1}),
+        # A match shorter than its chunk span covers nothing.
+        ([(100, 356)], set()),
+        # A gap inside a chunk leaves it uncovered.
+        ([(0, 300), (301, 768)], {0, 2}),
+        # Overlapping, unsorted matches merge first.
+        ([(400, 768), (0, 500)], {0, 1, 2}),
+    ],
+)
+def test_covered_chunks(ranges, expected):
+    assert covered_chunks(_ranges(*ranges), 256) == expected
+
+
+def test_repeated_chunk_matches_every_copy() -> None:
+    """A stored chunk repeated later in the query matches at each copy."""
+    matcher = BlendTokenRangeMatcher(chunk_size=CHUNK_SIZE)
+    a = _chunk(1)
+    _register(matcher, a, [1301])
+
+    matches = matcher.match_sub_sequence(a + list(range(95000, 95032)) + a)
+
+    assert [m.cur_st for m in matches] == [0, CHUNK_SIZE + 32]

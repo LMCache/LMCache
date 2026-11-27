@@ -302,8 +302,11 @@ class L1ManagerInterface(Protocol):
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         tag: str = "",
+        *,
+        allow_resident: bool = False,
     ) -> dict[ObjectKey, L1OperationResult]:
-        """Reserve a write buffer per key for the writer ``tag``."""
+        """Reserve a write buffer per key for the writer ``tag``; with
+        ``allow_resident``, also for keys that are already resident."""
         ...
 
     def finish_write(
@@ -348,6 +351,14 @@ class L1ManagerInterface(Protocol):
 
     def get_staging_memory_usage(self) -> int:
         """Return bytes held by uncommitted write reservations."""
+        ...
+
+    def track_prefetch_locked(self, keys: list[ObjectKey]) -> None:
+        """Track resident, read-locked objects a prefetch holds for a request."""
+        ...
+
+    def get_prefetch_locked_bytes(self) -> int:
+        """Return bytes of tracked objects that are still read-locked."""
         ...
 
     def get_capacity_bytes(self) -> int:

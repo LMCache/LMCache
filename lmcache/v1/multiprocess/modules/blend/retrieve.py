@@ -23,14 +23,14 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.multiprocess.custom_types import (
+from lmcache.v1.common.custom_types import (
     CBMatchResult,
     IPCCacheServerKey,
 )
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
+from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.engine_context import finish_lookup_read
 from lmcache.v1.multiprocess.modules.blend.read_set import (
     _BlendReadGroups,
@@ -95,6 +95,8 @@ class _DeviceEvent(Protocol):
 # numpy int64 tables, one pybind crossing). Only retrieve path — if no plan
 # can be built the retrieve fails and the client degrades to full recompute.
 _HAS_NATIVE_RETRIEVE_PLAN = hasattr(device_ops, "execute_cb_retrieve_plan_flat")
+# Staging-row host_offset for a device-to-device copy (see blend_kernels.cuh).
+_CB_D2D_ROW = -1
 
 
 class RetrieveMixin:
@@ -446,13 +448,28 @@ class RetrieveMixin:
             spec.slot_mapping_capacity = n_pos
         # The device staging must outlive the native call.
         keepalive = [dev_buf]
+        # Slot-mapping offset of each chunk, in request order.
+        tok_off = np.cumsum(cur_ed - cur_st) - (cur_ed - cur_st)
+
+        # Copies of a repeated chunk share one host object. Group them
+        # into one run so the copies sharing a step stage from host once.
+        keys = [tuple(row) for row in src.tolist()]
+        first_of: "dict[tuple[int, ...], int]" = {}
+        first = [first_of.setdefault(k, i) for i, k in enumerate(keys)]
+        run_lens = [len(run) for run in runs]
+        if len(first_of) < n:
+            order = np.argsort(first, kind="stable")
+            keys, run_lens = [keys[i] for i in order], [n]
+            pos_table, tok_off = pos_table[order], tok_off[order]
+            src, nbytes, host_off = src[order], nbytes[order], host_off[order]
+            cur_st, cur_ed, old_st = pos_table[:, 0], pos_table[:, 1], pos_table[:, 2]
+
         # Waves of `wave` chunks per run, alternating slot halves.
         slot_of = np.empty(n, dtype=np.int64)
         slot_arange = np.arange(wave, dtype=np.int64)
         step_lens: list[int] = []
         i0 = 0
-        for run in runs:
-            m = len(run)
+        for m in run_lens:
             for w0 in range(0, m, wave):
                 batch_len = min(wave, m - w0)
                 slot_base = (len(step_lens) % 2) * wave
@@ -463,8 +480,6 @@ class RetrieveMixin:
         n_steps = len(step_lens)
 
         n_tok = cur_ed - cur_st
-        tok_off = np.zeros(n, dtype=np.int64)
-        np.cumsum(n_tok[:-1], out=tok_off[1:])
 
         # One staging row per (chunk, read object group), chunk-major; row
         # counts feed step_offsets column 0 (staging_end * n_read).
@@ -473,6 +488,13 @@ class RetrieveMixin:
             dtype=np.int64,
         )
         dest = obj_buf_ptrs[slot_of]  # (n, n_read)
+        step_of_chunk = np.repeat(np.arange(n_steps, dtype=np.int64), chunks_per_step)
+        head = 0  # later copies in a step copy its first copy's slot (D2D)
+        for i in range(1, n):
+            if keys[i] != keys[i - 1] or step_of_chunk[i] != step_of_chunk[i - 1]:
+                head = i
+            else:
+                src[i], host_off[i] = dest[head], _CB_D2D_ROW
         staging = np.stack(
             [dest.ravel(), src.ravel(), nbytes.ravel(), host_off.ravel()], axis=1
         )
@@ -503,7 +525,6 @@ class RetrieveMixin:
         )
 
         staging_end = np.cumsum(chunks_per_step)
-        step_of_chunk = np.repeat(np.arange(n_steps, dtype=np.int64), chunks_per_step)
         shifted_per_step = np.bincount(
             step_of_chunk[shifted], minlength=n_steps
         ).astype(np.int64, copy=False)
@@ -541,12 +562,13 @@ class RetrieveMixin:
             The number of object keys whose release was enqueued.
         """
         applied_ids = {id(r) for r in applied}
-        release_keys = [
-            all_obj_keys[i * n_read + g]
-            for i, r in enumerate(cb_match_result)
-            if id(r) in applied_ids
-            for g in range(n_read)
-        ]
+        # Repeated chunks share keys: release a key once, when every match
+        # reading it was applied.
+        done: dict[ObjectKey, bool] = {}
+        for i, r in enumerate(cb_match_result):
+            for k in all_obj_keys[i * n_read : (i + 1) * n_read]:
+                done[k] = done.get(k, True) and id(r) in applied_ids
+        release_keys = [k for k, ok in done.items() if ok]
         if release_keys:
             if l1_owners is None:
                 submit_callback_to_stream(
@@ -621,7 +643,7 @@ class RetrieveMixin:
                 "before submitting retrieve requests"
             )
         rope_state = self._cb_rope_state[instance_id]
-        chunk_size = self._ctx.chunk_size
+        chunk_size = self._ctx.default_chunk_size
         # Blend's read set: attention (+ connector-private aux), never
         # recurrent-state groups. Legacy fused layout: every kernel group.
         read_groups, staged_kernel = self._cb_staged_groups(gpu_context)
@@ -895,8 +917,10 @@ class RetrieveMixin:
             # cb.scatter opens mid-try; track it so a failure closes the span.
             scatter_open = False
             try:
+                # Repeated chunks share keys: read each once, expand per match.
+                unique_keys = list(dict.fromkeys(all_obj_keys))
                 with self._ctx.storage_manager.read_prefetched_results(
-                    all_obj_keys, l1_owners=l1_owners
+                    unique_keys, l1_owners=l1_owners
                 ) as memory_objs:
                     _stage_ms["fetch"] = (time.perf_counter() - _stage_t) * 1000
                     if memory_objs is None:
@@ -928,6 +952,8 @@ class RetrieveMixin:
                             False,
                         )
 
+                    obj_of = dict(zip(unique_keys, memory_objs, strict=True))
+                    memory_objs = [obj_of[k] for k in all_obj_keys]
                     # Per-token scatter handles any cur_st. Each match owns n_read
                     # consecutive memory objects (chunk-major).
                     if len(memory_objs) != len(cb_match_result) * n_read:

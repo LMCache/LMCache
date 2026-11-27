@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <sstream>
+#include <system_error>
 #include <thread>
 
 #include "../keys.h"
@@ -230,7 +231,8 @@ WorkerHf3fsConn Hf3fsConnector::create_connection() {
  * @param conn Connection to use
  * @param file_path Path to file
  * @param for_write true for write, false for read
- * @throws std::runtime_error if open or hf3fs_reg_fd fails
+ * @throws std::system_error with the errno if open fails
+ * @throws std::runtime_error if hf3fs_reg_fd fails
  */
 void Hf3fsConnector::open_file(WorkerHf3fsConn& conn,
                                const std::string& file_path, bool for_write) {
@@ -246,7 +248,7 @@ void Hf3fsConnector::open_file(WorkerHf3fsConn& conn,
     conn.fd = ::open(opened_path.c_str(), O_RDONLY);
   }
   if (conn.fd < 0) {
-    throw std::runtime_error("open failed: " + std::string(strerror(errno)));
+    throw std::system_error(errno, std::generic_category(), "open failed");
   }
 
   int reg_result = hf3fs_reg_fd(conn.fd, 0);
@@ -496,18 +498,32 @@ void Hf3fsConnector::ensure_parent_dir_(const std::string& file_path) {
  * 3. Read data using 3FS I/O
  * 4. Close file
  *
+ * If the file does not exist, the key is removed from the key buffer before
+ * the error is rethrown.
+ *
  * @param conn Connection to use
  * @param key Key to retrieve
  * @param buf Output buffer
  * @param len Number of bytes to read
  * @param chunk_size Chunk size (unused for 3FS)
+ * @throws std::system_error if the file cannot be opened
+ * @throws std::runtime_error if registering or reading the file fails
  */
 void Hf3fsConnector::do_single_get(WorkerHf3fsConn& conn,
                                    const std::string& key, void* buf,
                                    size_t len, size_t chunk_size) {
   (void)chunk_size;  // Unused for 3FS
   std::string file_path = key_to_path(key);
-  open_file(conn, file_path, false);
+  try {
+    open_file(conn, file_path, false);
+  } catch (const std::system_error& e) {
+    // Another instance sharing base_paths deleted the file after this
+    // instance buffered the key; stop reporting it as present.
+    if (buffer_enabled_ && e.code() == std::errc::no_such_file_or_directory) {
+      buffer_remove_(key);
+    }
+    throw;
+  }
   try {
     read_file(conn, conn.read_ior, conn.read_iov, buf, len);
   } catch (const std::exception& e) {
@@ -600,6 +616,9 @@ bool Hf3fsConnector::do_single_exists(WorkerHf3fsConn& conn,
 /**
  * Delete a key.
  *
+ * The key leaves the key buffer even when the file was already gone, e.g.
+ * deleted by another instance sharing base_paths.
+ *
  * @param conn Connection to use
  * @param key Key to delete
  * @return true if deleted, false if not found
@@ -610,7 +629,7 @@ bool Hf3fsConnector::do_single_delete(WorkerHf3fsConn& conn,
   std::string file_path = key_to_path(key);
   try {
     bool removed = std::filesystem::remove(file_path);
-    if (removed && buffer_enabled_) {
+    if (buffer_enabled_) {
       buffer_remove_(key);
     }
     return removed;
@@ -761,7 +780,8 @@ void Hf3fsConnector::buffer_add_(const std::string& key) {
  * Remove a key from the buffer.
  *
  * Thread-safe via concurrent_flat_hash_set (sharded locks).
- * Called after a successful do_single_delete().
+ * Called by do_single_delete(), and when do_single_get() finds the key's file
+ * gone.
  */
 void Hf3fsConnector::buffer_remove_(const std::string& key) {
   key_buffer_.Erase(key);

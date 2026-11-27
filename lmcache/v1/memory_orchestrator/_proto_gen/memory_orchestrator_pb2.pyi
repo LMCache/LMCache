@@ -2,7 +2,7 @@
 # ruff: noqa
 # fmt: off
 # isort: skip_file
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2 as _p2p_service_pb2
+from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2 as _p2p_service_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
@@ -219,3 +219,33 @@ class CloseClientReply(_message.Message):
     aborted_writes: int
     released_leases: int
     def __init__(self, aborted_writes: _Optional[int] = ..., released_leases: _Optional[int] = ...) -> None: ...
+
+class DeleteObjectsRequest(_message.Message):
+    __slots__ = ("env", "keys")
+    ENV_FIELD_NUMBER: _ClassVar[int]
+    KEYS_FIELD_NUMBER: _ClassVar[int]
+    env: Envelope
+    keys: _containers.RepeatedCompositeFieldContainer[_p2p_service_pb2.ObjectKey]
+    def __init__(self, env: _Optional[_Union[Envelope, _Mapping]] = ..., keys: _Optional[_Iterable[_Union[_p2p_service_pb2.ObjectKey, _Mapping]]] = ...) -> None: ...
+
+class DeleteObjectsReply(_message.Message):
+    __slots__ = ("results",)
+    class Status(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+        __slots__ = ()
+        STATUS_UNSPECIFIED: _ClassVar[DeleteObjectsReply.Status]
+        DELETED: _ClassVar[DeleteObjectsReply.Status]
+        MISS: _ClassVar[DeleteObjectsReply.Status]
+        BUSY_WRITING: _ClassVar[DeleteObjectsReply.Status]
+    STATUS_UNSPECIFIED: DeleteObjectsReply.Status
+    DELETED: DeleteObjectsReply.Status
+    MISS: DeleteObjectsReply.Status
+    BUSY_WRITING: DeleteObjectsReply.Status
+    RESULTS_FIELD_NUMBER: _ClassVar[int]
+    results: _containers.RepeatedScalarFieldContainer[DeleteObjectsReply.Status]
+    def __init__(self, results: _Optional[_Iterable[_Union[DeleteObjectsReply.Status, str]]] = ...) -> None: ...
+
+class DeletePublishedReply(_message.Message):
+    __slots__ = ("deleted",)
+    DELETED_FIELD_NUMBER: _ClassVar[int]
+    deleted: int
+    def __init__(self, deleted: _Optional[int] = ...) -> None: ...

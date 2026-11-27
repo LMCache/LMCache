@@ -17,15 +17,15 @@ The command exercises the full store / retrieve data path:
 Usage examples::
 
     # GPU mode: real CUDA tensors + IPC
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url grpc://localhost:5555 \\
         --num-tokens 512 --start 0 --end 3
 
     # Custom KV cache shape (multi-group spec)
-    lmcache bench server --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url grpc://localhost:5555 \\
         --kvcache-shape-spec '(2,32,1024,8,128):float16:32'
 
     # Run forever starting from sequence 0
-    lmcache bench server --rpc-url tcp://localhost:5555
+    lmcache bench server --rpc-url grpc://localhost:5555
 """
 
 # Future

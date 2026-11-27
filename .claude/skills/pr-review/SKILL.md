@@ -11,7 +11,7 @@ Review a pull request against the LMCache coding standards defined in `docs/codi
 
 ## Inputs
 
-`$ARGUMENTS` is a PR number (e.g., `3032`) or a GitHub PR URL.
+The request must identify a PR number (e.g., `3032`) or a GitHub PR URL.
 
 ## Review Process
 
@@ -22,9 +22,12 @@ all quality checks.
 
 ### Step 1 -- Understand the PR
 
-1. Fetch the PR metadata (`get`) to understand the title, description, author, and base branch.
-2. Fetch the diff (`get_diff`) to see exactly what changed.
-3. Fetch the list of changed files (`get_files`) for a structural overview.
+Use an available GitHub integration, or the `gh` CLI if no suitable integration
+is available.
+
+1. Fetch the PR metadata to understand the title, description, author, and base branch.
+2. Fetch the diff to see exactly what changed.
+3. Fetch the list of changed files for a structural overview.
 4. Read any design docs referenced in the PR description. `docs/design/` mirrors
    the `lmcache/` package tree, so for each changed module `lmcache/<path>/`
    check `docs/design/<path>/` for relevant docs.
@@ -70,6 +73,8 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 **New Functionality (Section 5)**:
 - Design doc present for non-trivial features.
 - Tests cover new features (error-severity if missing).
+- User-facing features (a new or changed CLI command, flag, or server API) have
+  an end-to-end test that drives that entry point (warning-severity if missing).
 - Tests verify public interface, not implementation details.
 - Tests do not access private members.
 
@@ -83,7 +88,7 @@ Review the diff against these standards (from `docs/coding_standards.md`):
 - Import ordering correct (Standard / Third Party / First Party / Local).
 - All imports at file top (no lazy imports).
 - `import torch` before native C extensions.
-- Uses `init_logger(__name__)` from `lmcache.logging`, not bare `logging.getLogger()`.
+- Uses `init_logger(__name__)` from `lmcache.v1.common.logging`, not bare `logging.getLogger()`.
 - Operational logs at DEBUG level (not INFO).
 - Log levels appropriate (no WARNING for expected concurrent conditions).
 - Module-level helpers at top; private methods at end of class.
@@ -116,12 +121,13 @@ public symbol identified in Step 1, verify the change is safe for **every unchan
 
 **How to find callers:**
 
-1. Use `Grep` with the symbol name across the repo (do not filter to only changed files).
+1. Search for the symbol name (for example, with `rg`) across the repo (do not filter to
+   only changed files).
    Include `tests/`, `benchmarks/`, `lmcache/integration/`, and `docs/` in the search.
-2. For common function names that may have many false matches, use `Grep` with
-   `-A 2 -B 2` to see context, or use the `Agent` (Explore) tool with a focused
-   prompt (e.g., "find all callers of `L1Manager.is_key_evictable` and summarize
-   what they do with the return value").
+2. For common function names that may have many false matches, search with context
+   (for example, `rg -A 2 -B 2`). If delegation is available and permitted, an exploration
+   subagent may perform the search with a focused prompt (e.g., "find all callers of
+   `L1Manager.is_key_evictable` and summarize what they do with the return value").
 3. For base-class/protocol changes, also grep for subclasses
    (`class \w+\(<BaseName>`).
 
@@ -151,6 +157,8 @@ Report findings as part of the issues list, with the path:line of the affected c
 
 - New features have tests (error-severity if missing).
 - Bug fixes have regression tests (error-severity if missing).
+- User-facing features have an end-to-end test that drives the CLI command,
+  flag, or server API the way a user would (warning-severity if missing).
 - Tests verify public API and docstring contract.
 - Tests do not access private members or test private functions directly.
 - Note what is tested and what is missing (especially failure paths and concurrent access).
@@ -179,9 +187,9 @@ Group issues by severity, following the calibration from `docs/coding_standards.
   swallows errors on a data path, defensive branch that masks real failures.
 
 **warning** (should fix):
-- Docstring could be more detailed, tests that test implementation details, naming
-  could be clearer, code could be more modular, missing `strict=True` on `zip` of
-  parallel lists, log level too high for operational messages, boilerplate
+- Docstring could be more detailed, tests that test implementation details,
+  user-facing feature with no end-to-end test, naming could be clearer, code
+  could be more modular, missing `strict=True` on `zip` of parallel lists, log level too high for operational messages, boilerplate
   docstrings, redundant guards, comments narrating the change, style inconsistent
   with the surrounding module.
 

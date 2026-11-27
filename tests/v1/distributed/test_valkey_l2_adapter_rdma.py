@@ -8,6 +8,7 @@ valkey-large-object module is needed.
 """
 
 # Standard
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 import ctypes
@@ -498,7 +499,7 @@ class TestConfig:
         cfg = _make_config()
         assert cfg.uses_rdma
         assert cfg.rdma_provider == "efa-direct"
-        assert cfg.rdma_interface is None
+        assert cfg.rdma_interfaces == ()
 
     def test_rejects_unknown_transport(self):
         with pytest.raises(ValueError, match="transport"):
@@ -508,9 +509,17 @@ class TestConfig:
         with pytest.raises(ValueError, match="rdma_provider"):
             _make_config(rdma_provider="verbs")
 
-    def test_rejects_empty_interface(self):
+    @pytest.mark.parametrize("value", ["", [], ["efa0", ""], ["efa0", 7]])
+    def test_rejects_empty_or_malformed_interfaces(self, value: Any):
         with pytest.raises(ValueError, match="rdma_interface"):
-            _make_config(rdma_interface="")
+            _make_config(rdma_interface=value)
+
+    def test_a_single_interface_and_a_list_are_both_accepted(self):
+        assert _make_config(rdma_interface="efa0").rdma_interfaces == ("efa0",)
+        assert _make_config(rdma_interface=["efa0", "efa1"]).rdma_interfaces == (
+            "efa0",
+            "efa1",
+        )
 
     def test_inherited_validation_still_applies(self):
         with pytest.raises(ValueError, match="startup_nodes"):
@@ -533,13 +542,19 @@ class TestConfig:
         assert cfg.ttl_seconds == 60
         assert cfg.uses_rdma
         assert cfg.rdma_provider == "tcp"
-        assert cfg.rdma_interface == "efa0"
+        assert cfg.rdma_interfaces == ("efa0",)
+
+    def test_from_dict_accepts_a_list_of_interfaces(self):
+        cfg = ValkeyL2AdapterConfig.from_dict(
+            {"startup_nodes": "h:1", "rdma_interface": ["efa0", "efa1"]}
+        )
+        assert cfg.rdma_interfaces == ("efa0", "efa1")
 
     def test_from_dict_defaults_to_tcp_and_efa_direct(self):
         cfg = ValkeyL2AdapterConfig.from_dict({"startup_nodes": "h:1"})
         assert cfg.transport == "tcp"
         assert cfg.rdma_provider == "efa-direct"
-        assert cfg.rdma_interface is None
+        assert cfg.rdma_interfaces == ()
 
     @pytest.mark.parametrize(
         "field, value",
@@ -548,6 +563,7 @@ class TestConfig:
             ("transport", "infiniband"),
             ("rdma_provider", 7),
             ("rdma_interface", 7),
+            ("rdma_interface", ["efa0", 7]),
             ("rdma_provider", "verbs"),
         ],
     )
@@ -684,6 +700,31 @@ class TestRegistration:
             rdma = kwargs["rdma"]
             assert isinstance(rdma.provider, _Tcp)
             assert rdma.interface == "lo"
+        finally:
+            adapter.close()
+
+    @pytest.mark.parametrize(
+        "workers, expected",
+        [(4, {"efa0": 2, "efa1": 2}), (3, {"efa0": 2, "efa1": 1})],
+    )
+    def test_workers_are_spread_across_the_listed_interfaces(
+        self, arena: _Arena, workers: int, expected: dict[str, int]
+    ):
+        adapter = ValkeyL2Adapter(
+            _make_config(num_workers=workers, rdma_interface=["efa0", "efa1"]),
+            arena.desc,
+        )
+        try:
+            # Hold every worker inside one store at once, so each thread has
+            # to build its own client; a fast fake lets warm-up reuse threads.
+            gate = threading.Barrier(workers)
+            _SERVER.faults["set"] = lambda key: (gate.wait(timeout=5), None)[1]
+            keys = [_key(i) for i in range(workers)]
+            assert _store(adapter, keys, [arena.alloc() for _ in keys]).is_successful()
+
+            opened = Counter(kwargs["rdma"].interface for _, kwargs in _SERVER.configs)
+            assert opened == expected
+            assert adapter.report_status()["rdma_interfaces"] == ["efa0", "efa1"]
         finally:
             adapter.close()
 
@@ -925,7 +966,7 @@ class TestDeleteAndStatus:
         assert status["type"] == "valkey"
         assert status["transport"] == "rdma"
         assert status["rdma_provider"] == "efa-direct"
-        assert status["rdma_interface"] is None
+        assert status["rdma_interfaces"] == []
         assert status["l1_arena_bytes"] == arena.desc.size
 
 

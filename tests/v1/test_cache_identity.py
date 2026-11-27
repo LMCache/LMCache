@@ -9,6 +9,7 @@ import msgspec
 import pytest
 
 # First Party
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     EncodedObjectKey,
@@ -18,7 +19,6 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.key_codec import decode_tags, encode_tags
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 
 def test_identity_tags_are_canonical_and_immutable() -> None:

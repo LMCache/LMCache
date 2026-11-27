@@ -72,9 +72,9 @@ not use this adapter never need the dependency.
 ValkeyL2Adapter                        ValkeyWorkerPool
   │ _create_pool(config)                 │ _client_config_extras(glide_sync)
   │ _pool_kwargs(config)                 │ _do_set / _do_get_into
-  ▼                                      ▼
-ValkeyRdmaL2Adapter  ── builds ──►  ValkeyRdmaWorkerPool
-  report_status()                      rdma=RdmaConfiguration(...)
+  │ report_status()                      ▼
+  └──────────── builds ──────────►  ValkeyRdmaWorkerPool
+                                       rdma=RdmaConfiguration(...)
                                        one RdmaRegion per worker thread
                                        BLOB.RDMA_SET / BLOB.RDMA_GET windows
 ```
@@ -162,9 +162,11 @@ to serve.
 | lookup | `EXISTS key` (inherited) | native command, any key type | count |
 | delete | `DEL key` (inherited) | the module's free callback releases the object | count |
 
-The keys are the module's own data type. A plain `GET` or `SET` cannot read
-or replace them, so a node holds either adapter's keys under a given
-`key_prefix`, never both.
+The keys are the module's own data type. A plain `GET` cannot read them and
+a plain `SET` replaces them, so a `key_prefix` holds either plain-`tcp` keys
+or module keys, never both. `transport: "blob-tcp"` writes the same module
+type over the ordinary connection (`BLOB.TCP_SET` / `BLOB.TCP_GET`), so
+`rdma` and `blob-tcp` hosts can share a prefix and each other's chunks.
 
 `ttl_seconds` costs one extra round trip per store, because `BLOB.RDMA_SET` has no
 expiry argument.
@@ -231,7 +233,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
   "num_workers": 8,
   "ttl_seconds": 3600,
   "rdma_provider": "efa-direct",
-  "rdma_interface": "efa0"
+  "rdma_interface": ["rdmap71s0-rdm", "rdmap72s0-rdm"]
 }
 ```
 
@@ -239,7 +241,7 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 |-------|---------|---------|
 | `transport` | `"tcp"` | `"rdma"` selects this transport. |
 | `rdma_provider` | `"efa-direct"` | `"efa-direct"` opens EFA hardware; `"tcp"` opens libfabric's software provider, for development and tests only. |
-| `rdma_interface` | unset | Fabric domain to pin to on a host with more than one card. |
+| `rdma_interface` | unset | Fabric domain, or list of domains, to open on a host with more than one card, named as `fi_info -p efa` lists them. Workers take a list round-robin in client-creation order, so a list of `k` cards with `num_workers` a multiple of `k` puts the same number of transfers in flight on each card, and each card's registered-memory cap applies to its own workers only. One domain, or none, sends every worker through one card. |
 
 ## Non-goals
 
@@ -248,8 +250,9 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
 - **Per-chunk registration**: one registration per operation would let the
   fabric reject an overrun, but costs a registration per transfer; the
   `BLOB.RDMA_GET` length gives the same guarantee for one integer on the wire.
-- **Interoperating with `valkey`-adapter keys**: the module's data type and
-  a plain string are different key types; use a different `key_prefix`.
+- **Interoperating with plain-`tcp` keys**: the module's data type and a
+  plain string are different key types; use a different `key_prefix`.
+  `blob-tcp` keys are the module's type and do interoperate.
 - **Serde with zero copy**: the `serde` wrapper still works but stages each
   chunk through a second L1 buffer and a transform pass.
 - **Replica reads**: transfers always run against a primary, as in glide.
@@ -266,4 +269,5 @@ JSON schema (CLI `--l2-adapter`); every `valkey` field is accepted, plus:
   real transfers against a valkey-server running the module with the
   `Emulated` fabric provider and `valkey-glide-sync` built with RDMA, using
   the `tcp` provider. Skipped unless `LMCACHE_VALKEY_RDMA_SERVER` names a
-  server.
+  server. `TestSharedWithBlobTcp` stores over one transport and loads over
+  the other, in both directions, against the same server.

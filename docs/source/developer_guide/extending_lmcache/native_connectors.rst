@@ -205,31 +205,7 @@ Then rebuild:
     pip install -e .
 
 
-Step 4: Python Client (Non-MP Mode)
-------------------------------------
-
-Inherit from ``ConnectorClientBase`` which provides asyncio event loop integration,
-future management, and both sync and async methods.
-
-.. code-block:: python
-
-    # lmcache/inprocess/v1/storage_backend/native_clients/mybackend_client.py
-    from .connector_client_base import ConnectorClientBase
-    from lmcache.lmcache_mybackend import LMCacheMyBackendClient
-
-    class MyBackendClient(ConnectorClientBase[LMCacheMyBackendClient]):
-        def __init__(self, host: str, port: int,
-                     num_workers: int, loop=None):
-            native = LMCacheMyBackendClient(host, port, num_workers)
-            super().__init__(native, loop)
-
-This gives you ``batch_get``, ``batch_set``, ``batch_exists`` (async), and their
-synchronous variants, all with automatic eventfd-driven completion handling.
-
-**Reference:** ``lmcache/inprocess/v1/storage_backend/native_clients/resp_client.py``
-
-
-Step 5: L2 Adapter (MP Mode)
+Step 4: L2 Adapter (MP Mode)
 -----------------------------
 
 To use your connector as an L2 adapter in MP mode, create a single Python module that
@@ -690,4 +666,4 @@ Additional Resources
   ``lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py``
 - Design document:
   ``lmcache/v1/distributed/l2_adapters/design_docs/plugin.md``
-- RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../kv_cache/storage_backends/resp>`
+- RESP backend user guide: :doc:`RESP (Native Redis/Valkey) <../../mp/l2_storage/resp>`

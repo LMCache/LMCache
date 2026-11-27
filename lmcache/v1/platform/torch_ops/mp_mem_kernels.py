@@ -12,7 +12,7 @@ from lmcache.lmcache_native import (
     EngineKVFormat,
     TransferDirection,
 )
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.platform.torch_ops._kv_format import (
     _blocked_scale_views,
     _format_spec,
@@ -21,7 +21,7 @@ from lmcache.v1.platform.torch_ops._tensor_from_ptr import _tensor_from_ptr
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.gpu_connector.kv_format.specs.base import KVFormatSpec
+    from lmcache.v1.common.kv_format.specs.base import KVFormatSpec
 
 _ELEMENT_SIZE_TO_DTYPE: dict[int, torch.dtype] = {
     # Maps the byte width of a KV-cache element to a representative torch dtype.

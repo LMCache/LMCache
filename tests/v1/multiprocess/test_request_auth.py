@@ -6,7 +6,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.http_auth import HTTPAuthenticationConfig
-from lmcache.v1.multiprocess.transport.auth import (
+from lmcache.v1.transport.auth import (
     load_request_authentication,
     load_request_client_api_key,
     request_client_auth_headers,

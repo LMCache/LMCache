@@ -37,17 +37,17 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _query_checksum,
     _send_lookup,
 )
-from lmcache.v1.kv_layer_groups import (
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.kv_layer_groups import (
     DTYPE_MAP,
     KVLayerGroupInfo,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.token_codec import unpack_token_ids
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
-from lmcache.v1.multiprocess.transport.zmq_impl.wire import decode_operation
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.ops_types import PageBufferShapeDesc
+from lmcache.v1.common.token_codec import unpack_token_ids
+from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
+from lmcache.v1.transport.zmq.wire import decode_operation
 
 
 def _make_shape_desc(
@@ -418,7 +418,7 @@ class TestCommandArguments:
         parser: argparse.ArgumentParser,
     ) -> None:
         args = parser.parse_args(["bench", "server"])
-        assert args.rpc_url == "tcp://localhost:5555"
+        assert args.rpc_url == "grpc://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
         assert args.num_blocks == 1024
@@ -721,7 +721,7 @@ class TestAllocateKVCache:
         wrong tensors for layers in later groups.
         """
         # First Party
-        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+        from lmcache.v1.common.kv_layer_groups import KVLayerGroupInfo
 
         # Group A: 3 layers of (2, 2, 2, 8, 16), float16
         # Group B: 2 layers of (1, 2, 2, 4, 32), bfloat16
@@ -891,7 +891,7 @@ class TestAllocShapeContract:
 
     def test_mla_alloc_shape_is_rank3(self) -> None:
         # First Party
-        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+        from lmcache.v1.common.kv_layer_groups import KVLayerGroupInfo
 
         group = KVLayerGroupInfo(
             layer_indices=[0, 1],
@@ -915,7 +915,7 @@ class TestAllocShapeContract:
 
     def test_classical_alloc_shape_is_rank5(self) -> None:
         # First Party
-        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
+        from lmcache.v1.common.kv_layer_groups import KVLayerGroupInfo
 
         group = KVLayerGroupInfo(
             layer_indices=[0],
@@ -965,16 +965,22 @@ class TestClientMultiWorker:
         from lmcache import torch_dev
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess import transfer_context as tc
+        from lmcache.v1.client.async_engine_driven import (
+            AsyncEngineDrivenTransferContext,
+        )
+        from lmcache.v1.client.worker_transfer import (
+            EngineDrivenTransferContext,
+            LMCacheDrivenTransferContext,
+        )
 
         register = MagicMock()
         context_type = (
-            tc.AsyncEngineDrivenTransferContext
+            AsyncEngineDrivenTransferContext
             if mode == "gpu"
-            else tc.LMCacheDrivenTransferContext
+            else LMCacheDrivenTransferContext
         )
         context = MagicMock(spec=context_type, register=register)
-        monkeypatch.setattr(tc.EngineDrivenTransferContext, "register", register)
+        monkeypatch.setattr(EngineDrivenTransferContext, "register", register)
         monkeypatch.setattr(
             client_module, "create_transfer_context", lambda *a, **kw: context
         )
@@ -1030,7 +1036,7 @@ class TestClientMultiWorker:
         # First Party
         from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
         from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-        from lmcache.v1.multiprocess.transfer_context import worker_transfer
+        from lmcache.v1.client import worker_transfer
 
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
 
@@ -1459,7 +1465,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     # First Party
     from lmcache.cli.commands.bench.server_bench.client import ServerBenchClient
     from lmcache.cli.commands.bench.server_bench.config import BenchConfig
-    from lmcache.v1.multiprocess.transfer_context import worker_transfer
+    from lmcache.v1.client import worker_transfer
 
     event_ref: weakref.ReferenceType[_ExportedEvent] | None = None
     backend_calls: list[str] = []

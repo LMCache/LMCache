@@ -3,7 +3,7 @@
 # The common path filter reads this file to keep trigger metadata colocated
 # with the device-specific pipeline configuration.
 FILTER_DEVICE="amd"
-FILTER_TRIGGER_CONDITION='build.pull_request.labels includes "amd" || build.pull_request.labels includes "full" || build.branch == "dev"'
+FILTER_TRIGGER_CONDITION='build.pull_request.labels includes "amd" || build.pull_request.labels includes "full"'
 
 _path_filter_amd_should_skip() {
     local changed_file="$1"

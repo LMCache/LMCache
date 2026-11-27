@@ -27,8 +27,8 @@ registered separately from this transport setup and use the
 When `ObservabilityConfig.grpc_metrics_enabled` resolves to true,
 `init_otel_metrics()` also registers gRPC Python's official OpenTelemetry
 observability plugin with the same `MeterProvider`. The MP server resolves the
-default (`None`) from the request transport: enabled for gRPC, disabled for
-ZMQ. These metrics come from gRPC Core rather than the LMCache EventBus and
+default (`None`) from the request transport: enabled for gRPC, the default
+transport, and disabled for the deprecated ZMQ. These metrics come from gRPC Core rather than the LMCache EventBus and
 therefore use the upstream `grpc.*` namespace instead of the `lmcache_mp.*`
 prefix. The integration depends on `grpcio-observability`, which upstream
 currently distributes for Linux.
@@ -756,7 +756,7 @@ registers the stored chunks as fingerprints (below).
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_blend.fingerprints_registered` | `lmcache_blend_fingerprints_registered_total` | Counter | `CB_FINGERPRINTS_REGISTERED` | `+num_chunks` (chunks newly indexed; re-stores of known content add 0) |
-| `lmcache_blend.chunks_evicted` | `lmcache_blend_chunks_evicted_total` | Counter | `CB_CHUNKS_EVICTED` | `+num_chunks` |
+| `lmcache_blend.chunks_evicted` | `lmcache_blend_chunks_evicted_total` | Counter | `CB_CHUNKS_EVICTED` | `+num_chunks` (stale chunks of a lookup, or fingerprints removed on a storage key event) |
 
 **What it answers:** How many chunks are indexed into the fingerprint table? How many stale entries are evicted?
 

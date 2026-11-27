@@ -18,6 +18,13 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap, EngineKVFormat
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.kv_format.contiguity import (
+    attempt_permute_to_contiguous_view,
+)
+from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     DEFAULT_SHARD_REPLICATION_DESC,
     MemoryLayoutDesc,
@@ -26,20 +33,13 @@ from lmcache.v1.distributed.api import (
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
-    attempt_permute_to_contiguous_view,
-)
-from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import (
     LayoutDescRegistry,
     MPCacheServerContext,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import all_null_chunk_masks
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 CHUNK = 16
 TOKENS = tuple(range(CHUNK * 8))
@@ -233,24 +233,30 @@ def _lookup(
         for gid, group in enumerate(manager.object_groups)
     }
     registry.register(
-        "native-state", world_size, layouts[0], manager.get_attn_desc(), layouts
+        "native-state",
+        world_size,
+        layouts[0],
+        chunk_size=CHUNK,
+        hash_algorithm="blake3",
+        attn_desc=manager.get_attn_desc(),
+        group_layout_descs=layouts,
     )
     storage = _PresenceStorage(present)
     ctx = SimpleNamespace(
         get_read_owners=lambda request_id: None,
         storage_manager=storage,
-        token_hasher=hasher,
+        default_token_hasher=hasher,
         layout_desc_registry=registry,
         session_manager=SessionManager(hasher, cleanup_interval=None),
         event_bus=MagicMock(),
-        chunk_size=CHUNK,
+        default_chunk_size=CHUNK,
     )
     ctx.event_bus.has_subscribers.return_value = False
     module = LookupModule(cast(MPCacheServerContext, ctx))
     module.lookup(key, tp_size=world_size)
-    hit = module.query_prefetch_status(key.request_id)
-    assert hit is not None
-    return hit, storage, module, key
+    hit_tokens = module.query_prefetch_status(key.request_id)
+    assert hit_tokens is not None and hit_tokens % CHUNK == 0
+    return hit_tokens // CHUNK, storage, module, key
 
 
 @pytest.mark.parametrize(
@@ -275,9 +281,9 @@ def test_sparse_state_selects_latest_joint_endpoint(
     ]
     assert len(state_keys) == (len(endpoints) if expected else 0)
     if expected:
-        expected_hash = module.context.token_hasher.compute_chunk_hashes(list(TOKENS))[
-            expected - 1
-        ]
+        expected_hash = module.context.default_token_hasher.compute_chunk_hashes(
+            list(TOKENS)
+        )[expected - 1]
         assert {k.chunk_hash for k in state_keys} == {expected_hash}
     module.free_lookup_locks(key, tp_size=len(endpoints))
     assert not +storage.locked

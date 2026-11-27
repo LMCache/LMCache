@@ -20,6 +20,7 @@ from lmcache.cli.profiling import FlameProfiler, ProfileError, check_profiling_d
 def failed_recorder(monkeypatch: pytest.MonkeyPatch) -> Mock:
     """Simulate a failed external recorder without attaching to a process."""
     monkeypatch.setattr(shutil, "which", lambda name: name)
+    monkeypatch.setattr(profiling, "check_profiling_deps", lambda _mode: None)
     monkeypatch.setattr(profiling.time, "sleep", lambda _duration: None)
     proc = Mock(spec=subprocess.Popen, returncode=7, stdout=Mock())
     monkeypatch.setattr(subprocess, "Popen", Mock(return_value=proc))

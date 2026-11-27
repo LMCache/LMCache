@@ -14,7 +14,7 @@ from lmcache.v1.memory_orchestrator.api import (
     WireObjectKey,
     WriteRequest,
 )
-from lmcache.v1.multiprocess.transport.grpc_impl._proto_gen import p2p_service_pb2
+from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2
 
 
 def test_shared_object_key_and_layout_round_trip() -> None:

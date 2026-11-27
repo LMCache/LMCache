@@ -550,8 +550,9 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         monkeypatch.setattr(context, "register_gpu_buffer", register)
         monkeypatch.setattr(context, "deregister_gpu_buffer", deregister)
         tensor = torch.empty(4096, dtype=torch.uint8)
-        gds_context.register_gds_gpu_buffer(tensor)
-        gds_context.deregister_gds_gpu_buffer(tensor)
+        registration = gds_context.GDSBufferRegistration()
+        registration.register(tensor)
+        registration.deregister(tensor)
         register.assert_called_once_with(tensor)
         deregister.assert_called_once_with(tensor)
         with pytest.raises(ValueError, match="one GDS"):

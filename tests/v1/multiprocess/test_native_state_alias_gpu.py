@@ -24,7 +24,11 @@ import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.utils import EngineType
+from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey
+from lmcache.v1.common.errors import LMCacheTimeoutError
+from lmcache.v1.common.group_view import EngineGroupInfo
+from lmcache.v1.common.token_codec import pack_token_ids
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -32,19 +36,14 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
-from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.server import run_cache_server
-from lmcache.v1.multiprocess.token_codec import pack_token_ids
-from lmcache.v1.multiprocess.transport.base import RequestClient
-from lmcache.v1.multiprocess.transport.factory import RequestClientFactory
 from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.transport.request_client import RequestClient
 
 CHUNK = 16
 TIMEOUT = 30.0
-pytestmark = [pytest.mark.cuda, pytest.mark.no_shared_allocator]
+pytestmark = pytest.mark.cuda
 
 if not (torch_dev.is_available() and torch_device_type == "cuda"):
     pytest.skip("requires a CUDA or ROCm runtime", allow_module_level=True)
@@ -59,6 +58,7 @@ def _serve(port: int) -> None:
         mp_config=MPServerConfig(
             host="127.0.0.1",
             port=port,
+            transport="grpc",
             chunk_size=CHUNK,
             null_block_id=-1,
             separate_object_groups=True,
@@ -85,7 +85,7 @@ def native_client() -> Generator[RequestClient, None, None]:
     process = mp.get_context("spawn").Process(target=_serve, args=(port,), daemon=True)
     process.start()
     context = zmq.Context()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{port}", context=context)
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{port}", context=context)
     try:
         deadline = time.monotonic() + TIMEOUT
         while time.monotonic() < deadline:
@@ -131,11 +131,11 @@ def _transfer(
 
 
 def _lookup(client: RequestClient, key: IPCCacheServerKey) -> int:
-    """Submit a real prefetch and wait for its final common prefix length."""
+    """Submit a real prefetch and wait for its final common prefix, in chunks."""
     client.lookup(key, 1).result(TIMEOUT)
     result = client.wait_prefetch_status(key.request_id, TIMEOUT).result(TIMEOUT + 1)
-    assert result is not None
-    return int(result)
+    assert result is not None and result % CHUNK == 0
+    return int(result) // CHUNK
 
 
 def _lookup_when_visible(
@@ -223,6 +223,7 @@ def test_native_alias_sparse_checkpoint_roundtrip(native_client: RequestClient) 
         EngineType.ATOM,
         {},
         groups,
+        None,
     ).result(TIMEOUT)
     try:
         assert _transfer(
@@ -327,6 +328,7 @@ def test_state_ordinals_alias_the_page_allocation(native_client: RequestClient) 
         EngineType.ATOM,
         {},
         groups,
+        None,
     ).result(TIMEOUT)
     try:
         assert _transfer(

@@ -2,20 +2,20 @@
 
 Phone-home usage statistics: what LMCache deployments look like and how much
 caching they do. This is **not** operator observability — Prometheus/OTel
-metrics for operators live in `lmcache/v1/mp_observability/` (MP mode) and
-`lmcache/inprocess/observability.py` (single-process mode). The two systems share event
+metrics for operators live in `lmcache/v1/mp_observability/` (MP mode) and in
+the external `LMCache_inprocess` package (single-process mode). The two systems share event
 sources in places but have different consumers (LMCache maintainers vs.
 deployment operators), different transports, and independent opt-outs.
 
 ## Package layout
 
-The single-process (InProcess) reporters and their messages live in
-`lmcache/inprocess/usage_telemetry/`; the modules below are the MP and
-shared ones.
+The single-process reporters live in
+[`LMCache_inprocess`](https://github.com/LMCache/LMCache_inprocess/tree/main/lmcache/inprocess/usage_telemetry);
+the modules below are the MP and shared ones.
 
 | Module | Contents |
 |---|---|
-| `messages.py` | **Wire schema — single source of truth.** Message dataclasses (MP-only and shared), `USAGE_SCHEMA_VERSION`, per-message `ENDPOINT`. The InProcess engine's messages live in `lmcache/inprocess/usage_telemetry/messages.py` |
+| `messages.py` | **Wire schema — single source of truth.** Message dataclasses (MP-only and shared), `USAGE_SCHEMA_VERSION`, per-message `ENDPOINT`. |
 | `base.py` | `UsageContextBase` — shared one-shot reporter plumbing used by both `UsageContext` (InProcess) and `MPUsageContext` |
 | `guard.py` | `swallow_telemetry_errors` decorator — the no-throw guarantee |
 | `identity.py` | Opt-out gate (`is_usage_tracking_enabled`), `UsageIdentity` (session/machine ids) |
@@ -28,7 +28,7 @@ shared ones.
 | `l2_usage.py` | `L2ConnectorUsageReporter` — per-L2-adapter-type traffic + occupancy for the MP server (not re-exported from the package root) |
 | `mp.py` | MP server `MPUsageContext`, `InitializeMPUsageContext` |
 
-The InProcess reporters live in `lmcache/inprocess/usage_telemetry/`:
+The InProcess reporters in the external package include:
 `context.py` (`UsageContext`, `InitializeUsageContext`), `continuous.py`
 (`ContinuousUsageContext`), and `messages.py` (`EngineMessage`,
 `MetadataMessage`, `CacheLifespanMessage`).

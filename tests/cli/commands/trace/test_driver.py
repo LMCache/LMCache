@@ -14,6 +14,7 @@ from __future__ import annotations
 
 # Standard
 from typing import Callable
+import struct
 import time
 
 # Third Party
@@ -41,6 +42,8 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
 from lmcache.v1.mp_observability.trace.decorator import set_tracing_enabled
+from lmcache.v1.mp_observability.trace.format import encode_header, encode_record
+from lmcache.v1.mp_observability.trace.reader import TraceReader
 from lmcache.v1.mp_observability.trace.recorder import StorageTraceRecorder
 
 # Test helpers
@@ -147,6 +150,55 @@ def _record_sequence(
 
 
 class TestRecordReplayRoundtrip:
+    @pytest.mark.parametrize("error_type", [None, KeyboardInterrupt, OSError])
+    def test_unfinished_replay_releases_read_locks(
+        self, trace_path: str, error_type: type[BaseException] | None
+    ) -> None:
+        """Release unfinished reads on EOF or interruption before closing the driver."""
+        keys = [_make_key(0)]
+        layout = _make_layout()
+
+        def script(sm: StorageManager) -> None:
+            """Record a complete read cycle."""
+            reserved = sm.reserve_write(keys, layout)
+            sm.finish_write(keys, l1_owners_of(reserved))
+            sm.submit_prefetch_task(single_row_spec(keys, layout))
+            with sm.read_prefetched_results(keys):
+                pass
+            sm.finish_read_prefetched(keys)
+
+        def interrupt(qualname: str, latency_s: float, failed: bool) -> None:
+            """Interrupt after entering the replayed read context."""
+            if (
+                not failed
+                and error_type is not None
+                and qualname.endswith("read_prefetched_results.__enter__")
+            ):
+                raise error_type("stop replay")
+
+        _record_sequence(trace_path, _make_sm_config(), script)
+
+        if error_type is None:
+            with TraceReader(trace_path) as reader:
+                frames = [encode_header(reader.header)]
+                for record in reader.records():
+                    frames.append(encode_record(record))
+                    if record.qualname.endswith("read_prefetched_results.__enter__"):
+                        break
+            with open(trace_path, "wb") as stream:
+                for frame in frames:
+                    stream.write(struct.pack(">I", len(frame)))
+                    stream.write(frame)
+
+        with StorageReplayDriver(_make_sm_config(), trace_path) as driver:
+            if error_type is None:
+                driver.run()
+            else:
+                # Retain the traceback so cleanup cannot rely on garbage collection.
+                with pytest.raises(error_type, match="stop replay") as _raised:
+                    driver.run(on_record=interrupt)
+            assert driver.storage_manager.delete_l1_keys(keys) == (1, 0)
+
     def test_reserve_and_finish_write_replay(self, trace_path):
         sm_config = _make_sm_config()
         layout = _make_layout()

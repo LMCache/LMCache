@@ -55,32 +55,38 @@ class BenchmarkConfig:
 
     Attributes:
         role: ``"server"`` or ``"client"``.
+        op: ``"read"`` pulls the server's objects into the client's buffer;
+            ``"write"`` pushes the client's objects into the server's buffer.
+            Client role only.
         transfer_channel_type: The transfer channel implementation to use
             (e.g. ``"nixl"``).
         nixl_backend: The nixl backend name (e.g. ``"UCX"``). Only used by the
             nixl transfer channel type.
         url: Server role binds its transfer-channel server here; client role
-            dials this as the peer (server) advertise url to read from.
+            dials this as the peer (server) advertise url to transfer with.
         listen_url: Client role binds its own (mandatory) transfer-channel
-            server here. It never receives reads in this benchmark.
+            server here. It never receives transfers in this benchmark.
         control_url: Benchmark catalog side-channel. The server binds a ZMQ REP
             socket here; the client connects to fetch the source object catalog.
         buffer_size: Size in bytes of the server's registered L1 region.
         page_size: Page / alignment size in bytes (the L1 ``align_bytes``).
         object_size: Size in bytes of each transferred object (multiple of
             ``page_size``).
-        num_objects: Number of objects transferred per read.
+        num_objects: Number of objects transferred per iteration.
         num_source_objects: Number of source objects the server allocates. The
-            client reads a random ``num_objects``-sized subset of these.
+            client transfers a random ``num_objects``-sized subset of these.
         use_lazy: Whether the L1 memory manager uses lazy allocation.
-        iters: Number of measured read iterations.
-        warmup: Number of warmup read iterations (not measured).
-        seed: RNG seed for selecting the read subset.
+        iters: Number of measured iterations.
+        warmup: Number of warmup iterations (not measured).
+        seed: RNG seed for selecting the transferred subset.
         verify: Whether to verify transferred bytes against a known pattern.
+            Reads are checked in the client's buffer; writes are checked in
+            the server's buffer through the control side-channel.
         server_timeout: Seconds the server stays up serving catalog requests.
     """
 
     role: str
+    op: str = "read"
     transfer_channel_type: str = "nixl"
     nixl_backend: str = "UCX"
     url: str = "127.0.0.1:7600"
@@ -107,6 +113,8 @@ class BenchmarkConfig:
         if self.num_source_objects <= 0:
             self.num_source_objects = 5 * self.num_objects
 
+        if self.op not in ("read", "write"):
+            raise ValueError(f"op must be 'read' or 'write', got {self.op!r}")
         if self.page_size <= 0:
             raise ValueError(f"page_size must be positive, got {self.page_size}")
         if self.object_size <= 0 or self.object_size % self.page_size != 0:
@@ -137,7 +145,15 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["server", "client"],
         required=True,
         help="server: register a source buffer and serve its object catalog; "
-        "client: read a subset of the server's objects and report throughput.",
+        "client: transfer a subset of the server's objects and report "
+        "throughput.",
+    )
+    parser.add_argument(
+        "--op",
+        choices=["read", "write"],
+        default="read",
+        help="client: read pulls the server's objects into the client; "
+        "write pushes the client's objects into the server.",
     )
     parser.add_argument(
         "--transfer-channel-type",
@@ -153,13 +169,13 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         "--url",
         default="127.0.0.1:7600",
         help="server: host:port to bind the transfer-channel server; "
-        "client: the server (peer) advertise url to read from.",
+        "client: the server (peer) advertise url to transfer with.",
     )
     parser.add_argument(
         "--listen-url",
         default="0.0.0.0:7601",
         help="client: host:port for the client's own (mandatory) "
-        "transfer-channel server; it never receives reads here.",
+        "transfer-channel server; it never receives transfers here.",
     )
     parser.add_argument(
         "--control-url",
@@ -189,7 +205,7 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         "--num-objects",
         type=int,
         default=100,
-        help="number of objects transferred per read.",
+        help="number of objects transferred per iteration.",
     )
     parser.add_argument(
         "--num-source-objects",
@@ -202,17 +218,16 @@ def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="use the lazy L1 allocator (experimental for registration).",
     )
+    parser.add_argument("--iters", type=int, default=5, help="measured iterations.")
+    parser.add_argument("--warmup", type=int, default=1, help="warmup iterations.")
     parser.add_argument(
-        "--iters", type=int, default=5, help="measured read iterations."
-    )
-    parser.add_argument("--warmup", type=int, default=1, help="warmup read iterations.")
-    parser.add_argument(
-        "--seed", type=int, default=0, help="RNG seed for read-subset selection."
+        "--seed", type=int, default=0, help="RNG seed for subset selection."
     )
     parser.add_argument(
         "--verify",
         action="store_true",
-        help="verify transferred bytes against a known per-object pattern.",
+        help="verify transferred bytes against a known per-object pattern "
+        "(reads: in the client's buffer; writes: in the server's buffer).",
     )
     parser.add_argument(
         "--server-timeout",
@@ -233,6 +248,7 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
     """
     return BenchmarkConfig(
         role=args.role,
+        op=args.op,
         transfer_channel_type=args.transfer_channel_type,
         nixl_backend=args.nixl_backend,
         url=args.url,

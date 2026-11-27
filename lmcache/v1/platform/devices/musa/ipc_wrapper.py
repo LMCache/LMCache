@@ -18,10 +18,10 @@ import os
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.contiguity import (
+from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
-from lmcache.v1.gpu_connector.utils import assert_contiguous
+from lmcache.v1.common.utils import assert_contiguous
 from lmcache.v1.platform.base.ipc_wire import MusaIPCData, WireIPCData
 from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 

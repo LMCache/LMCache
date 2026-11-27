@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for the P2P protocol and P2PController: enum registration, protocol
-definitions, MemoryLayoutDesc wire serialization, and server handlers.
+Tests for P2PController lookup jobs, locks, discovery and adapter lifecycle.
 """
 
 # Standard
-from typing import Literal
 from unittest.mock import MagicMock
 
 # Third Party
@@ -15,6 +13,7 @@ import torch
 
 # First Party
 from lmcache.lmcache_native import Bitmap
+from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     MemoryResidency,
@@ -23,8 +22,9 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchResult,
 )
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import P2PL2AdapterConfig
-from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess.config import CoordinatorConfig, P2PConfig
 from lmcache.v1.multiprocess.modules import p2p_controller
 from lmcache.v1.multiprocess.modules.p2p_controller import (
@@ -32,11 +32,6 @@ from lmcache.v1.multiprocess.modules.p2p_controller import (
     P2PController,
     _P2PState,
     _PeerInstance,
-)
-from lmcache.v1.multiprocess.rpc import get_rpc_spec
-from lmcache.v1.multiprocess.transport.zmq_impl.mq import (
-    msgspec_decode,
-    msgspec_encode,
 )
 
 _INVALID = TransferChannelAddress(offset=-1, size=0)
@@ -68,78 +63,6 @@ def _make_layout_desc() -> MemoryLayoutDesc:
 
 
 # ============================================================================
-# Protocol definition tests
-# ============================================================================
-
-
-def test_p2p_lookup_and_lock_protocol():
-    """P2P_LOOKUP_AND_LOCK payload is [list[ObjectKey],
-    dict[int, MemoryLayoutDesc]], returns int, and is BLOCKING."""
-    spec = get_rpc_spec("p2p_lookup_and_lock")
-    assert spec.payload_types == (list[ObjectKey], dict[int, MemoryLayoutDesc])
-    assert spec.response_type is int
-
-
-def test_p2p_query_lookup_results_protocol():
-    """P2P_QUERY_LOOKUP_RESULTS payload is [int], returns the optional address
-    list, and is BLOCKING."""
-    spec = get_rpc_spec("p2p_query_lookup_results")
-    assert spec.payload_types == (int,)
-    assert spec.response_type == list[TransferChannelAddress] | None
-
-
-def test_p2p_unlock_objects_protocol():
-    """P2P_UNLOCK_OBJECTS payload is [list[ObjectKey]], returns None, BLOCKING."""
-    spec = get_rpc_spec("p2p_unlock_objects")
-    assert spec.payload_types == (list[ObjectKey],)
-    assert spec.response_type is type(None)
-
-
-# ============================================================================
-# MemoryLayoutDesc serialization tests
-# ============================================================================
-
-
-def test_memory_layout_desc_mq_roundtrip():
-    """The mq encode/decode dispatch must round-trip MemoryLayoutDesc, whose
-    torch.Size / torch.dtype fields ride the customized enc_hook / dec_hook."""
-    desc = MemoryLayoutDesc(
-        shapes=[torch.Size([8, 16, 128]), torch.Size([4])],
-        dtypes=[torch.float32, torch.int8],
-    )
-    decoded = msgspec_decode(
-        msgspec_encode(desc, cls=MemoryLayoutDesc), cls=MemoryLayoutDesc
-    )
-    assert decoded == desc
-    assert all(isinstance(s, torch.Size) for s in decoded.shapes)
-    assert all(isinstance(d, torch.dtype) for d in decoded.dtypes)
-
-
-def test_group_layout_descs_mq_roundtrip():
-    """The mq encode/decode dispatch must round-trip the per-group layout
-    dict carried by P2P_LOOKUP_AND_LOCK, including its torch.Size /
-    torch.dtype fields."""
-    descs = {0: _make_layout_desc(), 1: _make_layout_desc()}
-    decoded = msgspec_decode(
-        msgspec_encode(descs, cls=dict[int, MemoryLayoutDesc]),
-        cls=dict[int, MemoryLayoutDesc],
-    )
-    assert decoded == descs
-    for desc in decoded.values():
-        assert all(isinstance(s, torch.Size) for s in desc.shapes)
-        assert all(isinstance(d, torch.dtype) for d in desc.dtypes)
-
-
-def test_memory_layout_desc_empty_mq_roundtrip():
-    """An empty layout descriptor must round-trip through the mq dispatch."""
-    desc = MemoryLayoutDesc(shapes=[], dtypes=[])
-    decoded = msgspec_decode(
-        msgspec_encode(desc, cls=MemoryLayoutDesc), cls=MemoryLayoutDesc
-    )
-    assert decoded == desc
-
-
-# ============================================================================
 # TransferChannelAddress tests
 # ============================================================================
 
@@ -155,9 +78,7 @@ def test_transfer_channel_address_validity():
 # ============================================================================
 
 
-def _make_controller(
-    request_transport: Literal["zmq", "grpc"] = "zmq",
-) -> tuple[P2PController, MagicMock]:
+def _make_controller() -> tuple[P2PController, MagicMock]:
     """Build a P2P-disabled controller (no thread / transfer channel)."""
     ctx = MagicMock()
     controller = P2PController(
@@ -165,7 +86,6 @@ def _make_controller(
         P2PConfig(),
         CoordinatorConfig(),
         instance_id="self",
-        request_transport=request_transport,
     )
     return controller, ctx
 
@@ -472,6 +392,87 @@ def test_unlock_objects_empty_is_noop():
     ctx.storage_manager.finish_read_prefetched.assert_not_called()
 
 
+def _make_write_controller() -> tuple[P2PController, MagicMock, MagicMock]:
+    """Build a controller whose storage manager exposes a mock L1 to write."""
+    controller, ctx = _make_controller()
+    l1_manager = MagicMock()
+    ctx.storage_manager.get_l1_manager_by_tags.return_value = l1_manager
+    return controller, ctx, l1_manager
+
+
+def test_reserve_write_returns_one_address_per_key_in_request_order(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Reserved keys get their buffer's address; keys the L1 could not reserve
+    get an invalid one, and only the out-of-memory ones are reported."""
+    controller, ctx, l1_manager = _make_write_controller()
+    event_bus = MagicMock()
+    monkeypatch.setattr(p2p_controller, "get_event_bus", lambda: event_bus)
+    keys = [_make_key(0), _make_key(1), _make_key(2)]
+    layout = _make_layout_desc()
+    l1_manager.reserve_write.return_value = {
+        keys[0]: (L1Error.OUT_OF_MEMORY, None),
+        keys[1]: (
+            L1Error.SUCCESS,
+            MagicMock(shm_offset=8192, shm_byte_length=4096),
+        ),
+        keys[2]: (L1Error.KEY_NOT_WRITABLE, None),
+    }
+
+    addresses = controller.p2p_reserve_write(keys, layout)
+
+    assert addresses == [
+        _INVALID,
+        TransferChannelAddress(offset=8192, size=4096),
+        _INVALID,
+    ]
+    # Peers write into the L1 registered with the transfer channel, and the
+    # objects are ordinary (non-temporary) cache entries.
+    ctx.storage_manager.get_l1_manager_by_tags.assert_called_once_with(
+        MemoryTags(MemorySegment.DRAM, MemoryResidency.LOCAL)
+    )
+    reserve_call = l1_manager.reserve_write.call_args
+    assert reserve_call.args[0] == keys
+    assert reserve_call.kwargs["is_temporary"] == [False, False, False]
+    assert reserve_call.kwargs["layout_desc"] == layout
+
+    (event,) = [call.args[0] for call in event_bus.publish.call_args_list]
+    assert event.event_type == EventType.L1_ALLOCATION_FAILED
+    assert event.metadata == {"during": "p2p_store", "keys": [keys[0]]}
+
+
+def test_finish_write_commits_written_keys_and_discards_the_rest():
+    """Each key gets one flag: True only when it was written and committed."""
+    controller, _ctx, l1_manager = _make_write_controller()
+    keys = [_make_key(0), _make_key(1), _make_key(2)]
+    l1_manager.reserve_write.return_value = {
+        key: (L1Error.SUCCESS, MagicMock(shm_offset=0, shm_byte_length=4096))
+        for key in keys
+    }
+    controller.p2p_reserve_write(keys, _make_layout_desc())
+    writer_tag = l1_manager.reserve_write.call_args.kwargs["tag"]
+    # keys[2] was written, but its reservation expired before the commit.
+    l1_manager.finish_write.return_value = {
+        keys[0]: L1Error.SUCCESS,
+        keys[2]: L1Error.KEY_NOT_EXIST,
+    }
+
+    committed = controller.p2p_finish_write(keys, [True, False, True])
+
+    assert committed == [True, False, False]
+    # Commit and discard address the reservations made by the same writer.
+    l1_manager.finish_write.assert_called_once_with([keys[0], keys[2]], tag=writer_tag)
+    l1_manager.finish_write_and_delete.assert_called_once_with(
+        [keys[1]], tag=writer_tag
+    )
+
+
+def test_finish_write_rejects_mismatched_lengths():
+    controller, _ctx, _l1_manager = _make_write_controller()
+    with pytest.raises(ValueError):
+        controller.p2p_finish_write([_make_key(0), _make_key(1)], [True])
+
+
 def test_report_status_counts_active_jobs():
     """report_status reflects the number of in-flight lookup jobs."""
     controller, ctx = _make_controller()
@@ -505,15 +506,9 @@ def _peer(
     )
 
 
-@pytest.mark.parametrize(
-    ("request_transport", "expected_scheme"),
-    [("zmq", "tcp"), ("grpc", "grpc")],
-)
-def test_reconcile_adds_new_peer(
-    request_transport: Literal["zmq", "grpc"], expected_scheme: str
-) -> None:
+def test_reconcile_adds_new_peer() -> None:
     """A newly discovered peer gets one P2P L2 adapter with the right urls."""
-    controller, ctx = _make_controller(request_transport)
+    controller, ctx = _make_controller()
     ctx.storage_manager.add_l2_adapter.return_value = 7
 
     controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
@@ -521,9 +516,51 @@ def test_reconcile_adds_new_peer(
     ctx.storage_manager.add_l2_adapter.assert_called_once()
     config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
     assert isinstance(config, P2PL2AdapterConfig)
-    assert config.peer_mq_server_url == f"{expected_scheme}://10.0.0.2:5555"
+    assert config.peer_mq_server_url == "grpc://10.0.0.2:5555"
     assert config.peer_transfer_channel_server_url == "tc-host:9"
     assert controller.report_status()["p2p_peers"] == ["peerA"]
+
+
+def test_new_peer_adapter_follows_the_p2p_write_settings():
+    """The adapter created for a peer carries this server's write settings."""
+    ctx = MagicMock()
+    controller = P2PController(
+        ctx,
+        P2PConfig(enable_write=True, store_timeout=12.0, write_l1_usage_threshold=0.5),
+        CoordinatorConfig(),
+        instance_id="self",
+    )
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert config.write_enabled is True
+    assert config.store_timeout_s == 12.0
+    assert config.write_l1_usage_threshold == 0.5
+
+
+def test_peer_adapter_does_not_write_by_default():
+    controller, ctx = _make_controller()
+
+    controller._apply_state(_P2PState.REGISTERED, {"peerA": _peer("peerA")})
+
+    config = ctx.storage_manager.add_l2_adapter.call_args.args[0]
+    assert config.write_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("store_timeout", "threshold"),
+    [
+        pytest.param(0.0, 0.7, id="non-positive-timeout"),
+        pytest.param(30.0, 0.0, id="zero-threshold"),
+        pytest.param(30.0, 1.5, id="threshold-above-one"),
+    ],
+)
+def test_p2p_config_rejects_invalid_write_settings(
+    store_timeout: float, threshold: float
+):
+    with pytest.raises(ValueError):
+        P2PConfig(store_timeout=store_timeout, write_l1_usage_threshold=threshold)
 
 
 def test_reconcile_no_op_when_peer_unchanged():

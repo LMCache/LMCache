@@ -1,5 +1,16 @@
-Kubernetes Operator
-===================
+Kubernetes Operator (Deprecated)
+================================
+
+.. warning::
+
+   The LMCache Kubernetes operator (``operator/``) is **deprecated and no
+   longer maintained**. It is expected to be removed from this repository in
+   **2027Q1**. Existing release artifacts (e.g. ``operator-v*``
+   ``install.yaml``) will not receive fixes or updates.
+
+   Do not build new deployments on it. If you keep using an existing release,
+   pin to that version at your own risk. For new Kubernetes deployments,
+   follow the manual DaemonSet setup in the :doc:`deployment` guide.
 
 The LMCache Kubernetes operator automates the deployment and lifecycle
 management of LMCache multiprocess servers.  Instead of hand-writing
@@ -148,6 +159,14 @@ explicit ``true``/``false`` always wins.
    exchange incompatible handles, so a half-switched pair fails loudly at
    event import).  Set ``spec.isolatedIPC: false`` on existing CRs **before**
    upgrading to keep the old wiring.
+
+.. warning::
+   **Upgrade note.** The operator now starts engines with ``--transport grpc``
+   and writes a ``grpc://`` host into the connection ConfigMap.  vLLM pods
+   pick up that host when they start, so pods created before the upgrade keep
+   the old ``tcp://`` host and can no longer reach the restarted engine.
+   Restart the vLLM pods after upgrading the operator.  See
+   :ref:`mp-migrating-from-zmq`.
 
 Connecting vLLM
 ---------------
@@ -516,13 +535,13 @@ Server
      - Description
    * - ``server.port``
      - ``5555``
-     - ZMQ listening port (1024--65535).
+     - Request listening port (1024--65535).
    * - ``server.chunkSize``
      - ``256``
      - Token chunk size.
    * - ``server.maxWorkers``
      - ``1``
-     - Worker threads for ZMQ requests.
+     - Worker threads for requests.
    * - ``server.hashAlgorithm``
      - ``blake3``
      - ``builtin``, ``sha256_cbor``, or ``blake3``.
@@ -557,7 +576,7 @@ Eviction
    * - ``eviction.policy``
      - ``LRU``
      - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
-       for buffer-only mode.
+       and ``l2Backend.prefetchPolicy: skip_l1`` for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
@@ -885,7 +904,7 @@ The connection ConfigMap contains:
       "kv_connector": "LMCacheMPConnector",
       "kv_role": "kv_both",
       "kv_connector_extra_config": {
-        "lmcache.mp.host": "tcp://my-cache.default.svc.cluster.local",
+        "lmcache.mp.host": "grpc://my-cache.default.svc.cluster.local",
         "lmcache.mp.port": "5555"
       }
     }
@@ -1144,7 +1163,7 @@ CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
 small subset of tokens.  The operator manages it as a second CRD,
 ``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
 pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
-do **not** rebuild the vLLM image.  See :doc:`/legacy/kv_cache_optimizations/blending`
+do **not** rebuild the vLLM image. See :doc:`/kv_cache_optimizations/cacheblend`
 for the technique itself.
 
 It has two halves the operator runs together:

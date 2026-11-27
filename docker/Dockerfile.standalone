@@ -1,9 +1,9 @@
 # The LMCache Standalone Dockerfile is used to build a LMCache image
 # without vLLM integration.
 
-ARG CUDA_VERSION=13.0
+ARG CUDA_VERSION=13.2
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.09
+ARG NGC_VERSION=26.05
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 # Override to a stable version for releases.
 ARG VLLM_VERSION=nightly
@@ -114,7 +114,7 @@ ARG nvcc_threads=auto
 ENV NVCC_THREADS=$nvcc_threads
 
 # --index-url (singular) keeps PyPI out of torch resolution so uv can't
-# pick PyPI's default cu13 wheel on a cu12.9 host.
+# pick a PyPI torch wheel built for a different CUDA version.
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \

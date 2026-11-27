@@ -12,18 +12,18 @@ import threading
 import time
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.token_codec import TOKEN_STRIDE, num_packed_tokens
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.periodic_thread import (
+from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
     PeriodicThreadRegistry,
     ThreadLevel,
     ThreadRunSummary,
     create_periodic_thread,
 )
+from lmcache.v1.common.token_codec import TOKEN_STRIDE, num_packed_tokens
+from lmcache.v1.common.token_hasher import TokenHasher
+from lmcache.v1.distributed.api import ObjectKey
 
 logger = init_logger(__name__)
 
@@ -33,7 +33,7 @@ class Session:
     """Tracks accumulated token IDs and computed chunk hashes for a request.
 
     Tokens are held in the packed form of
-    :mod:`lmcache.v1.multiprocess.token_codec`, the layout that arrives on
+    :mod:`lmcache.v1.common.token_codec`, the layout that arrives on
     the wire and that blake3 hashes; only callers needing ints unpack.
 
     Thread-safe: all public methods are protected by an internal lock
@@ -46,6 +46,9 @@ class Session:
     chunk_hashes: list = field(default_factory=list)
     last_prefix_hash: Any = None
     num_chunks_processed: int = 0
+    #: Tokens covered by client-computed chunk hashes (see ``update_from_key``);
+    #: hashes for them are available without the tokens.
+    client_hashed_tokens: int = 0
     created_at: float = field(default_factory=time.time)
     lookup_ipc_key: Optional[IPCCacheServerKey] = None
     prefetch_hit_chunks: int = -1
@@ -63,6 +66,34 @@ class Session:
         """
         with self._lock:
             self.tokens = packed_token_ids
+
+    def update_from_key(self, key: IPCCacheServerKey) -> None:
+        """Take the request's prompt from ``key``: its tokens or its hashes.
+
+        For a key carrying client-computed chunk hashes of ``[0, key.end)``,
+        the hashes of chunks not hashed yet are appended, as hashing the
+        tokens would have; chunks already hashed keep their hashes, matching
+        the token path, where :meth:`set_tokens` never rehashes them.
+
+        Args:
+            key: Key carrying ``token_bytes`` or ``chunk_hashes``.
+
+        Raises:
+            ValueError: If the key's hashes cannot be used (see
+                :meth:`TokenHasher.client_chunk_hashes`).
+        """
+        if not key.chunk_hashes:
+            self.set_tokens(key.token_bytes)
+            return
+        hashes = self.hasher.client_chunk_hashes(key)
+        with self._lock:
+            if len(hashes) > self.num_chunks_processed:
+                self.chunk_hashes.extend(hashes[self.num_chunks_processed :])
+                self.num_chunks_processed = len(hashes)
+                self.last_prefix_hash = hashes[-1]
+            self.client_hashed_tokens = max(
+                self.client_hashed_tokens, len(hashes) * self.hasher.chunk_size
+            )
 
     @overload
     def get_hashes(self, start: int, end: int) -> list: ...
@@ -101,7 +132,7 @@ class Session:
         start_chunk = start // chunk_size
 
         with self._lock:
-            held = num_packed_tokens(self.tokens)
+            held = max(num_packed_tokens(self.tokens), self.client_hashed_tokens)
             if end is not None and end > held:
                 raise ValueError(
                     f"get_hashes end ({end}) exceeds the session's "
@@ -119,6 +150,55 @@ class Session:
             end_chunk = end // chunk_size
             self._compute_hash(end_chunk)
             return self.chunk_hashes[start_chunk:end_chunk]
+
+    def get_unfull_chunk_hash(self, boundary: int) -> Any:
+        """Return the hash of the unfull chunk with boundary ``boundary``.
+
+        A boundary is a token count: the unfull chunk covers the tokens from
+        the last chunk boundary at or below it up to it,
+        ``[floor(boundary / chunk_size) * chunk_size, boundary)``. It is
+        hashed like a full chunk, chaining from the rolling hash of the full
+        chunks before it. It has fewer than chunk_size tokens, so its hash
+        differs from every full chunk's.
+
+        Args:
+            boundary: Token count the unfull chunk reaches; must not be a
+                multiple of chunk_size.
+
+        Returns:
+            The unfull chunk's hash value.
+
+        Raises:
+            ValueError: If ``boundary`` is chunk-aligned or exceeds the current
+                tokens.
+        """
+        chunk_size = self.hasher.chunk_size
+        if boundary % chunk_size == 0:
+            raise ValueError(
+                f"unfull chunk boundary ({boundary}) must not be a multiple of "
+                f"chunk_size ({chunk_size})"
+            )
+        with self._lock:
+            num_tokens = num_packed_tokens(self.tokens)
+            if boundary > num_tokens:
+                raise ValueError(
+                    f"unfull chunk boundary ({boundary}) exceeds the session's "
+                    f"{num_tokens} token(s)"
+                )
+            num_full_chunks = boundary // chunk_size
+            self._compute_hash(num_full_chunks)
+            prefix = (
+                self.chunk_hashes[num_full_chunks - 1]
+                if num_full_chunks > 0
+                else self.hasher.none_hash
+            )
+            return self.hasher.hash_packed_chunk(
+                memoryview(self.tokens)[
+                    num_full_chunks * chunk_size * TOKEN_STRIDE : boundary
+                    * TOKEN_STRIDE
+                ],
+                prefix,
+            )
 
     def _compute_hash(self, end_chunk: int) -> None:
         """Compute rolling hashes up to end_chunk.
@@ -184,7 +264,7 @@ class SessionManager:
         ttl: float = DEFAULT_SESSION_TTL,
         cleanup_interval: float | None = DEFAULT_CLEANUP_INTERVAL,
     ) -> None:
-        self._hasher = hasher
+        self._default_hasher = hasher
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
@@ -198,11 +278,15 @@ class SessionManager:
             self._cleanup_thread = self._create_cleanup_thread(cleanup_interval)
             self._cleanup_thread.start()
 
-    def get_or_create(self, request_id: str) -> Session:
+    def get_or_create(
+        self, request_id: str, hasher: TokenHasher | None = None
+    ) -> Session:
         """Get existing session or create a new one.
 
         Args:
             request_id: Unique request identifier.
+            hasher: Token hasher for a newly created session. Defaults to the
+                manager's default hasher.
 
         Returns:
             The Session for this request_id.
@@ -210,7 +294,7 @@ class SessionManager:
         with self._lock:
             if request_id not in self._sessions:
                 self._sessions[request_id] = Session(
-                    request_id=request_id, hasher=self._hasher
+                    request_id=request_id, hasher=hasher or self._default_hasher
                 )
                 logger.debug("Created session for request_id=%s", request_id)
             return self._sessions[request_id]

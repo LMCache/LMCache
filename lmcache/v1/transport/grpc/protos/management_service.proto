@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// ManagementService wire contract for LMCache mp-mode gRPC.
+//
+// Backs modules/management.py (ManagementModule): engine administration and
+// utility RPCs -- cache clearing, worker liveness pings, chunk-size and
+// experimental-feature queries, plus debug and observability reporting.
+// Keep one service per server module; see docs/design/v1/multiprocess.
+
+syntax = "proto3";
+
+package lmcache.mp;
+
+message ClearRequest {
+  optional bool force = 1;
+}
+
+message ClearResponse {}
+
+message GetChunkSizeRequest {}
+
+message GetChunkSizeResponse {
+  int64 chunk_size = 1;
+}
+
+message GetExperimentalRequest {}
+
+message GetExperimentalResponse {
+  repeated string names = 1;
+}
+
+message NoopRequest {}
+
+message NoopResponse {
+  string message = 1;
+}
+
+message PingRequest {
+  optional int64 instance_id = 1;
+}
+
+message PingResponse {
+  bool ok = 1;
+}
+
+message BlockAllocationRecord {
+  string req_id = 1;
+  repeated int64 new_block_ids = 2;
+  repeated int64 new_token_ids = 3;
+}
+
+message ReportBlockAllocationRequest {
+  int64 instance_id = 1;
+  string model_name = 2;
+  repeated BlockAllocationRecord records = 3;
+}
+
+message ReportBlockAllocationResponse {}
+
+service ManagementService {
+  rpc Clear(ClearRequest) returns (ClearResponse);
+  rpc GetChunkSize(GetChunkSizeRequest) returns (GetChunkSizeResponse);
+  rpc GetExperimental(GetExperimentalRequest) returns (GetExperimentalResponse);
+  rpc Noop(NoopRequest) returns (NoopResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc ReportBlockAllocation(ReportBlockAllocationRequest)
+      returns (ReportBlockAllocationResponse);
+}
