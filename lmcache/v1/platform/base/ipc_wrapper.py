@@ -216,9 +216,8 @@ class DeviceIPCWrapper:
     def __eq__(self, other: object) -> bool:
         # ``isinstance`` first so type-checkers can narrow ``other`` to
         # ``DeviceIPCWrapper`` before we touch its attributes; the
-        # exact-type check that follows then enforces that, e.g., a
-        # ``CudaIPCWrapper`` is never considered equal to a
-        # ``RawCudaIPCWrapper`` even though they share a base class.
+        # exact-type check that follows then keeps two different wrapper
+        # subclasses from comparing equal even though they share a base.
         if not isinstance(other, DeviceIPCWrapper):
             return False
         if type(self) is not type(other):

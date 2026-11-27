@@ -35,8 +35,8 @@ class DeviceOps:
     safe generic implementation fail in the base class. Accelerator subclasses
     either:
 
-    - Override individual methods (e.g. MUSA overrides
-      :meth:`multi_layer_block_kv_transfer`).
+    - Override individual methods, such as
+      :meth:`multi_layer_block_kv_transfer`.
     - Call :meth:`bind_native` in :meth:`ensure_native` to bulk-rebind
       all ops the compiled extension exports.
 

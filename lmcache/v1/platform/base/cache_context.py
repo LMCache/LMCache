@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Abstract base class for platform cache contexts.
 
-Defines the common interface shared by :class:`GPUCacheContext` and
-:class:`CPUCacheContext`.  Concrete subclasses provide
-device-specific implementations of stream / buffer / copy primitives
-while the base class owns layout-agnostic helpers (shape calculation,
-status reporting, block-ID staging).
+Defines the common interface every device cache context implements.
+Concrete subclasses provide device-specific implementations of stream /
+buffer / copy primitives while the base class owns layout-agnostic helpers
+(shape calculation, status reporting, block-ID staging).
 """
 
 # Future
@@ -41,7 +40,7 @@ if TYPE_CHECKING:
 
 
 class BaseCacheContext(ABC):
-    """Abstract base for GPU and CPU cache contexts.
+    """Abstract base for device cache contexts.
 
     Subclasses call :meth:`__init__` after computing the common
     layout parameters and before setting up device-specific state.
@@ -51,10 +50,10 @@ class BaseCacheContext(ABC):
     do not need it.
 
     Concrete subclasses MUST set :attr:`device_type` to the
-    ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
-    ...). The platform-agnostic :func:`create_cache_context` factory
-    uses this attribute (via the platform registry) to pick the right
-    subclass without any ``isinstance`` / ``if-elif`` chain.
+    ``torch.device.type`` string they handle. The platform-agnostic
+    :func:`create_cache_context` factory uses this attribute (via the
+    platform registry) to pick the right subclass without any
+    ``isinstance`` / ``if-elif`` chain.
     """
 
     #: ``torch.device.type`` string the subclass handles. Concrete

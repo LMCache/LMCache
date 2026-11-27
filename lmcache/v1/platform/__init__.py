@@ -8,11 +8,9 @@ signal background loops from other threads.  On Linux it is backed by
 ``os.pipe``.  Callers never touch ``os.eventfd`` directly.
 
 Built-in accelerator- and OS-specific implementations live under the
-dedicated :mod:`lmcache.v1.platform.devices` namespace so each can evolve
-independently without making generic platform modules part of discovery:
-
-* :mod:`lmcache.v1.platform.devices.cuda` -- CUDA-backed implementations.
-* :mod:`lmcache.v1.platform.devices.cpu`  -- CPU-only fallbacks.
+dedicated :mod:`lmcache.v1.platform.devices` namespace, one sub-package per
+backend, so each can evolve independently without making generic platform
+modules part of discovery.
 
 Third-party accelerators can ship a :class:`DeviceSpec` subclass in a
 separate wheel and register it through the ``lmcache.device_plugins`` Python

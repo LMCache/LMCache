@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Base class for platform device specification.
 
-Each built-in accelerator sub-package under ``platform/devices`` (for example,
-``cuda`` or ``musa``) provides a concrete :class:`DeviceSpec` subclass that
-describes how to detect the device and which ops backend to load. External
+Each built-in accelerator sub-package under ``platform/devices`` provides a
+concrete :class:`DeviceSpec` subclass that describes how to detect the device
+and which ops backend to load. External
 packages can expose the same class through the ``lmcache.device_plugins``
 Python entry-point group.
 
@@ -22,8 +22,7 @@ package metadata.
 implementation used when no accelerator sub-package matches the
 detected device: all capabilities default to a safe "no-op / False"
 behaviour, and ``device_type`` / ``torch_module_name`` default to an
-empty string (concrete backends -- including CPU via
-:class:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec` -- override them).
+empty string that concrete backends override.
 """
 
 # Future
@@ -54,7 +53,7 @@ class DeviceSpec:
 
     Instantiating :class:`DeviceSpec` directly yields the fallback
     implementation with "no-op / all False" semantics -- this is the
-    behaviour used for CPU-only or unknown device types.
+    behaviour used when no registered backend matches the device.
     """
 
     # Cached pin-memory backend instance (lazy-initialized).
@@ -64,12 +63,11 @@ class DeviceSpec:
 
     @property
     def device_type(self) -> str:
-        """Device type string (e.g. ``"cuda"``, ``"musa"``, ``"mlu"``).
+        """The ``torch.device.type`` string this spec handles.
 
         Concrete backends override this; the base returns an empty
         string so a bare ``DeviceSpec()`` instance is never mistaken
-        for a real accelerator (CPU is represented by
-        :class:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec`).
+        for a real device.
         """
         return ""
 
@@ -79,8 +77,9 @@ class DeviceSpec:
 
         ``device_type`` is tied to torch device naming, so multiple specs may
         legitimately share it (for example, two different implementations of
-        ``"cuda"``). ``backend_name`` is the LMCache-specific disambiguator for
-        those cases and must therefore be unique across all registered specs.
+        one torch device type). ``backend_name`` is the LMCache-specific
+        disambiguator for those cases and must therefore be unique across all
+        registered specs.
 
         The base implementation reuses :attr:`device_type`, which keeps today's
         built-in backends unchanged. Specialised backends that share a
@@ -93,9 +92,8 @@ class DeviceSpec:
     def torch_module_name(self) -> str:
         """Attribute name on the ``torch`` package for the device module.
 
-        For example, ``"cuda"`` corresponds to ``torch.cuda``.  The
-        base returns an empty string; concrete backends (including
-        :class:`~lmcache.v1.platform.devices.cpu.CpuDeviceSpec`) override it.
+        A name ``"<name>"`` corresponds to ``torch.<name>``. The base
+        returns an empty string; concrete backends override it.
         """
         return ""
 
@@ -148,8 +146,7 @@ class DeviceSpec:
         The base default is ``False``: the fallback spec and devices
         without a handle-transfer stack (KV wrapper factory, event IPC)
         stay on the engine-driven data path. Devices with a complete
-        stack override this to ``True`` (CUDA, NPU) or with a runtime
-        probe (MUSA).
+        stack override this to return ``True``, or to probe at runtime.
         """
         return False
 
@@ -161,8 +158,8 @@ class DeviceSpec:
         implementation derives it from :meth:`is_lmcache_driven_available`:
         devices with a lmcache-driven stack default to ``LMCACHE_DRIVEN``,
         everything else falls back to ``ENGINE_DRIVEN``. Devices whose
-        lmcache-driven stack is available but opt-in only (CPU SHM, MUSA
-        handles) override this to ``ENGINE_DRIVEN``.
+        lmcache-driven stack is available but opt-in only override this to
+        ``ENGINE_DRIVEN``.
 
         Implementations must return a concrete mode: returning ``AUTO``
         would silently route to the engine-driven path.
@@ -280,8 +277,8 @@ class DeviceSpec:
         Args:
             ptr: Raw pointer (data_ptr) to the memory region.
             size: Size in bytes of the region to pin.
-            flags: Platform-specific registration flags (e.g.
-                ``cudaHostRegisterDefault = 0``).
+            flags: Platform-specific registration flags passed to the
+                backend's host-register call; ``0`` requests the default.
 
         Returns:
             True if pinning succeeded, False otherwise.
@@ -311,8 +308,8 @@ class DeviceSpec:
     def create_cache_context(self, *args: Any, **kwargs: Any) -> "BaseCacheContext":
         """Instantiate the ``BaseCacheContext`` implementation for this device.
 
-        Subclasses that ship a ``cache_context`` module (e.g. ``cuda``,
-        ``cpu``) must override this hook: perform a lazy import of the
+        Subclasses that ship a ``cache_context`` module must override
+        this hook: perform a lazy import of the
         concrete subclass and forward ``*args`` / ``**kwargs`` verbatim
         so the call site in
         :func:`lmcache.v1.platform.cache_context.create_cache_context`
@@ -320,7 +317,7 @@ class DeviceSpec:
 
         The default implementation raises :class:`NotImplementedError`
         so a missing override surfaces loudly instead of silently
-        falling back to the CPU path.
+        falling back to another backend's path.
         """
         raise NotImplementedError(
             "DeviceSpec for device_type=%r does not provide a "
