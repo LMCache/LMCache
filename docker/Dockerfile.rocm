@@ -89,7 +89,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__, "HIP=", torch.version.hip)' && \
     BUILD_WITH_HIP=1 CXX=hipcc python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
-    uv pip install ./dist_lmcache/*.whl --verbose
+    uv pip install ./dist_lmcache/*.whl --verbose && \
+    uv pip install -r requirements/valkey.txt && \
+    python3 -c 'from glide_sync import GlideClient'
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -120,6 +122,8 @@ RUN . /opt/venv/bin/activate && \
     cd /tmp/lmcache && \
     uv pip install -r requirements/build.txt && \
     BUILD_WITH_HIP=1 CXX=hipcc uv pip install --no-build-isolation . --verbose && \
+    uv pip install -r requirements/valkey.txt && \
+    python3 -c 'from glide_sync import GlideClient' && \
     rm -rf /tmp/lmcache
 
 WORKDIR /workspace
