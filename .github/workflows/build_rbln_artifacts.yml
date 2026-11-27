@@ -1,14 +1,15 @@
 name: Build RBLN Artifacts
 
-# Reusable workflow for the Rebellions RBLN NPU wheel.
+# Reusable workflow for the Rebellions RBLN NPU wheels.
 #
-# RBLN has no in-repo native kernels, so the wheel carries the common C++
-# extensions compiled against the torch that torch-rbln pins. It is built in
-# the manylinux_2_34 image (torch-rbln's own glibc floor), smoke-installed
-# next to torch-rbln on the runner, and published to a dedicated v{tag}-rbln
-# GitHub Release (or nightly-rbln), never to PyPI: PyPI's lmcache wheel is
-# built against the CUDA torch and has no slot for a second build of the same
-# version.
+# RBLN has no in-repo native kernels, so each wheel carries the common C++
+# extensions compiled against the torch that torch-rbln pins. One wheel is
+# built per CPython version LMCache supports, in the manylinux_2_34 image
+# (torch-rbln's own glibc floor), and smoke-installed next to torch-rbln on
+# the runner. The wheels are merged into one artifact and published to a
+# dedicated v{tag}-rbln GitHub Release (or nightly-rbln), never to PyPI:
+# PyPI's lmcache wheel is built against the CUDA torch and has no slot for a
+# second build of the same version.
 
 on:
     workflow_call:
@@ -47,7 +48,6 @@ env:
     # The ABI target: torch-rbln pins the torch the wheel is compiled against
     # (0.12.0 pins torch==2.13.0+cpu). Bump with each RBLN SDK release.
     TORCH_RBLN_VERSION: "0.12.0"
-    RBLN_PYTHON_VERSION: "3.12"
     RBLN_BUILD_IMAGE: quay.io/pypa/manylinux_2_34_x86_64:2026.10.26-1@sha256:834a2a31de5eabacd4411417b3bbc9fcb6ff9f959972711ab3b73355e7b0928d
     RBLN_MANYLINUX_PLATFORM: manylinux_2_34_x86_64
     # torch-rbln's device-backend autoload needs the RBLN runtime
@@ -64,8 +64,19 @@ permissions:
 jobs:
     build-rbln-artifacts:
         if: github.event.pull_request.draft != true
-        name: Build RBLN wheel
+        name: Build RBLN wheel (Python ${{ matrix.python }})
         runs-on: ubuntu-24.04
+        strategy:
+            fail-fast: false
+            matrix:
+                # LMCache's requires-python range minus 3.10, which LMCache
+                # is dropping (#6494); torch-rbln publishes a wheel for each
+                # of these CPython versions.
+                python: ["3.11", "3.12", "3.13", "3.14"]
+        env:
+            RBLN_PYTHON_VERSION: ${{ matrix.python }}
+        # Every leg resolves the same version and installs the same
+        # torch-rbln-pinned torch, so the outputs agree whichever leg sets them.
         outputs:
             rbln_version: ${{ steps.prepare.outputs.version }}
             torch_rbln_version: ${{ env.TORCH_RBLN_VERSION }}
@@ -131,11 +142,31 @@ jobs:
                   "
                   echo "torch_version=${torch_version}" >> "$GITHUB_OUTPUT"
 
-            - name: Upload RBLN release artifacts to GHA
+            - name: Upload RBLN wheel to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
-                  name: release-rbln-artifacts
+                  name: release-rbln-artifacts-py${{ matrix.python }}
                   path: dist/*.whl
+
+    # The release and nightly publishers download a single
+    # release-rbln-artifacts artifact holding every per-Python wheel.
+    merge-rbln-artifacts:
+        name: Merge RBLN wheels
+        needs: build-rbln-artifacts
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Harden Runner
+              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              with:
+                  disable-sudo-and-containers: false
+                  egress-policy: audit
+
+            - name: Merge per-Python RBLN wheels
+              uses: actions/upload-artifact/merge@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+              with:
+                  name: release-rbln-artifacts
+                  pattern: release-rbln-artifacts-py*
+                  delete-merged: true
 
 # On-device validation needs RBLN NPUs, which GitHub-hosted runners lack; the
 # rbln Buildkite pipeline (.buildkite/k3_tests/rbln) runs the device tests.

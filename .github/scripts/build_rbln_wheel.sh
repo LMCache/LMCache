@@ -79,7 +79,8 @@ if [[ "${#repaired_wheels[@]}" -ne 1 ]]; then
     exit 1
 fi
 
-"${RBLN_PYTHON}" - "${repaired_wheels[0]}" "${SETUPTOOLS_SCM_PRETEND_VERSION}" "${RBLN_MANYLINUX_PLATFORM}" <<'PY'
+"${RBLN_PYTHON}" - "${repaired_wheels[0]}" "${SETUPTOOLS_SCM_PRETEND_VERSION}" \
+    "${python_tag}-${python_tag}-${RBLN_MANYLINUX_PLATFORM}" <<'PY'
 import re
 import sys
 import zipfile
@@ -89,7 +90,7 @@ from packaging.version import Version
 
 from setup_extensions.common_cpp import COMMON_EXTENSIONS
 
-wheel, expected_version, expected_platform = sys.argv[1:]
+wheel, expected_version, expected_tag = sys.argv[1:]
 with zipfile.ZipFile(wheel) as archive:
     names = archive.namelist()
     dist_info = next(n.split("/")[0] for n in names if n.endswith(".dist-info/METADATA"))
@@ -101,8 +102,8 @@ if Version(version) != Version(expected_version):
     raise SystemExit(f"wheel version mismatch: expected {expected_version!r}, got {version!r}")
 if not version.endswith("+rbln"):
     raise SystemExit(f"RBLN wheel is missing the +rbln local version: {version}")
-if expected_platform not in wheel_metadata:
-    raise SystemExit(f"wheel is missing the platform tag {expected_platform!r}")
+if f"Tag: {expected_tag}" not in wheel_metadata.splitlines():
+    raise SystemExit(f"wheel is missing the tag {expected_tag!r}")
 
 # RBLN builds no backend extension, so the compiled modules must be exactly
 # the common ones: anything else means another profile leaked into the build.
