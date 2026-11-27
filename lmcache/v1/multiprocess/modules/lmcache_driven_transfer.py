@@ -47,6 +47,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_kv_per_object_group,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
+    window_blocks_per_chunk,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -103,15 +104,21 @@ def all_null_chunk_masks(
     blocks_per_chunk: Sequence[int],
     num_chunks: int,
     null_block_id: int = 0,
+    blocks_per_window: Sequence[int] | None = None,
 ) -> list[list[bool]]:
-    """Mark, per object group, the chunks whose engine block ids are all null.
+    """Mark, per object group, the chunks that must not be stored.
 
-    A chunk is null for an object group when every block ID of every kernel
-    group equals the server's null marker. Align-mode Mamba/linear
-    layers produce such chunks: only the block holding the last recurrent state
-    is real, so every earlier chunk is null. These chunks must not be stored --
-    the null block carries no valid KV, and object keys are content hashes, so
-    committing them would serve garbage to a later prefix hit.
+    A chunk is skipped for an object group when one of its kernel groups has
+    no valid data for it:
+
+    - A kernel group that transfers only its trailing ``blocks_per_window``
+      blocks: any of them is the null marker (e.g. a recurrent-state chunk
+      whose chunk-end block was skipped by a step). Every transferred block
+      is restored on a hit, so one null block is a null page in the object.
+    - A kernel group that transfers the whole chunk: all of its blocks are
+      null. A partly null chunk is kept: a sliding-window group that stores
+      whole chunks (window of at least one chunk, or ``full_sw_kv``) has null
+      blocks where the window slid past, and a hit still needs the rest.
 
     Args:
         block_ids: Raw per-kernel-group engine block ids (before any downsample),
@@ -122,22 +129,29 @@ def all_null_chunk_masks(
         num_chunks: Number of chunks in the request.
         null_block_id: Server-wide block ID denoting absent data. Defaults to
             the historical vLLM null block zero.
+        blocks_per_window: Trailing blocks of one chunk each kernel group
+            transfers, indexed by kernel-group index. ``None`` means every
+            block of the chunk is transferred.
 
     Returns:
-        ``mask[g][i]`` is True iff chunk ``i`` is all-null for object group ``g``.
+        ``mask[g][i]`` is True iff chunk ``i`` must be skipped for object
+        group ``g``.
     """
     masks: list[list[bool]] = []
     for group in object_groups:
         chunk_null: list[bool] = []
         for i in range(num_chunks):
-            is_null = True
+            is_null = False
             for kg in group.kernel_group_indices:
                 bpc = blocks_per_chunk[kg]
-                if any(
-                    block != null_block_id
-                    for block in block_ids[kg][i * bpc : (i + 1) * bpc]
-                ):
-                    is_null = False
+                window = bpc if blocks_per_window is None else blocks_per_window[kg]
+                window = min(max(window, 1), bpc)
+                blocks = block_ids[kg][(i + 1) * bpc - window : (i + 1) * bpc]
+                # See the docstring: any-null for a trailing window,
+                # all-null for a whole-chunk transfer.
+                check = any if window < bpc else all
+                if check(block == null_block_id for block in blocks):
+                    is_null = True
                     break
             chunk_null.append(is_null)
         masks.append(chunk_null)
@@ -866,6 +880,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 blocks_per_chunk,
                 num_chunks,
                 null_block_id,
+                blocks_per_window=window_blocks_per_chunk(cache_context),
             )
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(

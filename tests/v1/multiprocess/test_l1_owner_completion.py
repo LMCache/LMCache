@@ -143,12 +143,14 @@ def test_store_owner_callback_round_trip(
     cache_context = MagicMock()
     cache_context.cupy_stream.ptr = 123
     cache_context.calculate_num_blocks.return_value = 1
+    cache_context.lmcache_tokens_per_chunk = 1
     cache_context.hold_imported_event.return_value = 7
     cache_context.transfer_object_group.side_effect = copy
     cache_context.kv_layer_groups_manager = SimpleNamespace(
         num_object_groups=2,
         num_kernel_groups=2,
         object_groups=[ObjectGroupInfo(kernel_group_indices=[i]) for i in range(2)],
+        get_subchunk_sw_size_tokens=lambda group_idx: 1,
     )
     entry = SimpleNamespace(
         cache_context=cache_context,

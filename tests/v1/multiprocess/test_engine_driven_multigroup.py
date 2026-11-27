@@ -1230,6 +1230,67 @@ def test_store_multigroup_shm_asks_server_to_skip_all_null_chunks(
     assert fake.skipped == ()
 
 
+def _null_window_group_states() -> list[Any]:
+    """Group 0 stores the last 2 of its 4 blocks per chunk; group 1 stores
+    its whole 2-block chunk."""
+    return [
+        worker_transfer._GroupState(
+            layer_names=["layer_0", "layer_1"],
+            engine_kv_format=MagicMock(),
+            blocks_in_chunk=4,
+            blocks_per_window=2,
+            layout_desc=MagicMock(),
+        ),
+        worker_transfer._GroupState(
+            layer_names=["layer_2"],
+            engine_kv_format=MagicMock(),
+            blocks_in_chunk=2,
+            blocks_per_window=2,
+            layout_desc=MagicMock(),
+        ),
+    ]
+
+
+def test_null_chunk_indices_windowed_any_null_whole_chunk_all_null() -> None:
+    """A group storing only its trailing window skips a chunk when any window
+    block is null; a group storing the whole chunk skips only all-null
+    chunks."""
+    ctx = EngineDrivenTransferContext(1, MagicMock())
+    ctx._group_states = _null_window_group_states()
+
+    skipped = ctx._null_chunk_indices(
+        [
+            # Chunk 0 [5, 6, 0, 9]: null block in the window -> skipped.
+            # Chunk 1 [0, 0, 7, 8]: only blocks before the window are null.
+            # Chunk 2 [1, 2, 0, 0]: the whole window is null -> skipped.
+            [5, 6, 0, 9, 0, 0, 7, 8, 1, 2, 0, 0],
+            # Chunk 0 [0, 3] and chunk 1 [3, 0]: partly null -> stored.
+            # Chunk 2 [0, 0]: all null -> skipped.
+            [0, 3, 3, 0, 0, 0],
+        ]
+    )
+
+    assert skipped == [[0, 2], [2]]
+
+
+def test_store_multigroup_shm_skips_null_window_chunks(monkeypatch) -> None:
+    """The engine-driven store sends the server the chunks to skip by the
+    same rule."""
+    ctx, _ = _fanout_ctx(monkeypatch)
+    ctx._group_states = _null_window_group_states()
+    t = [torch.zeros(1) for _ in range(2)]
+    fake = _FakeGroupedContext(t, [1, 1], [0, 1])
+    ctx._engine_driven_context = fake  # type: ignore[assignment]
+    kv = {name: torch.zeros(1) for name in ("layer_0", "layer_1", "layer_2")}
+
+    future = ctx.submit_store(
+        "req", MagicMock(), kv, [[5, 6, 0, 9, 0, 0, 7, 8], [0, 3, 0, 0]], MagicMock(), 4
+    )
+
+    assert future.result(timeout=1) is True
+    assert fake.skipped == ((0,), (1,))
+
+
 def _windowed_inline_ctx(monkeypatch):
     """Inline worker context whose group 1 needs only its last chunk."""
     ctx, pctx, _ = _inline_worker_ctx(monkeypatch)

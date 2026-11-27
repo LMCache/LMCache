@@ -17,6 +17,7 @@ from lmcache.v1.multiprocess.object_group_transfer.dispatch import (
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
     batched_iteration_with_skip,
     downsample_and_stage_block_ids,
+    window_blocks_per_chunk,
 )
 from lmcache.v1.multiprocess.object_group_transfer.unfull_chunk import (
     get_unfull_chunk_layout_desc,
@@ -39,4 +40,5 @@ __all__ = [
     "transfer_kv_per_object_group",
     "transfer_unfull_chunk",
     "trim_and_stage_unfull_chunk_block_ids",
+    "window_blocks_per_chunk",
 ]

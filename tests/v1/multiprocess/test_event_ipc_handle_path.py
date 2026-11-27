@@ -270,10 +270,12 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         hold_imported_event=hold_imported_event,
         release_imported_event=released.append,
         max_batch_size=1,
+        lmcache_tokens_per_chunk=1,
         kv_layer_groups_manager=SimpleNamespace(
             num_object_groups=1,
             num_kernel_groups=1,
             object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+            get_subchunk_sw_size_tokens=lambda group_idx: 1,
             get_attn_desc=lambda: SimpleNamespace(
                 num_chunks_in_sw=[-1], group_kinds=()
             ),

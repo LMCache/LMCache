@@ -1321,25 +1321,26 @@ class EngineDrivenTransferContext(TransferContext):
         return picked, [chunk_indices[i] for i in idxs]
 
     def _null_chunk_indices(self, block_ids: list[list[int]]) -> list[list[int]]:
-        """Per group, the chunks whose engine blocks are all the null block.
+        """Per group, the chunks that must not be stored (null window blocks).
 
-        Sliding-window groups lose their out-of-window blocks and align-mode
-        recurrent (Mamba/linear-attention) groups keep only the block holding
-        the last state, so their earlier chunks are entirely the null block.
-        Those chunks carry no valid KV and must never be stored: object keys
-        are prefix hashes, so a later shorter-prefix hit would restore them.
-        Mirrors ``all_null_chunk_masks`` on the lmcache-driven path.
+        Mirrors ``all_null_chunk_masks`` on the lmcache-driven path: a group
+        storing only its trailing window skips a chunk when any window block
+        is null, a group storing the whole chunk only when all blocks are.
         """
         null_id = self._null_block_id
         skipped: list[list[int]] = []
         for gid, state in enumerate(self._group_states):
             bpc = state.blocks_in_chunk
+            window = min(max(state.blocks_per_window, 1), bpc)
             ids = block_ids[gid]
             skipped.append(
                 [
                     c
                     for c in range(len(ids) // bpc)
-                    if all(b == null_id for b in ids[c * bpc : (c + 1) * bpc])
+                    if (any if window < bpc else all)(
+                        b == null_id
+                        for b in ids[(c + 1) * bpc - window : (c + 1) * bpc]
+                    )
                 ]
             )
         return skipped
