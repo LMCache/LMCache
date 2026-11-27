@@ -13,6 +13,7 @@ on:
         paths:
             - 'setup.py'
             - 'pyproject.toml'
+            - 'MANIFEST.in'
             - 'csrc/**'
             - 'requirements/common.txt'
             - 'requirements/build.txt'
@@ -71,12 +72,18 @@ jobs:
               # match pyproject.toml's exact build-system pin, but is ABI-
               # compatible for compiling CppExtensions.
               run: |
+                # Exercise packaging from a checkout where the frontend has been imported.
+                python -m compileall -q lmcache/lmcache_frontend
                 NO_GPU_EXT=1 python -m build --wheel --no-isolation \
                   --skip-dependency-check
 
             - name: Verify CPU wheel contents
               run: |
                 set -e
+                if unzip -Z1 dist/lmcache-*.whl | grep -E '^lmcache/lmcache_frontend/.*\.pyc$'; then
+                  echo "::error::frontend bytecode included in the wheel"
+                  exit 1
+                fi
                 # Required: common C++ extensions.
                 for mod in lmcache_native lmcache_redis lmcache_fs; do
                   if ! unzip -l dist/lmcache-*.whl | grep -qE "lmcache/${mod}\..*\.so"; then
