@@ -762,6 +762,10 @@ skip read/write-locked keys unless ``force`` is set. Blocking adapter I/O is run
 off the event loop. When the tier includes L2 the primary (or selected) L2
 adapter must be configured, else ``503``; a pure ``l1`` delete needs no adapter.
 
+Deletion is best effort. It does not wait for or cancel store or write-back
+tasks already in flight for these keys, so such a task can make a key resident
+again after the call returns. This also holds for ``tier=all`` and ``force``.
+
 Per-key successful L2 deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
 ``--coordinator-event-reporting``), the deletions show up at the
