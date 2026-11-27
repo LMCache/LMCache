@@ -1,63 +1,127 @@
-Chunk-Size Resolution
-=====================
+Multiple Chunk Sizes in MP Mode
+===============================
 
-Multiprocess connectors resolve an effective LMCache chunk size at startup.
-This keeps chunk boundaries aligned with each engine's KV cache geometry
-without changing the MP server's configured chunk size. vLLM, SGLang, ATOM,
-and TensorRT-LLM support this resolution.
+One LMCache multiprocess (MP) server can serve model deployments with different
+KV chunk sizes when using the default prefix-caching engine without a
+Coordinator. The vLLM, SGLang, ATOM, and TensorRT-LLM MP integrations resolve
+an effective chunk size at startup that aligns with each model's KV cache
+blocks.
 
 Effective chunk size
 --------------------
 
-``lmcache server --chunk-size`` is the server minimum. vLLM and SGLang can
-optionally set a client minimum through ``lmcache.mp.chunk_size``. Every
-connector reads the server minimum, applies any supported client minimum, and
-rounds the result up to the engine's required alignment::
+``lmcache server --chunk-size`` sets the server-wide minimum in tokens and
+defaults to ``256``. Each connector starts with that minimum. If a client
+minimum is set, the connector takes the larger of the two. It then rounds up
+to the smallest multiple of the model's required alignment. Set each minimum
+as a positive integer.
 
-    base = max(server_minimum, client_minimum)
-    effective_chunk_size = smallest multiple of required_alignment
-                           that is >= base
-
-When the client minimum is omitted, ``base`` is the server minimum. vLLM and
-SGLang use the least common multiple of their cacheable KV group spans as the
-required alignment. ATOM and TensorRT-LLM use their paged KV block size.
+vLLM and SGLang align to the least common multiple of the token spans of the
+cacheable KV groups. ATOM and TensorRT-LLM align to their paged KV block size.
 
 For vLLM attention groups under DCP, the effective span is
-``block_size * decode_context_parallel_size``. Recurrent-state groups use
-their physical block size because their state is replicated rather than DCP
-sharded.
+``block_size * decode_context_parallel_size``. Recurrent-state groups use their
+physical block size because each DCP rank holds a replica of the state.
 
-For example, with a server minimum of ``256``:
+Configuring each integration
+----------------------------
 
-* an alignment of 256 resolves to an effective chunk size of 256;
-* an alignment of 544 resolves to 544;
-* an alignment of 544 and a client minimum of 600 resolve to 1088; and
-* group spans 32 and 48 have an alignment of 96, so the effective size is 288.
+**vLLM** can set ``lmcache.mp.chunk_size`` in ``kv_connector_extra_config``.
+For example, pass this JSON to ``vllm serve --kv-transfer-config`` to use the
+connector shipped with LMCache and request a minimum of 512 tokens.
 
-The effective size is registered for ``(model_name, world_size)`` together
-with its KV layout. Deployments of the same pair must use the same effective
-size while that registration is active. When a vLLM deployment uses multiple
-MP servers, every server must resolve the same effective size.
+.. code-block:: json
 
-Initialization flow
+   {
+     "kv_connector": "LMCacheMPConnector",
+     "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
+     "kv_role": "kv_both",
+     "kv_connector_extra_config": {
+       "lmcache.mp.host": "localhost",
+       "lmcache.mp.port": 5555,
+       "lmcache.mp.chunk_size": 512
+     }
+   }
+
+**SGLang** can set the same key under ``extra_config`` in the YAML file
+passed to ``--lmcache-config-file``. This example requests a minimum of 300
+tokens.
+
+.. code-block:: yaml
+
+   mp_host: 127.0.0.1
+   mp_port: 5555
+   extra_config:
+     lmcache.mp.chunk_size: 300
+
+**ATOM** uses the server minimum and rounds it up to a multiple of the ATOM
+block size. **TensorRT-LLM** also uses the server minimum and rounds it up to
+a multiple of ``KvCacheConfig.tokens_per_block``. Both adapters perform this
+alignment automatically.
+
+Chunk-size examples
 -------------------
 
-#. The connector computes the engine's required alignment.
-#. The scheduler adapter and each worker adapter call ``GET_CHUNK_SIZE`` to
-   read the MP server minimum.
-#. Each adapter combines the server minimum, optional client minimum, and
-   model alignment locally to obtain the effective size.
-#. The connector verifies that the result is compatible with every cache
-   group; a multi-server scheduler also verifies that all servers agree.
-#. Workers register their KV caches and the effective size. The server keeps
-   its configured minimum unchanged and stores the size with the registered
-   layout.
+With ``--chunk-size 256``, these example configurations produce the following
+effective sizes in tokens.
 
-CacheBlend and Coordinator currently require one global chunk size. When
-either is enabled, registrations whose effective size differs from the MP
-server's configured ``--chunk-size`` are rejected. An MP server also includes
-its configured size in ``POST /instances`` so Coordinator can reject a fleet
-configuration mismatch.
+.. list-table::
+   :header-rows: 1
+
+   * - Integration
+     - Block span or spans
+     - Client minimum
+     - Effective chunk size
+   * - vLLM
+     - 16
+     - 512
+     - 512
+   * - SGLang
+     - 32 and 48 (alignment 96)
+     - 300
+     - 384
+   * - ATOM
+     - 128
+     - Uses server minimum
+     - 256
+   * - TensorRT-LLM
+     - 64
+     - Uses server minimum
+     - 256
+
+Sharing one server
+------------------
+
+For example, two vLLM deployments with different model names and 16-token
+blocks can use 256-token and 512-token chunks on the same server. Start the
+server with ``--chunk-size 256``, leave the first deployment's client minimum
+unset, and set it to ``512`` on the second.
+
+The scheduler and workers use the same effective chunk size. Workers send
+it with their KV cache registration, and the server records it by model name
+and world size. All deployments registered under the same ``(model_name,
+world_size)`` pair on one server must agree on the effective size. To change
+the size for that pair, unregister all workers using the old size before
+registering workers with the new size. A single vLLM deployment configured
+with ``lmcache.mp.server_urls`` must resolve the same effective chunk size on
+every server it uses.
+
+.. _mp-global-chunk-size:
+
+CacheBlend and Coordinator
+--------------------------
+
+:doc:`CacheBlend </kv_cache_optimizations/cacheblend>` and
+:doc:`Coordinator </mp/coordinator>` each require a single chunk size. With
+``--engine-type blend`` or a configured ``--coordinator-url``, the MP server
+rejects any KV cache registration whose effective size differs from its
+``--chunk-size``. Choose a server size that is a multiple of every connected
+model's required alignment and at least as large as every configured client
+minimum.
+
+When using Coordinator, also set the same ``--chunk-size`` on the Coordinator
+and all MP servers in the fleet. Coordinator rejects a server registration with
+HTTP 409 if the server reports a different size.
 
 Restart recovery
 ----------------
