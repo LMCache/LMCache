@@ -177,10 +177,11 @@ def test_strided_kernel_rotates_only_the_trailing_window():
 
 
 @_gpu
-def test_native_plan_rope_base_offset():
+@pytest.mark.parametrize("rope_num_layers", [None, 1, 0])
+def test_native_plan_rope_base_offset(rope_num_layers: int | None) -> None:
     """The native-plan path: same window as a byte offset in CBGroupSpec.
     Stage two host chunks into tmp slots and re-RoPE them (no scatters);
-    the slots must match the strided-kernel result."""
+    unselected components must be copied without rotating their values."""
     cuda_ops = _cuda_ops()
     if not hasattr(cuda_ops, "execute_cb_retrieve_plan_flat"):
         pytest.skip("cuda_ops build lacks execute_cb_retrieve_plan_flat")
@@ -202,30 +203,32 @@ def test_native_plan_rope_base_offset():
     ]
     old_sts, cur_sts = [128, 512], [640, 96]
 
-    try:
-        spec = cuda_ops.CBGroupSpec(
-            paged_kv_ptrs=0,
-            temp_buffer_ptrs=[s.data_ptr() for s in slots],
-            num_layers=nl,
-            slot_tokens=spc,
-            hidden_elems=_HIDDEN,
-            element_size=_DTYPE.itemsize,
-            engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
-            page_buffer_size=1,
-            block_size=1,
-            head_size=_ROPE,
-            slot_mapping_base=0,
-            slot_mapping_capacity=0,
-            cos_sin_cache=cache_bf16.data_ptr(),
-            rot_dim=_ROPE,
-            rope_num_kv_heads=1,
-            rope_head_stride=_HIDDEN,
-            key_scalar_type=15,  # at::ScalarType::BFloat16
-            is_neox=False,
-            rope_base_offset=_CONTENT * _DTYPE.itemsize,
-        )
-    except TypeError:
-        pytest.skip("cuda_ops build predates CBGroupSpec.rope_base_offset")
+    spec_kwargs = dict(
+        paged_kv_ptrs=0,
+        temp_buffer_ptrs=[s.data_ptr() for s in slots],
+        num_layers=nl,
+        slot_tokens=spc,
+        hidden_elems=_HIDDEN,
+        element_size=_DTYPE.itemsize,
+        engine_kv_format=lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+        page_buffer_size=1,
+        block_size=1,
+        head_size=_ROPE,
+        slot_mapping_base=0,
+        slot_mapping_capacity=0,
+        cos_sin_cache=cache_bf16.data_ptr(),
+        rot_dim=_ROPE,
+        rope_num_kv_heads=1,
+        rope_head_stride=_HIDDEN,
+        key_scalar_type=15,  # at::ScalarType::BFloat16
+        is_neox=False,
+        rope_base_offset=_CONTENT * _DTYPE.itemsize,
+    )
+    extra = {} if rope_num_layers is None else {"rope_num_layers": rope_num_layers}
+    spec = cuda_ops.CBGroupSpec(**spec_kwargs, **extra)
+    for invalid in (-2, nl + 1):
+        with pytest.raises(RuntimeError, match="rope_num_layers"):
+            cuda_ops.CBGroupSpec(**spec_kwargs, rope_num_layers=invalid)
 
     chunk_bytes = nl * spc * _HIDDEN * _DTYPE.itemsize
     staging = [
@@ -248,16 +251,19 @@ def test_native_plan_rope_base_offset():
     for i in range(n_chunks):
         # Positions ramp per slot token and repeat across layers (the ramp
         # kernel derives them in-kernel); layers share the same ramp.
-        rows = host[i][0].reshape(nl * spc, _HIDDEN).to(torch.float32).to(device)
-        ramp = torch.arange(spc, device=device).repeat(nl)
+        rotated_layers = nl if rope_num_layers is None else rope_num_layers
+        before = host[i][0].to(device)
+        got = slots[i][0]
+        assert torch.equal(got[rotated_layers:], before[rotated_layers:])
+        if rotated_layers == 0:
+            continue
+        rows = before[:rotated_layers].reshape(-1, _HIDDEN).float()
+        ramp = torch.arange(spc, device=device).repeat(rotated_layers)
         ref = _reference_rerope(rows, old_sts[i] + ramp, cur_sts[i] + ramp, cache_f32)
-        got = slots[i][0].reshape(nl * spc, _HIDDEN)
-        assert torch.equal(
-            got[:, :_CONTENT],
-            host[i][0].reshape(nl * spc, _HIDDEN)[:, :_CONTENT].to(device),
-        ), f"chunk {i}: content dims were rotated"
+        rotated = got[:rotated_layers].reshape(-1, _HIDDEN)
+        assert torch.equal(rotated[:, :_CONTENT], rows[:, :_CONTENT])
         torch.testing.assert_close(
-            got[:, _CONTENT:].to(torch.float32),
+            rotated[:, _CONTENT:].float(),
             ref[:, _CONTENT:],
             atol=2e-2,
             rtol=2e-2,
