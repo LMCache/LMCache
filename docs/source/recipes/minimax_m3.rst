@@ -60,9 +60,6 @@ Validated models
 
       **Status:** Not validated with LMCache.
 
-CacheBlend support
-------------------
-
 Compression support
 -------------------
 

@@ -4,7 +4,7 @@
 
 LMCache runs as a standalone daemon process, managing KV cache independently of the inference engine, so cached data is not lost when an engine restarts. It is vendor-neutral: it works as the KV cache layer for mainstream open-source serving engines (vLLM, SGLang) and inference frameworks (NVIDIA Dynamo), across hardware vendors and storage systems, letting users switch engines or storage while reusing stored KV caches.
 
-Two capabilities distinguish it. Tiered offloading moves KV caches out of GPU memory into CPU RAM, local disk, and remote backends, so prefill computation can be reused across requests, sessions, and engine instances. CacheBlend extends reuse beyond prefix caching by reusing cached KV blocks at any position in a prompt, selectively recomputing a narrow band of tokens to recover quality.
+Its tiered offloading moves KV caches out of GPU memory into CPU RAM, local disk, and remote backends, so prefill computation can be reused across requests, sessions, and engine instances.
 
 These docs describe LMCache's multiprocess (MP) architecture, the current recommended deployment mode. Pages at the root of this site track the `dev` branch; tagged releases are published under versioned path prefixes, and a Chinese translation is published under `/zh_CN/`.
 
@@ -27,7 +27,6 @@ These docs describe LMCache's multiprocess (MP) architecture, the current recomm
 ## KV cache optimizations
 
 - [KV Cache Optimizations](https://docs.lmcache.ai/kv_cache_optimizations/index.html): Index of techniques that go beyond plain storage and retrieval.
-- [CacheBlend](https://docs.lmcache.ai/kv_cache_optimizations/cacheblend.html): Reuse cached KV for non-prefix text by selectively recomputing boundary tokens. Best Paper, EuroSys 2025.
 - [CacheGen](https://docs.lmcache.ai/mp/cachegen.html): KV cache compression and streaming for faster transfer.
 - [Segmented Prefill](https://docs.lmcache.ai/kv_cache_optimizations/segmented_prefill.html): Split long prefills into segments for better cache reuse.
 - [Lazy KV Cache Offload](https://docs.lmcache.ai/mp/lazy_offload.html): Defer GPU-to-LMCache stores and submit finished requests in FIFO batches, trading immediate cache availability for serving throughput. vLLM + LMCacheMPConnector only, disabled by default.

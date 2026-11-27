@@ -7,6 +7,5 @@ caching.
 .. toctree::
    :maxdepth: 1
 
-   cacheblend
    segmented_prefill
    /mp/lazy_offload

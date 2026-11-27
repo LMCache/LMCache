@@ -90,12 +90,6 @@ Validated models
 
       **Status:** Not validated with LMCache.
 
-CacheBlend support
-------------------
-
-Not supported: the sparse-MLA groups' cached pages are byte-opaque packed
-records.
-
 Compression support
 -------------------
 

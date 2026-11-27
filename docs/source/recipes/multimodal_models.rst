@@ -34,7 +34,6 @@ Each recipe page is intentionally minimal:
   tab links to the engine's own documentation for the model and shows the
   exact ``lmcache server`` and engine launch commands. Tabs for engines that
   are not yet validated state so explicitly.
-- **CacheBlend support** -- validation status (may be empty).
 - **Compression support** -- table of compression methods (CacheGen, etc.)
   with per-method validation status. Extensible: new methods get a row.
 - **Caveats** -- known limitations, if any.
