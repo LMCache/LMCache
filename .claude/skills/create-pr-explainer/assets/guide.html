@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-en="LMCache · Visual guide starter" data-zh="LMCache · 可视化评审指南示例">LMCache · Visual guide starter</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root { color-scheme: light; font: 100%/1.5 system-ui, sans-serif; color: #18332e; background: #f8f8f3; }
+    body { max-width: 66rem; margin: auto; padding: 0 clamp(1rem, 4vw, 3rem) 3rem; }
+    header, .figure-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; }
+    header { border-bottom: 1px solid #b7c6bc; min-height: 4rem; }
+    h1, h2 { font: 500 clamp(1.7rem, 4vw, 3.1rem)/1.15 Georgia, "Noto Serif CJK SC", serif; }
+    h1 { margin: 2rem 0 .65rem; }
+    h2 { font-size: clamp(1.35rem, 3vw, 2rem); margin: 0; }
+    h3, p, figure, ol { margin: 0; }
+    main > p { max-width: 68ch; color: #415b50; }
+    code, .cells { font-family: ui-monospace, monospace; }
+    a { color: #096353; text-underline-offset: .2em; }
+    fieldset { display: flex; flex-wrap: wrap; gap: .35rem; border: 0; padding: 0; margin: 0; min-width: 0; }
+    label { position: relative; cursor: pointer; padding: .35rem .65rem; border: 1px solid currentColor; border-radius: .35rem; }
+    label:has(input:checked) { color: #143e31; background: #d6eddf; }
+    label:has(input:focus-visible), a:focus-visible { outline: 3px solid #177ac3; outline-offset: 2px; }
+    .sr-only, label input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    html:not(:has(#lang-zh:checked)) main [lang="zh-CN"],
+    html:has(#lang-zh:checked) main [lang="en"], [hidden] { display: none !important; }
+    figure { margin-top: 1.5rem; color: #f2f7f1; background: #193732; border-radius: .7rem; }
+    .figure-head, .flow, figcaption { padding: 1rem clamp(.85rem, 2.7vw, 1.7rem); }
+    .figure-head { border-bottom: 1px solid #55736a; }
+    .figure-head label:has(input:focus-visible) { outline-color: white; }
+    .flow { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem; }
+    h3 { font-size: 1rem; margin-bottom: .5rem; }
+    .cells { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .35rem; list-style: none; padding: 0; }
+    .cells li { display: grid; text-align: center; padding: .45rem .2rem; border: 1px solid #83a99b; border-radius: .3rem; }
+    .cells small { font: .8rem/1.4 system-ui, sans-serif; }
+    .stored { color: #143b2e; background: #ace3c8; }
+    .cells .miss { border: 2px dashed #fac299; color: #ffdbb2; }
+    .operation { text-align: center; font-size: .8rem; }
+    .operation::after { display: block; content: '→'; font: 1.8rem/1 monospace; }
+    [data-view] + [data-view] { margin-top: .75rem; }
+    [data-state] [data-view] { margin-top: 0; }
+    [data-controls] { display: none; }
+    [data-state] [data-controls] { display: flex; }
+    figcaption { border-top: 1px solid #55736a; font-size: .93rem; }
+    @media (max-width: 600px) {
+      .flow { grid-template-columns: 1fr; gap: .6rem; }
+      .operation::after { content: '↓'; }
+    }
+    @media print {
+      header fieldset, [data-controls] { display: none !important; }
+      figure { break-inside: avoid; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>LMCache</strong>
+    <fieldset class="language">
+      <legend class="sr-only">Language / 语言</legend>
+      <label><input id="lang-en" name="language" type="radio" value="en" checked><span lang="en">English</span></label>
+      <label><input id="lang-zh" name="language" type="radio" value="zh-CN"><span lang="zh-CN">中文</span></label>
+    </fieldset>
+  </header>
+  <!-- Replace the illustrative input and outcomes with the reviewed change. Add
+       the PR title, exact revisions, source links, test evidence and review order. -->
+  <main>
+    <h1><span lang="en">Where does each token land?</span><span lang="zh-CN">每个词元写到哪里？</span></h1>
+    <p><span lang="en">This illustrative scatter maps three tokens to slots [2, −1, 0]. A negative slot skips the write.</span>
+      <span lang="zh-CN">此散写示例将三个词元映射到槽位 [2, −1, 0]。槽位为负数时跳过写入。</span></p>
+    <figure data-switch aria-labelledby="map-title">
+      <div class="figure-head">
+        <h2 id="map-title"><span lang="en">Trace the final write</span><span lang="zh-CN">追踪最后一次写入</span></h2>
+        <fieldset data-controls>
+          <legend class="sr-only"><span lang="en">Write outcome</span><span lang="zh-CN">写入结果</span></legend>
+          <label><input name="write" type="radio" value="full" checked><span lang="en">Complete</span><span lang="zh-CN">完整写入</span></label>
+          <label><input name="write" type="radio" value="short"><span lang="en">Drop last write</span><span lang="zh-CN">丢弃末次写入</span></label>
+        </fieldset>
+      </div>
+      <div class="flow">
+        <section>
+          <h3><span lang="en">Input → slot</span><span lang="zh-CN">输入 → 槽位</span></h3>
+          <ol class="cells">
+            <li><b>A</b><small>→ 2</small></li>
+            <li><b>B</b><small>→ −1</small></li>
+            <li><b>C</b><small>→ 0</small></li>
+          </ol>
+        </section>
+        <div class="operation"><span lang="en">scatter</span><span lang="zh-CN">散写</span></div>
+        <div>
+          <section data-view="full">
+            <h3><span lang="en">Complete writes</span><span lang="zh-CN">完整写入结果</span></h3>
+            <ol class="cells" start="0">
+              <li class="stored"><small>0</small><b>C</b></li>
+              <li><small>1</small><b>·</b></li>
+              <li class="stored"><small>2</small><b>A</b></li>
+            </ol>
+          </section>
+          <section data-view="short">
+            <h3><span lang="en">Last write dropped</span><span lang="zh-CN">丢弃末次写入后的结果</span></h3>
+            <ol class="cells" start="0">
+              <li class="miss"><small>0</small><b>×</b></li>
+              <li><small>1</small><b>·</b></li>
+              <li class="stored"><small>2</small><b>A</b></li>
+            </ol>
+          </section>
+        </div>
+      </div>
+      <figcaption><span lang="en">A lands in slot 2. Slot 1 keeps its initial value (·). Dropping C leaves slot 0 missing its expected write (×).</span>
+        <span lang="zh-CN">A 写入槽位 2。槽位 1 保留初始值（·）。丢弃 C 后，槽位 0 缺少预期的写入（×）。</span></figcaption>
+    </figure>
+  </main>
+  <script>
+    const languages = document.querySelector('.language');
+    function updateLanguage() {
+      const lang = languages.querySelector(':checked').value;
+      document.documentElement.lang = lang;
+      const title = document.querySelector('title');
+      document.title = lang === 'en' ? title.dataset.en : title.dataset.zh;
+    }
+    languages.addEventListener('change', updateLanguage);
+    updateLanguage();
+
+    for (const figure of document.querySelectorAll('[data-switch]')) {
+      const controls = figure.querySelector('[data-controls]');
+      function updateView() {
+        const state = controls.querySelector(':checked').value;
+        figure.dataset.state = state;
+        for (const panel of figure.querySelectorAll('[data-view]')) {
+          panel.hidden = panel.dataset.view !== state;
+        }
+      }
+      controls.addEventListener('change', updateView);
+      updateView();
+    }
+  </script>
+</body>
+</html>

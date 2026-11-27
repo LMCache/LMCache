@@ -50,6 +50,21 @@ Tie every visual to real code and review decisions. Screenshots, stock art, and
 decorative graphics do not count. A small or documentation-only change may use
 fewer diagrams only when the artifact explains why that is sufficient.
 
+Start with a concrete input from the pinned diff, a test or a recorded trace.
+Work out the expected result and the failure a reviewer should be able to
+spot. Use the reviewer's question to choose the drawing.
+
+| Review question | Visual |
+| --- | --- |
+| Where do the bytes or tokens land? | Align input indices with destination slots. Label one item at both ends and show skipped or partial writes. |
+| When can another worker read or reuse the buffer? | Give each owner a lane. Place submission, completion, publication and release at the actual transitions. |
+| What changes between base and head? | Keep entities in the same positions. Mark the edge, value or responsibility that changes. |
+| What does the benchmark establish? | Put matched runs on the same labeled scale. Show units, measurement scope and the measured revisions. |
+
+Give the figure a caption that states the consequence and links to the code
+or evidence. Pair color with text, shape or pattern. Check that a reader can
+trace the example and identify what changes before reading the surrounding prose.
+
 When motion materially improves a call chain or state transition, add a
 lightweight animated or step-through diagram with visible pause, replay, or
 step controls. Provide a complete static fallback, respect
@@ -68,6 +83,18 @@ a build step, remote fonts, external assets, or an online translation service.
 Embed CSS, SVG, and any required JavaScript so the downloaded file works by
 itself. Preserve readable static content when JavaScript or motion is disabled.
 
+For a working starting point, copy [the visual starter](assets/guide.html)
+outside the repository. Replace its illustrative scatter and both page titles
+with the reviewed change. Its language switch shares the diagram geometry
+and values across translations. For a meaningful state change, the optional
+`data-switch` figure pairs each radio value with a `data-view` panel.
+Without scripting, the reader sees both labeled outcomes together.
+
+```bash
+review_dir=$(mktemp -d)
+cp .agents/skills/create-pr-explainer/assets/guide.html "$review_dir/review.html"
+```
+
 ## 5. Validate before publication
 
 At minimum:
@@ -80,6 +107,20 @@ At minimum:
   from a reviewer's perspective;
 - confirm the explained SHA, title, claims, diagrams, and validation evidence
   match the current head.
+
+For guides built from the starter, run the optional browser check from the
+checkout root. Playwright and Chromium are only needed when authoring.
+
+```bash
+skill=.agents/skills/create-pr-explainer
+uv run --no-project --with 'playwright>=1.50,<2' playwright install --only-shell chromium
+uv run --script "$skill/scripts/check_guide.py" "$review_dir/review.html" --screenshots "$review_dir/figures"
+```
+
+Open the rendered phone and desktop figures, including the Chinese view.
+Inspect arrow endpoints, text overlap and the actual value in each state.
+The checker exercises language and scenario controls, offline loading and
+static fallbacks. Verify the visual's meaning against the source separately.
 
 Treat a stale or incomplete explainer as a review blocker.
 
