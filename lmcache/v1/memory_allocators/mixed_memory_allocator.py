@@ -63,7 +63,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self._unregistered = False
 
-        self.pin_allocator: MemoryAllocatorInterface
+        self.pin_allocator: TensorMemoryAllocator | PagedTensorMemoryAllocator
         if use_paging:
             assert "shapes" in kwargs, (
                 "shapes must be specified for paged memory allocator"
@@ -274,3 +274,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def __str__(self) -> str:
         return "MixedMemoryAllocator"
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the pinned tier's largest free block and free-block count."""
+        return self.pin_allocator.get_fragmentation_stats()

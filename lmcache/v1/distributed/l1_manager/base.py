@@ -136,6 +136,20 @@ def _l1_staging_bytes_or_zero(target: "BaseL1Manager | None") -> int:
     return target.get_staging_memory_usage()
 
 
+def _l1_largest_free_block_or_zero(target: "BaseL1Manager | None") -> int:
+    """Return the largest free L1 block in bytes, or 0 without a target."""
+    if target is None:
+        return 0
+    return target.get_fragmentation_stats()[0]
+
+
+def _l1_free_block_count_or_zero(target: "BaseL1Manager | None") -> int:
+    """Return the L1 free-block count, or 0 without a target."""
+    if target is None:
+        return 0
+    return target.get_fragmentation_stats()[1]
+
+
 # Main classes
 
 
@@ -260,6 +274,18 @@ class BaseL1Manager(L1ManagerInterface):
                     "lmcache_mp.l1_staging_bytes",
                     "Bytes held by L1 staging objects (write-reserved, not admitted)",
                     lambda: BaseL1Manager._observations(_l1_staging_bytes_or_zero),
+                )
+                register_gauge(
+                    "lmcache.l1_manager",
+                    "lmcache_mp.l1_largest_free_block_bytes",
+                    "Largest contiguous free block in bytes (fragmentation signal)",
+                    lambda: BaseL1Manager._observations(_l1_largest_free_block_or_zero),
+                )
+                register_gauge(
+                    "lmcache.l1_manager",
+                    "lmcache_mp.l1_free_block_count",
+                    "Number of free blocks in the L1 address space",
+                    lambda: BaseL1Manager._observations(_l1_free_block_count_or_zero),
                 )
 
     @property
@@ -1138,6 +1164,7 @@ class BaseL1Manager(L1ManagerInterface):
                 if staged.is_temporary:
                     temporary += 1
         used, total = self._memory_manager.get_memory_usage()
+        largest_free, free_count = self.get_fragmentation_stats()
         # ``memory_total_bytes`` is what the allocator currently backs (the
         # grown heap on the lazy tier). ``memory_configured_bytes`` is the
         # current declared capacity.
@@ -1151,12 +1178,28 @@ class BaseL1Manager(L1ManagerInterface):
             "staging_bytes": self._staging_bytes,
             "memory_used_bytes": used,
             "memory_total_bytes": total,
+            "memory_largest_free_block_bytes": largest_free,
+            "memory_free_block_count": free_count,
             "memory_configured_bytes": self.get_capacity_bytes(),
             "backend": self.backend_type.value,
             "memory_usage_ratio": used / total if total > 0 else 0.0,
             "write_ttl_seconds": self._write_ttl_seconds,
             "read_ttl_seconds": self._read_ttl_seconds,
         }
+
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return the L1 external-fragmentation signal.
+
+        Delegates to the medium's memory manager and reports ``(0, 0)``
+        for tiers whose allocator has no address-space stats.
+
+        Returns:
+            ``(largest_free_block_bytes, free_block_count)``.
+        """
+        try:
+            return self._memory_manager.get_fragmentation_stats()
+        except NotImplementedError:
+            return (0, 0)
 
     # Debugging APIs
     @l1_mgr_synchronized

@@ -34,6 +34,15 @@ class L1MemoryManagerProtocol(Protocol):
         """Return ``(used_bytes, total_bytes)``."""
         ...
 
+    def get_fragmentation_stats(self) -> tuple[int, int]:
+        """Return ``(largest_free_block_bytes, free_block_count)``.
+
+        Together with ``get_memory_usage`` this separates a byte deficit
+        from external fragmentation. Tiers without an address space
+        report ``(0, 0)``.
+        """
+        ...
+
     def get_l1_memory_desc(self) -> Optional[L1MemoryDesc]:
         """Describe the underlying L1 buffer for L2-adapter registration.
 

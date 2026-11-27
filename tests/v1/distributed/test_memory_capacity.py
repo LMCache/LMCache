@@ -331,6 +331,9 @@ class TestReportStatusSharesTheSource:
                 # The grown heap, deliberately unequal to the configured total.
                 return (1 * GIB, 3 * GIB)
 
+            def get_fragmentation_stats(self) -> tuple[int, int]:
+                return (2 * GIB, 5)
+
             def memcheck(self) -> bool:
                 return True
 
@@ -354,6 +357,9 @@ class TestReportStatusSharesTheSource:
         assert status["backend"] == "dram"
         # The pre-existing field keeps its old meaning for old consumers.
         assert status["memory_total_bytes"] == 3 * GIB
+        # The fragmentation fields share the same source as the gauges.
+        assert status["memory_largest_free_block_bytes"] == 2 * GIB
+        assert status["memory_free_block_count"] == 5
 
     def test_status_and_capacity_report_agree(self) -> None:
         # Both consumers use the same point-in-time capacity derivation.
