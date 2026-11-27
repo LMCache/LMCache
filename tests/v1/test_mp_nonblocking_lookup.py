@@ -91,7 +91,9 @@ class Client:
         assert self.replies, "duplicate status RPC while previous one is pending"
         return self.replies.popleft()
 
-    def free_lookup_locks(self, key: Any, tp_size: int) -> MessagingFuture[Any]:
+    def free_lookup_locks(
+        self, key: Any, tp_size: int, extra_ranges: Any = ()
+    ) -> MessagingFuture[Any]:
         """Record released ranges and expose their acknowledgement."""
         self.frees.append(key)
         return self.free_ack
@@ -353,6 +355,57 @@ def test_end_session_waits_for_a_status_query_sent_on_ack(
 
     adapter.end_session("r")
     assert ends_when_waited == [[]]
+    assert client.ends == ["r"]
+
+
+def test_peek_reads_an_arrived_result_without_sending(
+    make_adapter: AdapterFactory,
+) -> None:
+    """Teardown reads the result passively: no status query is re-sent."""
+    adapter, (client,) = make_adapter()
+    submit(adapter, [client])
+    assert client.queries == ["r"]
+
+    assert adapter.peek_lookup_result("r") is None
+    client.status.set_result(128)
+    assert adapter.peek_lookup_result("r") == 128
+    assert client.queries == ["r"]
+    assert adapter.peek_lookup_result("unknown") is None
+
+
+def test_end_session_follows_each_servers_free_without_blocking(
+    make_adapter: AdapterFactory,
+) -> None:
+    """With ``before_end_session`` neither call blocks, and each server gets
+    END_SESSION only after it answered the FREE, an error reply included."""
+    adapter, clients = make_adapter(count=2)
+    for client in clients:
+        client.free_ack = MessagingFuture()
+
+    adapter.free_lookup_locks(
+        pack_token_ids(range(256)), 0, 128, "r", before_end_session=True
+    )
+    adapter.end_session("r")
+    assert [len(client.frees) for client in clients] == [1, 1]
+    assert [client.ends for client in clients] == [[], []]
+
+    clients[0].free_ack.set_result(None)
+    assert [client.ends for client in clients] == [["r"], []]
+    clients[1].free_ack.set_exception(RuntimeError("server error"))
+    assert [client.ends for client in clients] == [["r"], ["r"]]
+    assert adapter.is_healthy
+
+
+def test_end_session_does_not_wait_for_an_unordered_free(
+    make_adapter: AdapterFactory,
+) -> None:
+    """A FREE sent without ``before_end_session`` does not delay END_SESSION."""
+    adapter, (client,) = make_adapter()
+    client.free_ack = MessagingFuture()
+
+    adapter.free_lookup_locks(pack_token_ids(range(256)), 0, 128, "r")
+    adapter.end_session("r")
+
     assert client.ends == ["r"]
 
 

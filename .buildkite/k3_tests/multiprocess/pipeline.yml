@@ -289,6 +289,29 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
+      # TP=2 with a small GPU block pool: streams 32 LMCache-cached documents,
+      # aborts them while most wait for blocks after their lookups hit, and
+      # asserts the L1 read_locked_count returns to 0 well before the read TTL.
+      - label: ":compression: {{matrix.inference_engine}} / abort_lookup_locks / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh abort_lookup_locks
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        # A vLLM scheduler assert (vllm-project/vllm#37859, on dev as well) can
+        # kill the engine after the batch abort; the workload then exits 75.
+        # Retry only that code and a lost agent: a lock leak exits 1 and fails.
+        retry:
+          automatic:
+            - exit_status: 75
+              limit: 2
+            - exit_status: -1
+              limit: 2
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/abort_lookup_locks/*.json"]
+
       # Two LMCache MP instances + two vLLM instances + one coordinator on a
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
