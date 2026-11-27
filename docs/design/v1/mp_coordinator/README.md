@@ -337,7 +337,8 @@ lmcache coordinator [--host HOST] [--port PORT] \
     [--trigger-watermark FRACTION] \
     [--chunk-size TOKENS] [--hash-algorithm ALGO] \
     [--blend-probe-stride POSITIONS] \
-    [--timeout-keep-alive SECS]
+    [--timeout-keep-alive SECS] \
+    [--http-log-level LEVEL] [--[no-]http-access-log]
 ```
 
 (or, equivalently, `python -m lmcache.v1.mp_coordinator`).

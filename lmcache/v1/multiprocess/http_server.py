@@ -350,8 +350,8 @@ def run_http_server(
         app=app,
         host=http_config.http_host,
         port=http_config.http_port,
-        log_level="info",
-        access_log=True,
+        log_level=http_config.http_log_level,
+        access_log=http_config.http_access_log,
     )
     server = uvicorn.Server(config)
 

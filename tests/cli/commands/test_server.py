@@ -156,6 +156,36 @@ class TestServerCommandArguments:
         assert args.http_host == "127.0.0.1"
         assert args.http_port == 9000
 
+    def test_http_logging_args_registered(self, parser):
+        args = parser.parse_args(
+            [
+                "server",
+                "--http-log-level",
+                "warning",
+                "--no-http-access-log",
+                "--l1-size-gb",
+                "4",
+                "--eviction-policy",
+                "LRU",
+            ]
+        )
+        assert args.http_log_level == "warning"
+        assert args.http_access_log is False
+
+    def test_http_log_level_rejects_unknown_level(self, parser):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "server",
+                    "--http-log-level",
+                    "loud",
+                    "--l1-size-gb",
+                    "4",
+                    "--eviction-policy",
+                    "LRU",
+                ]
+            )
+
     @pytest.mark.parametrize("option", ["--api-key-file", "--http-api-key-file"])
     def test_api_key_files_are_repeatable(self, parser, option):
         args = parser.parse_args(
@@ -205,6 +235,8 @@ class TestServerCommandArguments:
         assert args.port == 5555
         assert args.http_host == "127.0.0.1"
         assert args.http_port == 8080
+        assert args.http_log_level == "info"
+        assert args.http_access_log is True
 
 
 class TestServerCommandExecute:

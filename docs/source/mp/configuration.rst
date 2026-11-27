@@ -379,6 +379,16 @@ The HTTP frontend is included when running ``lmcache server``.
    * - ``--http-port``
      - ``8080``
      - Port to bind the HTTP server.
+   * - ``--http-log-level``
+     - ``info``
+     - Log level of the HTTP server (uvicorn), including its access log:
+       ``critical``, ``error``, ``warning``, ``info``, ``debug`` or
+       ``trace``. ``LMCACHE_LOG_LEVEL`` does not affect these loggers.
+   * - ``--http-access-log`` / ``--no-http-access-log``
+     - on
+     - Log one line per HTTP request. Turn it off when ``/metrics`` scrapes
+       and health probes bury the rest of the log; failed requests are then
+       not logged either.
    * - ``--api-key-file``
      - unset
      - Read a bearer API key from a file. Repeat the option to accept multiple
@@ -1337,6 +1347,8 @@ Environment Variables
    * - ``LMCACHE_LOG_LEVEL``
      - Log level for LMCache (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``).
        Set to ``DEBUG`` to see L2 store activity, prefetch results, etc.
+       Does not change the HTTP server's own log lines; use
+       ``--http-log-level`` and ``--no-http-access-log`` for those.
    * - ``PYTHONHASHSEED``
      - Set to a fixed value for reproducible hashing across processes
        (relevant when using ``--hash-algorithm builtin``).

@@ -7,6 +7,9 @@ import logging
 import os
 import warnings
 
+# The log levels uvicorn accepts for an HTTP server.
+HTTP_LOG_LEVELS = ("critical", "error", "warning", "info", "debug", "trace")
+
 
 def build_format(color):
     reset = "\x1b[0m"

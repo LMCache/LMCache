@@ -61,8 +61,21 @@ def test_main_initializes_metrics_before_serving() -> None:
         "host": config.host,
         "port": config.port,
         "log_level": "info",
+        "access_log": True,
         "timeout_keep_alive": config.timeout_keep_alive,
     }
+
+
+def test_main_applies_http_logging_flags() -> None:
+    _, config, mock_run = _serve(
+        ["--http-log-level", "warning", "--no-http-access-log"]
+    )
+
+    assert config.http_log_level == "warning"
+    assert config.http_access_log is False
+    _, kwargs = mock_run.call_args
+    assert kwargs["log_level"] == "warning"
+    assert kwargs["access_log"] is False
 
 
 def test_main_applies_flags() -> None:

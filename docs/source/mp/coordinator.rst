@@ -132,6 +132,16 @@ keeps the default below.
        (default ``5``), otherwise heartbeat requests may hit a closing
        connection and fail with ``Server disconnected without sending a
        response``.
+   * - ``--http-log-level``
+     - ``info``
+     - Log level of the HTTP server (uvicorn), including its access log:
+       ``critical``, ``error``, ``warning``, ``info``, ``debug`` or
+       ``trace``. ``LMCACHE_LOG_LEVEL`` does not affect these loggers.
+   * - ``--http-access-log`` / ``--no-http-access-log``
+     - on
+     - Log one line per HTTP request. Heartbeats, ``/metrics`` scrapes and
+       ``/directory/keys`` paging each produce a line; turning this off
+       also drops the lines for failed requests.
    * - ``--disable-metrics``
      - off
      - Skip OpenTelemetry metrics initialization. Metrics are on by default;

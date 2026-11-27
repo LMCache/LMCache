@@ -12,7 +12,7 @@ import json
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.logging import HTTP_LOG_LEVELS, init_logger
 from lmcache.v1.common.security.api_key import add_api_key_args
 
 logger = init_logger(__name__)
@@ -191,6 +191,25 @@ class CoordinatorCommand(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--http-log-level",
+            choices=HTTP_LOG_LEVELS,
+            default=None,
+            help=(
+                "Log level of the HTTP server (uvicorn), including its access "
+                "log. LMCACHE_LOG_LEVEL does not affect it (default: info)."
+            ),
+        )
+        parser.add_argument(
+            "--http-access-log",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=(
+                "Log one line per HTTP request, including heartbeats and "
+                "polled endpoints such as /metrics and /directory/keys "
+                "(default: on)."
+            ),
+        )
+        parser.add_argument(
             "--disable-metrics",
             action="store_true",
             default=None,
@@ -333,6 +352,8 @@ class CoordinatorCommand(BaseCommand):
                 ("checkpoint_interval", args.checkpoint_interval),
                 ("metadata_path", args.metadata_path),
                 ("timeout_keep_alive", args.timeout_keep_alive),
+                ("http_log_level", args.http_log_level),
+                ("http_access_log", args.http_access_log),
                 ("otlp_endpoint", args.otlp_endpoint),
             )
             if value is not None
@@ -368,7 +389,8 @@ class CoordinatorCommand(BaseCommand):
             app,
             host=config.host,
             port=config.port,
-            log_level="info",
+            log_level=config.http_log_level,
+            access_log=config.http_access_log,
             timeout_keep_alive=config.timeout_keep_alive,
         )
 
