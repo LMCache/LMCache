@@ -24,6 +24,11 @@ except ImportError:
 import torch
 
 # First Party
+from lmcache.integration.vllm.experimental.token_drop import (
+    LMCacheMPTokenDropRequestState,
+    TokenDropSpec,
+    parse_token_drop_spec,
+)
 from lmcache.integration.vllm.utils import (
     apply_lora_tag,
     apply_mm_hashes_to_token_ids,
@@ -119,6 +124,8 @@ class LMCacheMPRequestTracker:
 
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    token_drop_spec: TokenDropSpec | None = None
+    token_drop_generation: int = 0
     max_offload_tokens: int | None = None
     lookup_started_at: float | None = None
 
@@ -139,13 +146,26 @@ class LMCacheMPRequestTracker:
     # time would put the context length back on the scheduler's critical path.
     packed_tokens: bytearray = field(default_factory=bytearray)
 
-    def __init__(self, request: "Request"):
+    def __init__(self, request: "Request", *, enable_token_drop: bool = False) -> None:
+        """Initialize tracker state from a native request.
+
+        Args:
+            request: Native request and its logical/cache metadata.
+            enable_token_drop: Whether this connector accepts TD request specs.
+
+        Raises:
+            ValueError: Invalid TD envelope if token dropping is enabled.
+        """
         self._request = request
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = apply_lora_tag(
             extract_request_configs_from_request(request), request.lora_request
         )
+        self.token_drop_spec = (
+            parse_token_drop_spec(self.request_configs) if enable_token_drop else None
+        )
+        self.token_drop_generation = 0
         self.max_offload_tokens = (self.request_configs or {}).get(
             "lmcache.max_offload_tokens"
         )
@@ -667,9 +687,13 @@ class LMCacheMPRequestMetadata:
 
 
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize empty transfer and TD metadata for one scheduler step."""
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
+        self.token_drop_requests: list[LMCacheMPTokenDropRequestState] = []
+        self.token_drop_reset_ids: set[str] = set()
+        self.token_drop_finished_ids: set[str] = set()
         self.q_requests: list[LMCacheMPQRequestMetadata] = []
         self.need_flush_before_forward: bool = False
         # Requests whose request_finished returned True since the last step.
@@ -681,8 +705,13 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def add_q_capture_window(self, window: "LMCacheMPQRequestMetadata"):
         self.q_requests.append(window)
 
-    def __len__(self):
-        return len(self.requests)
+    def __len__(self) -> int:
+        return (
+            len(self.requests)
+            + len(self.token_drop_requests)
+            + len(self.token_drop_reset_ids)
+            + len(self.token_drop_finished_ids)
+        )
 
     # For debugging
     def __str__(self):
@@ -721,10 +750,13 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        resident_kv_updates: Request ID to (generation, absolute resident KV
+            length) after synchronized compaction.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    resident_kv_updates: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -742,9 +774,18 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        resident_updates = dict(self.resident_kv_updates)
+        for request_id, update in other.resident_kv_updates.items():
+            if (
+                request_id in resident_updates
+                and resident_updates[request_id] != update
+            ):
+                raise ValueError("Conflicting token-drop resident updates")
+            resident_updates[request_id] = update
         return LMCacheMPWorkerMetadata(
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
             ),
+            resident_kv_updates=resident_updates,
         )

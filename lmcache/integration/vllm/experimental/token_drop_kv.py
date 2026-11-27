@@ -53,3 +53,30 @@ class PagedKVSequenceView:
             self._blocks[:kept_len, None], :, self._offsets[:kept_len, None], heads
         ] = selected
         return kept_len
+
+
+class KVReadView:
+    """Expose only gathered K/V reads to algorithm plugins.
+
+    This is an API boundary, not a sandbox for untrusted Python plugins.
+    Reads use the same GPU gather as PagedKVSequenceView and do not alias
+    the native paged cache. The view is borrowed for the current selection
+    call only; plugins must not retain or access it after that call returns.
+    """
+
+    def __init__(self, view: PagedKVSequenceView) -> None:
+        """Borrow a worker-owned sequence view for one selection call.
+
+        Args:
+            view: Native paged sequence view; the facade does not own or
+                extend the lifetime of the underlying KV allocation.
+        """
+        self._view = view
+
+    def get_keys(self) -> torch.Tensor:
+        """Return gathered keys in request token order."""
+        return self._view.get_keys()
+
+    def get_values(self) -> torch.Tensor:
+        """Return gathered values in request token order."""
+        return self._view.get_values()

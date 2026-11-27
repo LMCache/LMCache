@@ -59,6 +59,13 @@ import zmq
 
 # First Party
 from lmcache.integration.vllm.experimental import LMCacheMPQRequestMetadata, dispatch
+from lmcache.integration.vllm.experimental.token_drop_adapter import (
+    install_token_drop_worker_adapter,
+)
+from lmcache.integration.vllm.experimental.token_drop_scheduler import (
+    TokenDropScheduler,
+    admit_token_drop_request,
+)
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
@@ -90,6 +97,7 @@ from lmcache.integration.vllm.mp_server_launcher import (
     is_mp_server_autostart_enabled,
 )
 from lmcache.integration.vllm.utils import (
+    extract_request_configs_from_request,
     vllm_layout_hints,
 )
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
@@ -683,6 +691,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert vllm_config.kv_transfer_config is not None
         self._can_store = vllm_config.kv_transfer_config.is_kv_producer
+        self._token_drop_enabled = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.experimental.token_dropping", False
+        )
+        if not isinstance(self._token_drop_enabled, bool):
+            raise ValueError("lmcache.experimental.token_dropping must be a boolean")
         self._save_decode_cache = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.save_decode_cache", False
         )
@@ -864,6 +877,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
+            self._token_drop_scheduler = TokenDropScheduler()
             # Boundary-state blocks pinned for each request's unfull-chunk
             # stores, released once the request's stores finish.
             self._pinned_boundary_state_blocks: dict[str, list[int]] = {}
@@ -876,6 +890,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             local_server_url = server_urls[
                 parallel_strategy.vllm_worker_id // ranks_per_node
             ]
+            self._token_drop_worker = None
+            if self._token_drop_enabled:
+                # First Party
+                from lmcache.integration.vllm.experimental.token_drop_worker import (
+                    TokenDropWorker,
+                )
+
+                self._token_drop_worker = TokenDropWorker()
+            self._pending_token_drop_updates: dict[str, tuple[int, int]] = {}
             self.worker_adapter = self.create_lmcache_mp_worker_adapter(
                 server_url=local_server_url,
                 context=zmq_context,
@@ -1017,10 +1040,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
         Initialize with the KV caches. Useful for pre-registering the
-        KV Caches in the KVConnector (e.g. for NIXL).
+        KV Caches in the KVConnector (e.g. for NIXL). If TD is enabled,
+        the worker borrows the same tensors and installs addressing hooks.
 
         Args:
             kv_caches: dictionary of layer names, kv cache
@@ -1045,6 +1069,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        if self._token_drop_worker is not None:
+            self._token_drop_worker.register_kv_caches(kv_caches)
+            install_token_drop_worker_adapter()
         if self._save_unfull_chunk and not isinstance(
             self.worker_adapter.transfer_ctx, LMCacheDrivenTransferContext
         ):
@@ -1111,18 +1138,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
 
-        if len(request_ids) == 0:
-            return
+        if request_ids:
+            event = self.worker_adapter.create_recorded_event()
+            self.worker_adapter.batched_submit_retrieve_requests(
+                request_ids,
+                ops,
+                event,
+                cache_salts=cache_salts,
+                request_configs_list=request_configs_list,
+            )
 
-        event = self.worker_adapter.create_recorded_event()
-
-        self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids,
-            ops,
-            event,
-            cache_salts=cache_salts,
-            request_configs_list=request_configs_list,
-        )
+        # Install Q hooks only after normal RETRIEVE submission succeeds.
+        # vLLM invokes start_load_kv() outside its forward-context finally;
+        # a failed submission must not strand a backend forward override.
+        if self._token_drop_worker is not None:
+            self._token_drop_worker.prepare_forward(
+                forward_context, metadata.token_drop_requests
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -1167,16 +1199,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return
 
-    def wait_for_save(self):
+    def wait_for_save(self) -> None:
         """
         Block until all the save operations is done. This is called
         as the forward context exits to ensure that the async saving
         from save_kv_layer is complete before finishing the forward.
 
         This prevents overwrites of paged KV buffer before saving done.
+        The TD worker completes and synchronizes compaction of private KV
+        before reporting the resident length; ordinary stores remain separate.
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        if self._token_drop_worker is not None:
+            self._pending_token_drop_updates.update(self._token_drop_worker.compact())
 
         request_ids = []
         ops = []
@@ -1229,6 +1265,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and kv_connector_metadata.need_flush_before_forward
         )
         worker_adapter.handle_preemptions(need_flush_before_forward)
+        if self._token_drop_worker is not None and isinstance(
+            kv_connector_metadata, LMCacheMPConnectorMetadata
+        ):
+            self._token_drop_worker.drop_requests(
+                kv_connector_metadata.token_drop_reset_ids
+            )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1246,6 +1288,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        if self._token_drop_worker is not None:
+            completed = self._token_drop_worker.finish_requests(finished_req_ids)
+            metadata = self._get_connector_metadata()
+            assert isinstance(metadata, LMCacheMPConnectorMetadata)
+            # The scheduler can finish a TD request before its first forward,
+            # before the worker has created an algorithm instance.
+            finished_req_ids = (
+                finished_req_ids - completed - metadata.token_drop_finished_ids
+            )
         if self.lazy_offload:
             val = self.worker_adapter.get_finished_with_lazy_offload()
         else:
@@ -1295,14 +1346,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Completion counts and failed request IDs, or None when lazy
             offload is disabled or there are no new results.
         """
+        resident_updates = self._pending_token_drop_updates
+        self._pending_token_drop_updates = {}
         if not self.lazy_offload:
-            return None
+            if not resident_updates:
+                return None
+            return LMCacheMPWorkerMetadata(
+                completed_store_requests={},
+                resident_kv_updates=resident_updates,
+            )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests:
+        if completed_store_requests or failed_store_requests or resident_updates:
             return LMCacheMPWorkerMetadata(
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
+                resident_kv_updates=resident_updates,
             )
         return None
 
@@ -1339,9 +1398,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
         if hasattr(self, "scheduler_adapter"):
-            if self.lazy_offload:
-                self._lazy_offload_manager.log_final_stats()
-            self.scheduler_adapter.shutdown()
+            try:
+                if self.lazy_offload:
+                    self._lazy_offload_manager.log_final_stats()
+                self.scheduler_adapter.shutdown()
+            finally:
+                if self._token_drop_enabled and self._gpu_block_pool is not None:
+                    self._token_drop_scheduler.unbind_block_pool(self._gpu_block_pool)
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":
@@ -1375,6 +1438,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Called by Scheduler after kv_cache_manager is ready."""
         if self.role == KVConnectorRole.SCHEDULER:
             logger.info("Bind GPU block pool in LMCacheMPConnector scheduler")
+            if self._token_drop_enabled:
+                self._token_drop_scheduler.bind_block_pool(gpu_block_pool)
             self._gpu_block_pool = gpu_block_pool
             if self.lazy_offload:
                 self._lazy_offload_manager.bind_block_pool(gpu_block_pool)
@@ -1412,6 +1477,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.token_drop_spec is not None:
+            admit_token_drop_request(
+                request,
+                self._vllm_config,
+                self._kv_cache_config,
+                self._group_tokens_per_block,
+            )
+            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1594,10 +1667,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
-        if not self._eager_prefetch or request.resumable:
+
+        has_token_drop = "lmcache.token_drop" in (
+            extract_request_configs_from_request(request) or {}
+        )
+        if has_token_drop and not self._token_drop_enabled:
+            raise ValueError(
+                "lmcache.token_drop requires lmcache.experimental.token_dropping"
+            )
+        if not has_token_drop and (not self._eager_prefetch or request.resumable):
             return
 
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.token_drop_spec is not None:
+            admit_token_drop_request(
+                request,
+                self._vllm_config,
+                self._kv_cache_config,
+                self._group_tokens_per_block,
+            )
+            return
         if tracker.lookup_started_at is None:
             tracker.lookup_started_at = time.monotonic()
         self.scheduler_adapter.maybe_submit_lookup_request(
@@ -1611,7 +1700,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
-    ):
+    ) -> None:
         """
         Update KVConnector state after block allocation.
 
@@ -1636,6 +1725,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
+        if tracker.token_drop_spec is not None:
+            # Reclaim trims the native request-owned block list in place.
+            # Keep the original wrapper; never copy its inner block list.
+            self._token_drop_scheduler.register_allocation(request.request_id, blocks)
         block_ids = blocks.get_block_ids() or ()
 
         # Only append blocks beyond what's already tracked, per engine group.
@@ -1717,12 +1810,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         metadata = LMCacheMPConnectorMetadata()
         metadata.need_flush_before_forward = _has_preemption_reqs(scheduler_output)
+        if self._token_drop_enabled:
+            self._token_drop_scheduler.prepare_step(scheduler_output, metadata)
         metadata.delay_free_req_ids = self._delay_free_req_ids
         self._delay_free_req_ids = set()
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
+        if self._token_drop_enabled:
+            self._token_drop_scheduler.populate_request_states(
+                scheduler_output, self.request_trackers, metadata
+            )
 
         if self.lazy_offload:
             actions = self._lazy_offload_manager.on_scheduler_step(scheduler_output)
@@ -1739,9 +1838,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         return metadata
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """
-        Update KVConnector state from worker-side connectors output.
+        Update KVConnector state from worker-side connector output.
+
+        Generation-qualified TD reports reclaim native private tails before
+        ordinary lazy-offload completion handling.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
@@ -1751,6 +1853,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for request_id in connector_output.finished_sending or ():
             self._release_boundary_state_blocks(request_id)
 
+        if self._token_drop_enabled:
+            self._token_drop_scheduler.commit_completed_updates(
+                connector_output.kv_connector_worker_meta,
+                self.request_trackers,
+                self._gpu_block_pool,
+                self._group_tokens_per_block[0],
+            )
         if not self.lazy_offload:
             return
         meta = connector_output.kv_connector_worker_meta
@@ -1804,6 +1913,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # request starts over with a new tracker on its next lookup.
         tracker = self.request_trackers.get(request.request_id)
         delay_free = tracker is not None and tracker.store_scheduled
+        is_token_drop = tracker is not None and tracker.token_drop_spec is not None
+        if is_token_drop:
+            self._token_drop_scheduler.finish_request(request.request_id)
 
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
@@ -1822,6 +1934,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 self.scheduler_adapter.end_session(request_id)
             return False, (return_params or None)
 
+        if is_token_drop:
+            return False, (return_params or None)
         # A request preempted after an unfull-chunk store may store nothing
         # after it resumes. Its boundary-state blocks stay pinned until it is
         # reported in finished_sending, so it still delays.
@@ -2014,6 +2128,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 new_request.num_computed_tokens, num_new_tokens
             )
 
+            if request_tracker.token_drop_spec is not None:
+                continue
             if self.transfer_intermediate_tensors:
                 q_window = LMCacheMPQRequestMetadata.BuildQCaptureWindow(
                     request_tracker,
@@ -2072,6 +2188,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 cached_reqs.num_computed_tokens[idx], num_new_tokens
             )
 
+            if request_tracker.token_drop_spec is not None:
+                continue
             if self.transfer_intermediate_tensors:
                 q_window = LMCacheMPQRequestMetadata.BuildQCaptureWindow(
                     request_tracker,
@@ -2200,8 +2318,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 actions = self._lazy_offload_manager.on_request_arrived(request_id)
                 for session_id in actions.sessions_to_end:
                     self.scheduler_adapter.end_session(session_id)
-            new_tracker = LMCacheMPRequestTracker(request)
+            new_tracker = LMCacheMPRequestTracker(
+                request, enable_token_drop=getattr(self, "_token_drop_enabled", False)
+            )
             self._apply_revision_tag(new_tracker)
+            if new_tracker.token_drop_spec is not None:
+                new_tracker.token_drop_generation = (
+                    self._token_drop_scheduler.next_generation()
+                )
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
 
