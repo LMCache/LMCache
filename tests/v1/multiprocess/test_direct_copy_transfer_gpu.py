@@ -9,8 +9,9 @@ the results are compared bit for bit. The plan exercises several chunks, a
 skipped block prefix, a two-kernel-group object (non-zero byte offset in the
 object), a padded MLA block stride, and a small pin-chunk alignment so entries
 are split at the allocator's virtual boundaries. Layers packed side by side in
-every block (vLLM's block-outermost layouts) take the 2-D copy path; those
-tests also check how many copies were issued.
+every block (vLLM's block-outermost layouts) take the 2-D copy path on CUDA
+and merged 1-D entries on ROCm; those tests also check how many copies were
+issued.
 """
 
 # Standard
@@ -456,11 +457,32 @@ def _dsv41_swa_group() -> tuple[list[_Geometry], list[int]]:
     return [g], [g.tight_block_elems]
 
 
+def _packed_tight_groups(bs: int) -> tuple[list[_Geometry], list[int]]:
+    """Two kernel groups sharing every block with no padding between the
+    pages of consecutive layers (layer pitch == block bytes), like Kimi K3.1's
+    indexer and MLA groups. ``bs == _CHUNK_TOKENS`` gives one block per chunk."""
+    fmt = Fmt.NL_X_NB_NH_BS_CS
+    groups = [
+        _Geometry(fmt, nl=5, kv_size=1, nh=1, hs=72, bs=bs),
+        _Geometry(fmt, nl=4, kv_size=1, nh=1, hs=40, bs=bs),
+    ]
+    pads = [g.tight_block_elems for g in groups]
+    block_elems = sum(g.nl * p for g, p in zip(groups, pads, strict=True)) + 24
+    return [replace(g, block_stride_elems=block_elems) for g in groups], pads
+
+
 _BLOCK_OUTER_CASES = {
     "nhd": lambda: _block_outer_groups(Fmt.NL_X_NB_BS_NH_CS),
     "hnd_nh1": lambda: _block_outer_groups(Fmt.NL_X_NB_NH_BS_CS),
     "dsv41_swa": _dsv41_swa_group,
+    "packed_tight_1blk": lambda: _packed_tight_groups(_CHUNK_TOKENS),
+    "packed_tight_4blk": lambda: _packed_tight_groups(_CHUNK_TOKENS // 4),
 }
+# Cases whose 1-D entries merge into one per (kernel group, chunk): one block
+# per chunk and no padding between the layers' pages. With several blocks per
+# chunk, or padded pages, consecutive layer entries are not adjacent on both
+# the host and the device side, so they stay one entry per (layer, block).
+_MERGED_CASES = {"dsv41_swa", "packed_tight_1blk"}
 
 
 @pytest.mark.parametrize("case", sorted(_BLOCK_OUTER_CASES))
@@ -468,7 +490,8 @@ _BLOCK_OUTER_CASES = {
 def test_direct_block_outer_layout_matches_kernel(
     case: str, direction: "lmcache_native.TransferDirection"
 ) -> None:
-    """Layers packed side by side in each block move as split 2-D copies."""
+    """Layers packed side by side in each block move as split 2-D copies on
+    CUDA and as (merged) 1-D entries on ROCm; the bytes match the kernel."""
     device = torch.device("cuda:0")
     groups, pads = _BLOCK_OUTER_CASES[case]()
     base_kernel, paged_kernel = _block_outer_paged(groups, pads, device)
@@ -507,6 +530,55 @@ def test_direct_block_outer_layout_issues_one_copy_per_block(case: str) -> None:
     expected = len(groups) * (_NUM_CHUNKS * blocks_per_chunk - _SKIP_BLOCKS_FIRST_CHUNK)
     num_copies = _direct(groups, paged, host, [ids] * len(groups), H2D, device, 1 << 30)
     assert num_copies == expected
+
+
+@pytest.mark.skipif(
+    torch.version.hip is None, reason="CUDA moves packed rows as 2-D copies"
+)
+@pytest.mark.parametrize("case", sorted(_BLOCK_OUTER_CASES))
+def test_direct_block_outer_layout_1d_entry_count(case: str) -> None:
+    """Without pin-boundary splits, a packed group issues one 1-D entry per
+    chunk when its layer entries are adjacent on both sides (one block per
+    chunk, layer pitch == block bytes), else one per (layer, block). The
+    merged table moves the same bytes as the staged kernel."""
+    device = torch.device("cuda:0")
+    groups, pads = _BLOCK_OUTER_CASES[case]()
+    base_kernel, paged_kernel = _block_outer_paged(groups, pads, device)
+    base_direct = base_kernel.clone()
+    paged_direct = _block_outer_views(base_direct, groups, pads)
+    ids = _block_ids(groups[:1])[0]
+    block_ids = [ids] * len(groups)
+    host_kernel = _pinned_objects(groups, fill=False)
+    host_direct = _pinned_objects(groups, fill=False)
+    blocks_per_chunk = _CHUNK_TOKENS // groups[0].bs
+    blocks = _NUM_CHUNKS * blocks_per_chunk - _SKIP_BLOCKS_FIRST_CHUNK
+    expected = sum(blocks * (1 if case in _MERGED_CASES else g.nl) for g in groups)
+
+    _kernel_reference(groups, paged_kernel, host_kernel, block_ids, D2H, device)
+    num_copies = _direct(
+        groups, paged_direct, host_direct, block_ids, D2H, device, 1 << 30
+    )
+    assert num_copies == expected
+    for a, b in zip(host_kernel, host_direct, strict=True):
+        assert _bitwise_equal(a, b)
+
+    # Restore the stored chunks into a zeroed buffer through the same table.
+    snapshot = base_direct.clone()
+    base_direct.zero_()
+    torch_dev.synchronize(device)
+    num_copies = _direct(
+        groups, paged_direct, host_direct, block_ids, H2D, device, 1 << 30
+    )
+    assert num_copies == expected
+    restored = ids[_SKIP_BLOCKS_FIRST_CHUNK:]
+    paged_snapshot = _block_outer_views(snapshot, groups, pads)
+    for got, want in zip(
+        _flat_paged(paged_direct), _flat_paged(paged_snapshot), strict=True
+    ):
+        assert _bitwise_equal(got[restored], want[restored])
+    # Blocks outside the plan were not written.
+    untouched = sorted(set(range(_NB)) - set(restored))
+    assert int(base_direct[untouched].view(torch.uint8).sum()) == 0
 
 
 @pytest.mark.parametrize(

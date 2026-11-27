@@ -249,8 +249,8 @@ void execute_object_group_transfer(
   #define LMC_HAS_BATCH_MEMCPY 0
 #endif
 
-// The 2-D path (cudaMemcpy3DBatchAsync) is CUDA-only; HIP builds keep one
-// 1-D entry per layer.
+// The 2-D path (cudaMemcpy3DBatchAsync) is CUDA-only; HIP builds issue 1-D
+// entries, one per layer unless adjacent ones merge (see append_split).
 #if LMC_HAS_BATCH_MEMCPY && !defined(USE_ROCM)
   #define LMC_HAS_2D_BATCH_MEMCPY 1
 #else
@@ -352,11 +352,16 @@ inline uintptr_t select_base(const BlockAddressing& addr,
 // pin chunk is a separate cudaHostRegister region; a copy spanning two of
 // them fails with cudaErrorInvalidValue). Same arithmetic as
 // lmcache_memcpy_async.
+// `merge`: extend the previous entry instead of appending when this range
+// starts exactly where that entry ends on both the host and the device side
+// and not on a pin-chunk boundary. The copied bytes are the same either way.
+// The caller sets it only when both ranges lie in one device allocation.
 inline void append_split(std::vector<void*>& dsts, std::vector<void*>& srcs,
                          std::vector<size_t>& sizes, uintptr_t host,
                          uintptr_t dev, size_t nbytes,
                          size_t host_virtual_offset,
-                         size_t host_buffer_alignment, bool is_h2d) {
+                         size_t host_buffer_alignment, bool is_h2d,
+                         bool merge = false) {
   const size_t mask = host_buffer_alignment - 1;
   size_t offset = 0;
   while (offset < nbytes) {
@@ -367,14 +372,24 @@ inline void append_split(std::vector<void*>& dsts, std::vector<void*>& srcs,
     const size_t piece = real_end - offset - host_virtual_offset;
     void* h = reinterpret_cast<void*>(host + offset);
     void* d = reinterpret_cast<void*>(dev + offset);
-    dsts.push_back(is_h2d ? d : h);
-    srcs.push_back(is_h2d ? h : d);
-    sizes.push_back(piece);
+    void* dst = is_h2d ? d : h;
+    void* src = is_h2d ? h : d;
+    if (merge && offset == 0 && !sizes.empty() &&
+        ((host_virtual_offset & mask) != 0) &&
+        reinterpret_cast<uintptr_t>(dsts.back()) + sizes.back() ==
+            reinterpret_cast<uintptr_t>(dst) &&
+        reinterpret_cast<uintptr_t>(srcs.back()) + sizes.back() ==
+            reinterpret_cast<uintptr_t>(src)) {
+      sizes.back() += piece;
+    } else {
+      dsts.push_back(dst);
+      srcs.push_back(src);
+      sizes.push_back(piece);
+    }
     offset += piece;
   }
 }
 
-#if LMC_HAS_2D_BATCH_MEMCPY
 // This function calculates the engine-side pitch of a 2-D copy that moves one
 // block of every layer of a kernel group at once (width = block bytes,
 // height = layers): the byte distance in the engine KV cache from a block of
@@ -413,6 +428,8 @@ size_t uniform_layer_pitch(const BlockAddressing& addr,
       (sd.nl - 1) * pitch + addr.block_bytes <= addr.block_stride;
   return fits_in_block ? pitch : 0;
 }
+
+#if LMC_HAS_2D_BATCH_MEMCPY
 
 // Append one 2-D host<->device copy of `height` rows of `width` bytes (row r
 // at host + r * host_pitch and dev + r * dev_pitch), split like append_split
@@ -574,6 +591,12 @@ size_t execute_direct_copy_transfer(
   // the engine KV cache; non-zero means one 2-D copy moves the block of every
   // layer (see uniform_layer_pitch).
   std::vector<size_t> engine_layer_pitch(group_specs.size());
+  // Whether all layers of the group lie inside one block row (non-zero
+  // uniform_layer_pitch), i.e. in one device allocation. Where the 2-D copy
+  // is unavailable, such a group's 1-D entries are merged when they are
+  // adjacent on both sides: with one block per chunk and a layer pitch equal
+  // to the block bytes, the per-layer entries of a chunk become one.
+  std::vector<char> packed_rows(group_specs.size(), 0);
   for (size_t g = 0; g < group_specs.size(); ++g) {
     const DirectCopyGroupSpec& spec = group_specs[g];
     const PageBufferShapeDesc& sd = spec.shape_desc;
@@ -595,8 +618,10 @@ size_t execute_direct_copy_transfer(
     TORCH_CHECK(spec.paged_layer_ptrs.size() >= ptrs_needed, "group ", g,
                 " has ", spec.paged_layer_ptrs.size(),
                 " paged layer pointers, needs ", ptrs_needed);
+    const size_t layer_pitch = uniform_layer_pitch(addressing[g], spec);
+    packed_rows[g] = layer_pitch > 0;
   #if LMC_HAS_2D_BATCH_MEMCPY
-    engine_layer_pitch[g] = uniform_layer_pitch(addressing[g], spec);
+    engine_layer_pitch[g] = layer_pitch;
   #endif
   }
 
@@ -692,7 +717,8 @@ size_t execute_direct_copy_transfer(
   #endif
             append_split(dsts, srcs, sizes, host, dev, addr.block_bytes,
                          obj.host_offset + (host - obj.host_ptr),
-                         host_buffer_alignment, is_h2d);
+                         host_buffer_alignment, is_h2d,
+                         packed_rows[g] && layer > 0);
           }
         }
       }

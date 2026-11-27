@@ -8,8 +8,9 @@ and real ``LazyMemoryAllocator`` objects, once with the kernel policy and once
 with the direct policy, and requires bit-identical results. It covers the
 planner's use of the host pointer lists, the kernel-group byte offset inside
 the object, the allocator's virtual offsets (objects straddling a 64 MB pin
-chunk are split), ``skip_first_n_tokens`` with a batch of 4, and a Kimi-like
-1024-token MLA geometry.
+chunk are split), ``skip_first_n_tokens`` with a batch of 4, a Kimi-like
+1024-token MLA geometry, and the same geometry with every layer packed in one
+block row (entry count and bytes).
 """
 
 # Standard
@@ -33,6 +34,7 @@ from lmcache.v1.memory_allocators.lazy_memory_allocator import (  # noqa: E402
 )
 from lmcache.v1.memory_management import MemoryObj  # noqa: E402
 from lmcache.v1.multiprocess.object_group_transfer import (  # noqa: E402
+    direct_copy,
     direct_transfer_supported,
     downsample_and_stage_block_ids,
     engines,
@@ -292,6 +294,86 @@ def test_multi_head_hnd_is_not_direct(allocator: LazyMemoryAllocator) -> None:
         objs = _allocate_objects(allocator, ctx, 1, fill=False)
         assert direct_transfer_supported(ctx, 0, objs, [[0]]) is False
         for obj in objs:
+            allocator.free(obj)
+    finally:
+        ctx.close()
+
+
+def _make_packed_context() -> tuple[GPUCacheContext, torch.Tensor, list[torch.Tensor]]:
+    """Kimi-like packed block rows: the 1024-token MLA page of every layer
+    sits side by side in one block row with no padding between pages, a few
+    spare elements at the row end, one block per LMCache chunk."""
+    num_blocks, block_size, head_size = 20, 1024, 576
+    page = block_size * head_size
+    base = torch.rand(
+        [num_blocks, _NUM_LAYERS * page + 64], dtype=_DTYPE, device=_DEVICE
+    )
+    tensors = [
+        base[:, layer * page : (layer + 1) * page].view(
+            num_blocks, block_size, head_size
+        )
+        for layer in range(_NUM_LAYERS)
+    ]
+    ctx = GPUCacheContext(
+        [_FakeIPCWrapper(t) for t in tensors],  # type: ignore
+        lmcache_tokens_per_chunk=block_size,
+        engine_type=EngineType.VLLM,
+    )
+    return ctx, base, tensors
+
+
+def _pin_boundaries_inside(obj: MemoryObj) -> int:
+    """Pin-chunk boundaries strictly inside the object's virtual range."""
+    start = obj.meta.address
+    pin = LazyMemoryAllocator.PIN_CHUNK_SIZE
+    return (start + obj.get_size() - 1) // pin - start // pin
+
+
+def test_packed_rows_one_entry_per_chunk(allocator: LazyMemoryAllocator, monkeypatch):
+    """Layers packed in one block row, one block per chunk: the direct path
+    moves the same bytes as the kernel, and on ROCm (no 2-D copy) each chunk
+    is one 1-D entry instead of one per layer, plus one for every pin-chunk
+    boundary the chunk straddles."""
+    ctx, base, tensors = _make_packed_context()
+    num_chunks = 16
+    assert ctx.calculate_num_blocks(ctx.lmcache_tokens_per_chunk, 0) == 1
+    block_ids = [random.sample(range(ctx.num_blocks), num_chunks)]
+    counts: list[int] = []
+    execute = direct_copy.device_ops.execute_direct_copy_transfer
+
+    def counting_execute(*args):
+        num_entries = execute(*args)
+        counts.append(num_entries)
+        return num_entries
+
+    monkeypatch.setattr(
+        direct_copy.device_ops, "execute_direct_copy_transfer", counting_execute
+    )
+    try:
+        kernel_objs = _allocate_objects(allocator, ctx, num_chunks, fill=False)
+        direct_objs = _allocate_objects(allocator, ctx, num_chunks, fill=False)
+        expected = sum(1 + _pin_boundaries_inside(obj) for obj in direct_objs)
+
+        _run(ctx, block_ids, kernel_objs, D2H, "kernel", 1, 0)
+        assert counts == []  # the kernel path does not use the copy engine
+        _run(ctx, block_ids, direct_objs, D2H, "direct", 1, 0)
+        if torch.version.hip is not None:
+            assert sum(counts) == expected
+        for k, d in zip(kernel_objs, direct_objs, strict=True):
+            assert torch.equal(_object_bytes(k), _object_bytes(d))
+            assert int(_object_bytes(d).sum()) != 0  # something was copied
+
+        # Restore the stored chunks into a zeroed row buffer.
+        snapshot = [t[block_ids[0]] for t in tensors]
+        base.zero_()
+        torch_dev.synchronize()
+        counts.clear()
+        _run(ctx, block_ids, direct_objs, H2D, "direct", ctx.max_batch_size, 0)
+        if torch.version.hip is not None:
+            assert sum(counts) == expected
+        for t, snap in zip(tensors, snapshot, strict=True):
+            assert _bitwise_equal(t[block_ids[0]], snap)
+        for obj in kernel_objs + direct_objs:
             allocator.free(obj)
     finally:
         ctx.close()
