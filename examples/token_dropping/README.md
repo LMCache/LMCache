@@ -69,6 +69,7 @@ released wheel:
 ```sh
 uv venv --python 3.12 && source .venv/bin/activate
 uv pip install torch                        # install torch FIRST
+uv pip install -r requirements/build.txt
 uv pip install -e . --no-build-isolation    # then build LMCache
 ```
 
