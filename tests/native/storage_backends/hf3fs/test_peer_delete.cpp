@@ -55,8 +55,8 @@ int main(int argc, char** argv) {
   store(client, delete_key, payload);
   require(remove_key(peer, delete_key) == std::vector<uint8_t>{1},
           "peer delete failed");
-  require(remove_key(client, delete_key) == std::vector<uint8_t>{0},
-          "delete of a missing file reported success");
+  require(remove_key(client, delete_key) == std::vector<uint8_t>{2},
+          "delete of a missing file was not reported as not found");
   require(exists(client, delete_key) == std::vector<uint8_t>{0},
           "key reported present after delete");
 
