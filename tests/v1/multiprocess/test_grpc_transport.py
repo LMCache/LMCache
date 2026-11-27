@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import Iterator
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -94,6 +95,7 @@ from lmcache.v1.transport.grpc.utils import (
     INITIAL_RECONNECT_BACKOFF_MS,
     MAX_RECONNECT_BACKOFF_MS,
 )
+from lmcache.v1.transport.request_client import RequestClient
 from lmcache.v1.transport.server_module import (
     ServerModuleCallRequest,
     ServerModuleCallResponse,
@@ -147,7 +149,7 @@ class _Calls:
 @pytest.fixture(params=_GRPC_SERVER_MODES)
 def grpc_client(
     request: pytest.FixtureRequest,
-) -> Iterator[tuple[GrpcMultiprocessClient, _Calls]]:
+) -> Iterator[tuple[RequestClient, _Calls]]:
     calls = _Calls()
 
     class FakeModules:
@@ -285,9 +287,7 @@ def grpc_client(
     )
     server = build_grpc_request_server([modules], config)
     server.start()
-    client = GrpcMultiprocessClient(  # type: ignore[abstract]
-        f"grpc://127.0.0.1:{server.bound_port}"
-    )
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{server.bound_port}")
     try:
         yield client, calls
     finally:
@@ -390,7 +390,6 @@ import importlib.abc
 import sys
 
 banned = (
-    "lmcache.v1.client.transport.zmq_impl",
     "lmcache.v1.multiprocess.transport.zmq_impl",
 )
 
@@ -496,7 +495,7 @@ def test_generated_protobuf_type_stubs_are_available() -> None:
 def test_client_channel_bounds_connect_timeout_and_reconnect_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The client channel uses the same reconnect bounds as the ZMQ client."""
+    """The client channel bounds connection timeouts and reconnect backoff."""
     captured: dict[str, Any] = {}
     insecure_channel = grpc.insecure_channel
 
@@ -688,8 +687,31 @@ def test_response_encoder_compiles_its_codec_once(
     assert len(compiled) == after_first
 
 
+def test_tcp_alias_preserves_caller_context() -> None:
+    """A legacy endpoint can ping a gRPC server and leave its caller's context open."""
+
+    class Health:
+        @request_handler()
+        def ping(self, instance_id: int | None) -> bool:
+            return instance_id is None
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=1,
+        max_gpu_workers=1,
+        grpc_server_workers=1,
+    )
+    with closing(server), zmq.Context() as context:
+        server.add_modules([Health()])
+        server.start()
+        url = f"tcp://127.0.0.1:{server.bound_port}"
+        with closing(RequestClientFactory.create(url, context=context)) as client:
+            assert client.ping(None).result(timeout=5) is True
+        assert not context.closed
+
+
 def test_generated_grpc_services_communicate_end_to_end(
-    grpc_client: tuple[GrpcMultiprocessClient, _Calls],
+    grpc_client: tuple[RequestClient, _Calls],
 ) -> None:
     client, calls = grpc_client
     key = IPCCacheServerKey(
@@ -764,7 +786,7 @@ def test_generated_grpc_services_communicate_end_to_end(
 
 
 def test_generated_grpc_server_module_call_round_trips(
-    grpc_client: tuple[GrpcMultiprocessClient, _Calls],
+    grpc_client: tuple[RequestClient, _Calls],
 ) -> None:
     client, _calls = grpc_client
 
@@ -1112,75 +1134,22 @@ def _affinity_workers() -> int:
     return sum(t.name.startswith("grpc-affinity") for t in threading.enumerate())
 
 
-@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
-def test_zmq_client_reports_a_grpc_server_instead_of_waiting(
-    grpc_server_mode: str,
-) -> None:
-    """A ZMQ client pointed at a gRPC server fails its calls with a clear error
-    instead of waiting for them to time out, including a call already sent."""
-    server = build_grpc_request_server(
-        [],
-        MPServerConfig(
-            transport="grpc",
-            host="127.0.0.1",
-            port=0,
-            grpc_server_mode=cast(Any, grpc_server_mode),
-        ),
-    )
-    server.start()
-    client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
-    try:
-        in_flight = client.noop()
-        with pytest.raises(ConnectionError, match="speaks gRPC"):
-            in_flight.result(timeout=10)
-        with pytest.raises(ConnectionError, match="speaks gRPC"):
-            client.noop().result(timeout=2)
-        with pytest.raises(ConnectionError, match="speaks gRPC"):
-            next(client.subscribe_kv_events(1, "model", 0, 16))
-    finally:
-        client.close()
-        server.close()
-
-
-@pytest.mark.parametrize("grpc_server_mode", _GRPC_SERVER_MODES)
-def test_zmq_stream_open_before_grpc_detection_fails(grpc_server_mode: str) -> None:
-    """A stream opened right after connecting is usually already sent when the
-    mismatch is found. It fails with the error instead of ending quietly."""
-    server = build_grpc_request_server(
-        [],
-        MPServerConfig(
-            transport="grpc",
-            host="127.0.0.1",
-            port=0,
-            grpc_server_mode=cast(Any, grpc_server_mode),
-        ),
-    )
-    server.start()
-    try:
-        for _ in range(3):
-            client = RequestClientFactory.create(f"tcp://127.0.0.1:{server.bound_port}")
-            try:
-                stream = client.subscribe_kv_events(1, "model", 0, 16)
-                with pytest.raises(ConnectionError, match="speaks gRPC"):
-                    next(stream)
-            finally:
-                client.close()
-    finally:
-        server.close()
-
-
-def test_client_reports_a_zmq_server_instead_of_waiting() -> None:
+@pytest.mark.parametrize("scheme", ["grpc", "tcp"])
+def test_client_reports_a_zmq_server_instead_of_waiting(scheme: str) -> None:
     """Unary and streaming calls to a ZMQ server fail with a clear error
     instead of waiting for a gRPC server that never comes, including calls
     already in flight."""
     router = zmq.Context.instance().socket(zmq.ROUTER)
     port = router.bind_to_random_port("tcp://127.0.0.1")
-    client = GrpcMultiprocessClient(f"grpc://127.0.0.1:{port}")  # type: ignore[abstract]
+    client = RequestClientFactory.create(f"{scheme}://127.0.0.1:{port}")
     try:
         in_flight = client.noop()
         stream = client.subscribe_kv_events(1, "model", 0, 16)
-        with pytest.raises(ConnectionError, match="speaks ZMQ"):
+        with pytest.raises(
+            ConnectionError, match="speaks ZMQ.*--transport grpc"
+        ) as error:
             in_flight.result(timeout=10)
+        assert "use the deprecated tcp://" not in str(error.value).lower()
         with pytest.raises(ConnectionError, match="speaks ZMQ"):
             next(stream)
         with pytest.raises(ConnectionError, match="speaks ZMQ") as first:

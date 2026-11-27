@@ -11,12 +11,9 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import nullcontext
 from dataclasses import dataclass
 from threading import Event
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 import hashlib
 import time
-
-# Third Party
-import zmq
 
 # First Party
 from lmcache import torch_dev
@@ -211,7 +208,6 @@ class ServerBenchClient:
         self._config = config
         self._log = log
         self._client_index = client_index
-        self._zmq_context: Any | None = None
         self._req_client: "RequestClient | None" = None
         self._workers: list[WorkerContext] = []
         self._transfer_executor: ThreadPoolExecutor | None = None
@@ -657,13 +653,6 @@ class ServerBenchClient:
                 self._log("  [warning] Request client close failed: %s" % exc)
             finally:
                 self._req_client = None
-        if self._zmq_context is not None:
-            try:
-                self._zmq_context.term()
-            except Exception as exc:
-                self._log("  [warning] ZMQ context close failed: %s" % exc)
-            finally:
-                self._zmq_context = None
 
         self._workers.clear()
         self._requests.clear()
@@ -825,12 +814,7 @@ class ServerBenchClient:
             "Connecting to LMCache MP Server at %s (mode=%s) ..."
             % (config.rpc_url, config.mode)
         )
-        self._zmq_context = zmq.Context()
-        self._zmq_context.setsockopt(zmq.LINGER, 0)
-        self._req_client = RequestClientFactory.create(
-            config.rpc_url,
-            context=self._zmq_context,
-        )
+        self._req_client = RequestClientFactory.create(config.rpc_url)
 
         self._chunk_size = _get_chunk_size(self._req_client)
         self._log("Server chunk_size = %d" % self._chunk_size)

@@ -2,7 +2,6 @@
 """Exercise server benchmark CLI behavior without optional runtime dependencies."""
 
 # Standard
-import json
 import subprocess
 import sys
 
@@ -10,18 +9,15 @@ import sys
 import pytest
 
 _PROBE = """
-import json
 import sys
 
-for name in json.loads(sys.argv[1]):
-    sys.modules[name] = None
+sys.modules["torch"] = None
 
 from lmcache.cli.main import main
-main(sys.argv[2:])
+main(sys.argv[1:])
 """
 
 
-@pytest.mark.parametrize("missing", [("torch",), ("zmq",), ("torch", "zmq")])
 @pytest.mark.parametrize(
     "options",
     [
@@ -33,13 +29,10 @@ main(sys.argv[2:])
     ],
     ids=["bare", "rpc-url", "block-allocation", "transfer-timeout", "help"],
 )
-def test_server_bench_without_runtime(
-    missing: tuple[str, ...], options: list[str]
-) -> None:
+def test_server_bench_without_runtime(options: list[str]) -> None:
     """Help remains complete and valid invocations report how to install runtime.
 
     Args:
-        missing: Runtime modules made unavailable in a fresh interpreter.
         options: Arguments passed to the real CLI entry point.
     """
     result = subprocess.run(
@@ -47,7 +40,6 @@ def test_server_bench_without_runtime(
             sys.executable,
             "-c",
             _PROBE,
-            json.dumps(missing),
             "bench",
             "server",
             *options,

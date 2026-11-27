@@ -9,7 +9,6 @@ import threading
 # Third Party
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache.cli.commands.bench.server_bench import client as client_module
@@ -191,7 +190,6 @@ def run_bench(
             return expected
 
         checksum_query = MagicMock(side_effect=query_checksum)
-        monkeypatch.setattr(zmq, "Context", MagicMock())
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(client_module, "_get_chunk_size", lambda _client: 2)
         monkeypatch.setattr(client_module, "KVCacheBuffers", allocate)

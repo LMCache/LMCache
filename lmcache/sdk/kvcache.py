@@ -22,7 +22,7 @@ def connect(
     """Create and initialize the LMCache SDK context.
 
     Args:
-        url: Multiprocess request endpoint. Its scheme selects ZMQ or gRPC.
+        url: gRPC endpoint of the multiprocess server.
         http_url: HTTP endpoint URL for fetching server configuration.
         model_name: Model name used by the running LMCache server instance.
         timeout: Timeout in seconds for blocking MQ calls. Defaults to 60.

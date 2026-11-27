@@ -12,7 +12,7 @@
 # Environment variables (all optional, defaults shown):
 #   LMCACHE_BENCH_TRANSFER_MODE  lmcache_driven|engine_driven
 #                                (default: engine_driven)
-#   LMCACHE_REQUEST_TRANSPORT    zmq|grpc|grpc-aio|grpc-native (default: grpc)
+#   LMCACHE_REQUEST_TRANSPORT    grpc|grpc-aio|grpc-native (default: grpc)
 #   LMCACHE_HTTP_PORT            HTTP port            (default: 18080)
 #   LMCACHE_REQUEST_PORT         request RPC port     (default: 15555)
 #   LMCACHE_LOG_FILE             server log path      (default: /tmp/...)
@@ -47,18 +47,15 @@ esac
 
 # grpc-aio and grpc-native are the gRPC transport served by
 # --grpc-server-mode aio and native.
-TRANSPORT_ARGS=(--transport "${REQUEST_TRANSPORT}")
+TRANSPORT_ARGS=(--transport grpc)
 case "${REQUEST_TRANSPORT}" in
-  zmq) REQUEST_SCHEME="tcp" ;;
-  grpc) REQUEST_SCHEME="grpc" ;;
+  grpc) ;;
   grpc-aio|grpc-native)
-    REQUEST_SCHEME="grpc"
-    TRANSPORT_ARGS=(--transport grpc
-      --grpc-server-mode "${REQUEST_TRANSPORT#grpc-}")
+    TRANSPORT_ARGS+=(--grpc-server-mode "${REQUEST_TRANSPORT#grpc-}")
     ;;
   *)
     echo "!! Unknown LMCACHE_REQUEST_TRANSPORT='${REQUEST_TRANSPORT}'"
-    echo "   Valid values: zmq, grpc, grpc-aio, grpc-native"
+    echo "   Valid values: grpc, grpc-aio, grpc-native"
     exit 1
     ;;
 esac
@@ -147,7 +144,7 @@ echo "==> Running: lmcache bench server" \
 
 BENCH_LOG="${BENCH_OUTPUT_LOG:-/tmp/cpu_server_bench_output.log}"
 "${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" bench server \
-  --rpc-url "${REQUEST_SCHEME}://127.0.0.1:${REQUEST_PORT}" \
+  --rpc-url "grpc://127.0.0.1:${REQUEST_PORT}" \
   --url "http://127.0.0.1:${HTTP_PORT}" \
   --mode cpu \
   --transfer-mode "${TRANSFER_MODE}" \

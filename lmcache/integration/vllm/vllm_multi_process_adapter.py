@@ -14,7 +14,6 @@ import uuid
 # Third Party
 from prometheus_client import Counter, Gauge
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev
@@ -593,7 +592,7 @@ class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
         server_urls: list[str],
-        context: zmq.Context,
+        context: object | None,
         model_name: str,
         vllm_block_size: int,
         parallel_strategy: ParallelStrategy | int,
@@ -608,7 +607,7 @@ class LMCacheMPSchedulerAdapter:
         """
         Args:
             server_urls: LMCache multiprocess request server URLs.
-            context: The ZMQ context
+            context: Legacy caller context, ignored by gRPC.
             model_name: The model name used for LMCache keys
             vllm_block_size: The block size used in vLLM
             parallel_strategy:
@@ -1300,7 +1299,7 @@ class LMCacheMPWorkerAdapter:
     def __init__(
         self,
         server_url: str,
-        context: zmq.Context,
+        context: object | None,
         model_name: str,
         vllm_block_size: int,
         parallel_strategy: ParallelStrategy | int,
@@ -1315,7 +1314,7 @@ class LMCacheMPWorkerAdapter:
 
         Args:
             server_url: LMCache multiprocess request server URL.
-            context: The ZMQ context.
+            context: Legacy caller context, ignored by gRPC.
             model_name: The model name used for LMCache keys.
             vllm_block_size: The block size used in vLLM, or legacy KV world
                 size when ``parallel_strategy`` is an int.

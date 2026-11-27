@@ -71,9 +71,7 @@ needs:
   workflow pauses every stream during ``modify``); a transfer that happens
   during vLLM prefill/decode will fail.
 
-The SDK request client supports gRPC (default) or the deprecated ZMQ. Its ``url``
-scheme and the vLLM connector endpoint must match the server's ``--transport``
-setting.
+The SDK and the vLLM connector both use the gRPC listener.
 
 .. code-block:: bash
 
@@ -128,13 +126,13 @@ Each type of tensor (KV, query intermediate) has its own context.
     import lmcache.sdk as lmc_sdk
 
     kv_ctx = lmc_sdk.kvcache.connect(
-        url="grpc://localhost:6555",        # grpc:// for gRPC; tcp:// for ZMQ
+        url="grpc://localhost:6555",
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,
     )
     q_ctx = lmc_sdk.qcache.connect(
-        url="grpc://localhost:6555",        # grpc:// for gRPC; tcp:// for ZMQ
+        url="grpc://localhost:6555",
         http_url="http://localhost:8080",   # must match --http-port
         model_name="Qwen/Qwen3-8B",
         timeout=60,

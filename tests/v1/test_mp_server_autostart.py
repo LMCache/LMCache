@@ -70,10 +70,10 @@ class FakeFuture:
         return self.result_value
 
 
-class FakeMessageQueueClient:
+class FakeRequestClient:
     """Minimal message queue client double for health checks."""
 
-    instances: list["FakeMessageQueueClient"] = []
+    instances: list["FakeRequestClient"] = []
     future = FakeFuture(True)
 
     def __init__(
@@ -102,9 +102,9 @@ class FakeRequestClientFactory:
     @staticmethod
     def create(
         server_url: str, *, context: object, api_key: str | None = None
-    ) -> FakeMessageQueueClient:
+    ) -> FakeRequestClient:
         """Return a recording client for the endpoint, context and credential."""
-        return FakeMessageQueueClient(server_url, context, api_key)
+        return FakeRequestClient(server_url, context, api_key)
 
 
 def fake_module(name: str, attrs: dict[str, object]) -> ModuleType:
@@ -202,6 +202,19 @@ def test_config_rejects_nonfinite_timeout(timeout: float | str) -> None:
         )
 
 
+def test_config_rejects_zmq_before_launch() -> None:
+    """A manually constructed config must select a listener the probe can reach."""
+    with pytest.raises(ValueError, match="grpc"):
+        MPServerAutostartConfig(
+            enabled=True,
+            host="localhost",
+            port=5555,
+            wait_timeout=90,
+            server_args=(),
+            transport="zmq",
+        )
+
+
 @pytest.mark.parametrize("port", [True, 65536, "65536"])
 def test_config_rejects_invalid_tcp_port(port: int | str) -> None:
     """A server cannot bind a boolean or an out-of-range TCP port."""
@@ -231,9 +244,11 @@ def test_enabled_autostart_rejects_invalid_transport_url(server_url: str) -> Non
         )
 
 
-def test_grpc_url_starts_a_grpc_server(monkeypatch) -> None:
-    """A grpc:// endpoint starts a gRPC server, so its PING and the connector
-    reach the server over the transport the URL names."""
+@pytest.mark.parametrize("scheme", ["grpc", "tcp"])
+def test_grpc_url_starts_a_grpc_server(
+    monkeypatch: pytest.MonkeyPatch, scheme: str
+) -> None:
+    """Both spellings of a gRPC endpoint launch a matching server."""
     configs = []
 
     class FakeLauncher:
@@ -252,7 +267,7 @@ def test_grpc_url_starts_a_grpc_server(monkeypatch) -> None:
             "lmcache.mp.autostart": True,
             "lmcache.mp.autostart.server_args": "--grpc-server-mode aio",
         },
-        server_url="grpc://127.0.0.1:6555",
+        server_url=f"{scheme}://127.0.0.1:6555",
         zmq_context=MagicMock(),
     )
 
@@ -681,11 +696,10 @@ def test_launcher_without_server_package_fails_before_spawning(monkeypatch) -> N
     popen_mock.assert_not_called()
 
 
-@pytest.mark.parametrize("transport", ["grpc", "zmq"])
 def test_launcher_starts_command_and_waits_until_healthy(
-    monkeypatch, transport: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The launcher passes the transport its endpoint names."""
+    """The launcher starts the server and waits for a successful PING."""
     health_results = iter([False, True])
     process = FakeProcess()
     popen_mock = MagicMock(return_value=process)
@@ -695,15 +709,13 @@ def test_launcher_starts_command_and_waits_until_healthy(
         lambda server_url, zmq_context, **_: next(health_results),
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
-    scheme = "grpc" if transport == "grpc" else "tcp"
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": True},
-        server_host=f"{scheme}://localhost",
+        server_host="grpc://localhost",
         server_port=5555,
-        transport=transport,
     )
 
-    MPServerLauncher(config).start(f"{scheme}://localhost:5555", MagicMock())
+    MPServerLauncher(config).start("grpc://localhost:5555", MagicMock())
 
     popen_mock.assert_called_once()
     command = popen_mock.call_args.args[0]
@@ -720,7 +732,7 @@ def test_launcher_starts_command_and_waits_until_healthy(
         "--http-host",
         "localhost",
         "--transport",
-        transport,
+        "grpc",
     ]
 
 
@@ -772,9 +784,9 @@ def test_launcher_early_exit_raises_connection_error(monkeypatch) -> None:
         MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
 
 
-def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
-    FakeMessageQueueClient.instances = []
-    FakeMessageQueueClient.future = FakeFuture(True)
+def test_health_probe_sends_ping_and_closes_client(monkeypatch) -> None:
+    FakeRequestClient.instances = []
+    FakeRequestClient.future = FakeFuture(True)
     patch_mp_health_modules(monkeypatch)
     zmq_context = MagicMock()
 
@@ -784,12 +796,12 @@ def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
         timeout=0.25,
     )
 
-    client = FakeMessageQueueClient.instances[0]
+    client = FakeRequestClient.instances[0]
     assert client.server_url == "tcp://localhost:5555"
     assert client.context is zmq_context
     assert client.closed
     assert client.requests == [None]
-    assert FakeMessageQueueClient.future.timeout == 0.25
+    assert FakeRequestClient.future.timeout == 0.25
 
 
 def test_health_probe_presents_the_configured_api_key(monkeypatch) -> None:
@@ -799,8 +811,8 @@ def test_health_probe_presents_the_configured_api_key(monkeypatch) -> None:
     which is the failure this covers: the key arrives through
     ``lmcache.mp.api_key_file`` and never through the environment.
     """
-    FakeMessageQueueClient.instances = []
-    FakeMessageQueueClient.future = FakeFuture(True)
+    FakeRequestClient.instances = []
+    FakeRequestClient.future = FakeFuture(True)
     patch_mp_health_modules(monkeypatch)
 
     assert launcher_mod.is_mp_server_healthy(
@@ -810,19 +822,19 @@ def test_health_probe_presents_the_configured_api_key(monkeypatch) -> None:
         api_key="server-side-key",
     )
 
-    assert FakeMessageQueueClient.instances[0].api_key == "server-side-key"
+    assert FakeRequestClient.instances[0].api_key == "server-side-key"
 
 
-def test_health_probe_returns_false_on_zmq_ping_timeout(monkeypatch) -> None:
-    FakeMessageQueueClient.instances = []
-    FakeMessageQueueClient.future = FakeFuture(error=TimeoutError())
+def test_health_probe_returns_false_on_ping_timeout(monkeypatch) -> None:
+    FakeRequestClient.instances = []
+    FakeRequestClient.future = FakeFuture(error=TimeoutError())
     patch_mp_health_modules(monkeypatch)
 
     assert not launcher_mod.is_mp_server_healthy(
         "tcp://localhost:5555",
         MagicMock(),
     )
-    assert FakeMessageQueueClient.instances[0].closed
+    assert FakeRequestClient.instances[0].closed
 
 
 def test_shutdown_kills_process_after_terminate_timeout(monkeypatch) -> None:

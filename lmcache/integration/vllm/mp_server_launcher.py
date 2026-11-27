@@ -16,9 +16,6 @@ import subprocess
 import sys
 import time
 
-# Third Party
-import zmq
-
 # First Party
 from lmcache.v1.common.logging import init_logger
 
@@ -31,8 +28,6 @@ _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 _SERVER_PACKAGE = "lmcache.v1.multiprocess"
 _DEFAULT_WAIT_TIMEOUT = 90.0
 _LOCAL_HOSTS = {"localhost", "127.0.0.1"}
-# The URL scheme picks the server transport, so server_args cannot override it.
-_TRANSPORT_BY_SCHEME = {"tcp": "zmq", "grpc": "grpc"}
 _DISALLOWED_SERVER_ARGS = {"--host", "--port", "--http-host", "--transport"}
 _PING_TIMEOUT_SECONDS = 1.0
 _POLL_INTERVAL_SECONDS = 0.5
@@ -64,7 +59,7 @@ def _build_autostart_config_from_url(
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ``grpc://`` or ``tcp://`` (deprecated ZMQ) URL used by the
+        server_url: ``grpc://`` or ``tcp://`` URL used by the
             connector to reach the MP server. A bare ``host:port`` is gRPC.
 
     Returns:
@@ -89,7 +84,7 @@ def _build_autostart_config_from_url(
             )
         server_host, server_port = parsed.hostname, parsed.port
         if (
-            parsed.scheme not in _TRANSPORT_BY_SCHEME
+            parsed.scheme not in ("grpc", "tcp")
             or server_host is None
             or server_port is None
             or parsed.username is not None
@@ -97,7 +92,9 @@ def _build_autostart_config_from_url(
             or parsed.query
             or parsed.fragment
         ):
-            raise ValueError("Expected a local tcp:// or grpc:// host:port endpoint")
+            raise ValueError(
+                "Expected a local gRPC endpoint such as grpc://localhost:5555"
+            )
     except ValueError as exc:
         raise ValueError(
             f"Invalid LMCache MP server URL: {server_url!r}: {exc}"
@@ -107,7 +104,6 @@ def _build_autostart_config_from_url(
         extra_config=extra_config,
         server_host=server_host,
         server_port=server_port,
-        transport=_TRANSPORT_BY_SCHEME[parsed.scheme],
     )
 
 
@@ -254,7 +250,7 @@ class _RequestClientFactory(Protocol):
         self,
         server_url: str,
         *,
-        context: zmq.Context,
+        context: object | None,
         api_key: str | None = None,
     ) -> _RequestClient:
         """Create a transport client for the endpoint and credential."""
@@ -270,6 +266,13 @@ class MPServerAutostartConfig:
     wait_timeout: float
     server_args: tuple[str, ...]
     transport: str = "grpc"
+
+    def __post_init__(self) -> None:
+        """Require a listener compatible with the connector's gRPC client."""
+        if self.transport != "grpc":
+            raise ValueError(
+                f"Unsupported MP autostart transport {self.transport!r}. Use grpc."
+            )
 
     @classmethod
     def from_extra_config(
@@ -287,15 +290,14 @@ class MPServerAutostartConfig:
                 prefixed with grpc:// or tcp://, from the resolved connector
                 endpoint.
             server_port: Port from the connector's resolved server endpoint.
-            transport: Server transport for the connector's endpoint, ``grpc``
-                for ``grpc://`` or ``zmq`` for ``tcp://``.
+            transport: Server transport for an enabled launcher. Must be ``grpc``.
 
         Returns:
             Parsed ``MPServerAutostartConfig``.
 
         Raises:
             ValueError: If a configured value is invalid, including an IPv6 or
-                non-local host when auto-start is enabled.
+                non-local host or a non-gRPC transport when auto-start is enabled.
         """
         enabled = is_mp_server_autostart_enabled(extra_config)
         if not enabled:
@@ -328,10 +330,9 @@ class MPServerAutostartConfig:
         )
 
     def command(self) -> list[str]:
-        """Return the command used to start the HTTP MP server.
+        """Build the HTTP MP server command with the configured request transport.
 
-        The server serves the transport the connector's URL asks for, so the
-        readiness PING and the connector reach it over the same transport.
+        Connector autostart selects gRPC for both ``grpc://`` and ``tcp://`` URLs.
 
         Returns:
             Command arguments suitable for ``subprocess.Popen``.
@@ -367,14 +368,14 @@ class MPServerLauncher:
     def start(
         self,
         server_url: str,
-        zmq_context: zmq.Context,
+        zmq_context: object | None,
         api_key: str | None = None,
     ) -> None:
         """Start the MP server if it is not already reachable.
 
         Args:
             server_url: URL used by the connector to reach the MP server.
-            zmq_context: ZMQ context used for health probing.
+            zmq_context: Legacy caller context, ignored by the gRPC client.
 
         Returns:
             None.
@@ -421,14 +422,14 @@ class MPServerLauncher:
     def wait_until_healthy(
         self,
         server_url: str,
-        zmq_context: zmq.Context,
+        zmq_context: object | None,
         api_key: str | None = None,
     ) -> None:
         """Wait for the MP server to become reachable.
 
         Args:
             server_url: URL used by the connector to reach the MP server.
-            zmq_context: ZMQ context used for health probing.
+            zmq_context: Legacy caller context, ignored by the gRPC client.
 
         Returns:
             None.
@@ -486,7 +487,7 @@ class MPServerLauncher:
     def _wait_until_healthy(
         self,
         server_url: str,
-        zmq_context: zmq.Context,
+        zmq_context: object | None,
         *,
         require_owned_process: bool,
         api_key: str | None = None,
@@ -527,7 +528,7 @@ class MPServerLauncher:
 
 def is_mp_server_healthy(
     server_url: str,
-    zmq_context: zmq.Context,
+    zmq_context: object | None,
     timeout: float = _PING_TIMEOUT_SECONDS,
     api_key: str | None = None,
 ) -> bool:
@@ -535,7 +536,7 @@ def is_mp_server_healthy(
 
     Args:
         server_url: URL of the LMCache MP server (``tcp://`` or ``grpc://``).
-        zmq_context: ZMQ context passed to the client factory.
+        zmq_context: Legacy caller context, ignored by the gRPC client.
         timeout: Maximum seconds to wait for the PING response.
         api_key: Key the probe presents. Without it the probe falls back to the
             environment, which fails when the server takes its key from a file
@@ -566,7 +567,7 @@ def maybe_start_mp_server_from_url(
     *,
     extra_config: object | None,
     server_url: str,
-    zmq_context: zmq.Context,
+    zmq_context: object | None,
     api_key: str | None = None,
 ) -> MPServerLauncher | None:
     """Start the connector's local LMCache MP server when auto-start is enabled.
@@ -574,7 +575,7 @@ def maybe_start_mp_server_from_url(
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
         server_url: URL used by the connector to reach the MP server.
-        zmq_context: ZMQ context used for health probing.
+        zmq_context: Legacy caller context, ignored by the gRPC client.
         api_key: Credential the readiness probe presents.
 
     Returns:
@@ -606,7 +607,7 @@ def wait_for_mp_server_from_url(
     *,
     extra_config: object | None,
     server_url: str,
-    zmq_context: zmq.Context,
+    zmq_context: object | None,
     api_key: str | None = None,
 ) -> None:
     """Wait for the connector's local LMCache MP server when auto-start is enabled.
@@ -614,7 +615,7 @@ def wait_for_mp_server_from_url(
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
         server_url: URL used by the connector to reach the MP server.
-        zmq_context: ZMQ context used for health probing.
+        zmq_context: Legacy caller context, ignored by the gRPC client.
         api_key: Credential the readiness probe presents.
 
     Returns:

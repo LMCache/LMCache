@@ -1115,8 +1115,8 @@ Options
      - Description
    * - ``--rpc-url URL``
      - ``grpc://localhost:5555``
-     - Request endpoint of the MP cache server. A ``tcp://`` URL selects the
-       deprecated ZMQ transport.
+     - gRPC endpoint of the MP cache server. A ``tcp://`` URL is an alias for
+       ``grpc://``.
    * - ``--url URL``
      - ``http://localhost:8080``
      - HTTP endpoint for checksum verification in ``lmcache_driven`` mode.

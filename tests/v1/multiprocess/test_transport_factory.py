@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for scheme-based multiprocess request client selection."""
+"""Tests for multiprocess client endpoints and server transport selection."""
 
 # Standard
 from pathlib import Path
 from unittest.mock import MagicMock
 import importlib
-import warnings
 
 # Third Party
 import grpc
 import pytest
 
 # First Party
-from lmcache.v1.client.transport import factory, grpc_impl, zmq_impl
+from lmcache.v1.client.transport import grpc_impl
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.engine_module import EngineModule
@@ -37,73 +36,10 @@ def clear_key_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(variable, raising=False)
 
 
-@pytest.mark.parametrize(
-    ("server_url", "normalized_url"),
-    [
-        ("TCP://localhost:5555", "tcp://localhost:5555"),
-        ("ipc:///tmp/lmcache.sock", "ipc:///tmp/lmcache.sock"),
-        ("inproc://lmcache", "inproc://lmcache"),
-    ],
-)
-def test_factory_selects_zmq_by_scheme(
-    monkeypatch: pytest.MonkeyPatch,
-    server_url: str,
-    normalized_url: str,
-) -> None:
-    client = MagicMock(name="zmq_request_client")
-    create = MagicMock(return_value=client)
-    context = object()
-    monkeypatch.setattr(zmq_impl, "create_request_client", create)
-
-    result = RequestClientFactory.create(server_url, context=context)
-
-    assert result is client
-    create.assert_called_once_with(normalized_url, context=context, api_key=None)
-
-
-def test_factory_warns_once_that_zmq_is_deprecated(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(factory, "_zmq_deprecation_warned", False)
-    monkeypatch.setattr(zmq_impl, "create_request_client", MagicMock())
-
-    with pytest.warns(DeprecationWarning, match="zmq request transport"):
-        RequestClientFactory.create("tcp://localhost:5555")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        RequestClientFactory.create("tcp://localhost:5556")
-
-
-def test_factory_passes_explicit_zmq_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic clients can provide one request credential explicitly."""
-    client = MagicMock(name="zmq_request_client")
-    create = MagicMock(return_value=client)
-    monkeypatch.setattr(zmq_impl, "create_request_client", create)
-
-    result = RequestClientFactory.create("tcp://localhost:5555", api_key="secret")
-
-    assert result is client
-    create.assert_called_once_with(
-        "tcp://localhost:5555", context=None, api_key="secret"
-    )
-
-
-@pytest.mark.parametrize("variable", KEY_ENV_VARS)
-def test_factory_defers_zmq_environment_resolution_to_client_builder(
-    monkeypatch: pytest.MonkeyPatch,
-    variable: str,
-) -> None:
-    """The transport-specific builder resolves shared environment sources."""
-    monkeypatch.setenv(variable, "http-only-key-or-nonexistent-file")
-    create = MagicMock()
-    monkeypatch.setattr(zmq_impl, "create_request_client", create)
-
-    result = RequestClientFactory.create("tcp://localhost:5555")
-
-    assert result is create.return_value
-    create.assert_called_once_with("tcp://localhost:5555", context=None, api_key=None)
+@pytest.mark.parametrize("server_url", ["ipc:///tmp/lmcache.sock", "inproc://lmcache"])
+def test_removed_zmq_endpoint_explains_migration(server_url: str) -> None:
+    with pytest.raises(ValueError, match="grpc://host:port"):
+        RequestClientFactory.create(server_url)
 
 
 @pytest.mark.parametrize("source", ["cli", *KEY_ENV_VARS])
@@ -139,10 +75,12 @@ def test_request_server_factory_builds_zmq_server_with_configured_keys(
     [
         ("localhost:5555", "grpc://localhost:5555"),
         ("grpc://localhost:5555", "grpc://localhost:5555"),
+        ("tcp://localhost:5555", "grpc://localhost:5555"),
+        ("TCP://localhost:5555", "grpc://localhost:5555"),
         ("GRPC+UNIX:///tmp/lmcache.sock", "grpc+unix:///tmp/lmcache.sock"),
     ],
 )
-def test_factory_selects_grpc_by_scheme(
+def test_factory_normalizes_grpc_endpoint(
     monkeypatch: pytest.MonkeyPatch,
     server_url: str,
     normalized_url: str,
@@ -172,12 +110,6 @@ def test_factory_passes_explicit_grpc_api_key(
     create.assert_called_once_with(
         "grpc://localhost:5555", context=None, api_key="secret"
     )
-
-
-def test_zmq_client_rejects_empty_explicit_api_key() -> None:
-    """An empty explicit credential is a configuration error, not anonymous access."""
-    with pytest.raises(ValueError, match="must not be empty"):
-        zmq_impl.create_request_client("tcp://localhost:5555", api_key="")
 
 
 @pytest.mark.parametrize("server_url", ["", "grpc://", "http://localhost:5555"])

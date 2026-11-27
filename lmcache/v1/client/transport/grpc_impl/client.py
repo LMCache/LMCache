@@ -202,8 +202,7 @@ class GrpcMultiprocessClient(RequestClient):
             return
         self._wrong_transport = (
             f"The server at {self._server_url} speaks ZMQ, not gRPC. Start "
-            "the server with --transport grpc, or use the deprecated "
-            f"tcp://{host}:{port} until it is upgraded."
+            "the server with --transport grpc."
         )
         logger.error("%s", self._wrong_transport)
         with self._pending_lock:

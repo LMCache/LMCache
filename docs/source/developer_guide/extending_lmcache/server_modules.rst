@@ -228,7 +228,7 @@ must stop that sidecar. Do not use
 Envelope client calls
 ---------------------
 
-Both ZMQ and gRPC clients expose ``server_module_call``:
+The gRPC client exposes ``server_module_call``:
 
 .. code-block:: python
 

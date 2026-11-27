@@ -2,14 +2,10 @@
 """Tests for server-module handlers served on the client's affinity thread."""
 
 # Standard
-from typing import Any, Literal
+from typing import Any
 from unittest.mock import MagicMock
 import queue
 import threading
-
-# Third Party
-import pytest
-import zmq
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
@@ -136,16 +132,12 @@ def test_router_status_lists_affinity_methods() -> None:
     }
 
 
-@pytest.mark.parametrize("transport", ["zmq", "grpc"])
-def test_affinity_call_holds_back_later_affinity_requests(
-    transport: Literal["zmq", "grpc"],
-) -> None:
+def test_affinity_call_holds_back_later_affinity_requests() -> None:
     """The call runs on the client's affinity thread, can report progress
     before it returns, and holds back the client's later affinity requests."""
     plugin = _LayerwisePlugin()
     router = _router(plugin)
     config = MPServerConfig(
-        transport=transport,
         host="127.0.0.1",
         port=0,
         max_cpu_workers=1,
@@ -153,12 +145,9 @@ def test_affinity_call_holds_back_later_affinity_requests(
         grpc_server_workers=4,
     )
     server: Any = create_request_server([plugin, router], config)
-    if transport == "grpc":
-        url = f"grpc://127.0.0.1:{server.bound_port}"
-    else:
-        url = server.socket.getsockopt_string(zmq.LAST_ENDPOINT)
+    url = f"grpc://127.0.0.1:{server.bound_port}"
     server.start()
-    client = RequestClientFactory.create(url, context=zmq.Context.instance())
+    client = RequestClientFactory.create(url)
     try:
         affinity_thread = client.noop().result(timeout=5)
         assert "affinity" in affinity_thread

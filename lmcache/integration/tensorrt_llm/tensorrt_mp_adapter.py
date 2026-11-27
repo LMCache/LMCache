@@ -29,7 +29,6 @@ from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 import torch
-import zmq
 
 # First Party
 from lmcache import torch_dev
@@ -97,10 +96,8 @@ class LMCacheMPKvConnectorScheduler(KvCacheConnectorScheduler):
         # request_id -> (all_tokens, num_matched).
         self._pending: dict = {}
 
-        self._zmq_context = zmq.Context()
         self._req_client: RequestClient = RequestClientFactory.create(
             _get_server_url(self._llm_args),
-            context=self._zmq_context,
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
@@ -290,10 +287,8 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
         super().__init__(llm_args)
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
 
-        self._zmq_context = zmq.Context()
         self._req_client: RequestClient = RequestClientFactory.create(
             _get_server_url(self._llm_args),
-            context=self._zmq_context,
         )
         self._mq_timeout = float(
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)

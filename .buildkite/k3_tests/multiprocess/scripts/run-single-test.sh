@@ -54,15 +54,7 @@ export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 engine_configure_defaults
 
-case "${LMCACHE_REQUEST_TRANSPORT}" in
-    zmq) export LMCACHE_REQUEST_SCHEME="tcp" ;;
-    grpc) export LMCACHE_REQUEST_SCHEME="grpc" ;;
-    *)
-        echo "Unknown LMCACHE_REQUEST_TRANSPORT='${LMCACHE_REQUEST_TRANSPORT}'"
-        echo "Valid values: zmq, grpc"
-        exit 1
-        ;;
-esac
+export LMCACHE_REQUEST_SCHEME="grpc"
 
 # gds_smoke enables the GDS L1 NVMe-slab tier
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"

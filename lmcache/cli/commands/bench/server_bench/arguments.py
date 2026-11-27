@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Runtime-independent argument registration for ``lmcache bench server``.
 
-Keep this module free of torch, zmq, and benchmark runtime imports so the
-lightweight CLI can show help and parse options before reporting missing
-runtime dependencies. The dtype help is checked against DTYPE_MAP in tests.
+The lightweight CLI imports this module to show help and parse options before
+loading torch or the benchmark runtime. The dtype help is checked against
+DTYPE_MAP in tests.
 """
 
 # Standard

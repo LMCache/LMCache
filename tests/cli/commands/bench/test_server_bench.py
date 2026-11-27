@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 import argparse
 import gc
@@ -21,10 +21,8 @@ import threading
 import weakref
 
 # Third Party
-import msgspec
 import pytest
 import torch
-import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
@@ -38,6 +36,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _send_lookup,
 )
 from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.custom_types import IPCCacheServerKey
 from lmcache.v1.common.kv_layer_groups import (
     DTYPE_MAP,
     KVLayerGroupInfo,
@@ -45,9 +44,13 @@ from lmcache.v1.common.kv_layer_groups import (
 )
 from lmcache.v1.common.ops_types import PageBufferShapeDesc
 from lmcache.v1.common.token_codec import unpack_token_ids
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_module import EngineModule
+from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+    build_grpc_request_server,
+)
 from lmcache.v1.transport.futures import MessagingFuture
-from lmcache.v1.transport.request_client import RequestClient
-from lmcache.v1.transport.zmq.wire import decode_operation
 
 
 def _make_shape_desc(
@@ -663,17 +666,6 @@ class TestQueryChecksum:
 
 
 # ------------------------------------------------------------------ #
-#  ROUTER endpoint fixture                                             #
-# ------------------------------------------------------------------ #
-
-
-@pytest.fixture
-def router_endpoint() -> str:
-    """Request an ephemeral TCP port when the ROUTER binds."""
-    return "tcp://127.0.0.1:0"
-
-
-# ------------------------------------------------------------------ #
 #  KVCacheBuffers allocation (dtype branching)
 # ------------------------------------------------------------------ #
 
@@ -771,109 +763,33 @@ class TestAllocateKVCache:
 # ------------------------------------------------------------------ #
 
 
-class _LookupRouter:
-    """Fake ROUTER implementing the LOOKUP / QUERY_PREFETCH_STATUS
-    subset of the MP server protocol.
+def test_lookup_and_poll_prefetch_over_grpc() -> None:
+    """A void lookup succeeds and subsequent polls use its request ID."""
+    key = _make_key((1, 9906, 9906), request_id="req-42")
+    polls = iter((None, 5))
 
-    * ``LOOKUP`` replies with **no payload** (void response) — the
-      real server-side handler returns ``None``. Regression for a
-      bug where the client treated the empty frame list as a
-      timeout and printed ``LOOKUP timeout``.
-    * ``QUERY_PREFETCH_STATUS`` accepts a ``request_id`` (str) and
-      returns ``None`` on the first N polls, then a fixed chunk
-      count — exercising both the in-progress and done branches.
-    """
+    class Lookup:
+        @request_handler()
+        def lookup(self, key: IPCCacheServerKey, tp_size: int) -> None:
+            pass
 
-    def __init__(
-        self,
-        endpoint: str,
-        in_progress_polls: int = 1,
-        hit_chunks: int = 3,
-    ) -> None:
-        self._endpoint = endpoint
-        self._in_progress_left = in_progress_polls
-        self._hit_chunks = hit_chunks
-        self.last_query_request_id: str | None = None
-        self._ctx = zmq.Context.instance()
-        self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.bind(endpoint)
-        self.endpoint = self._router.getsockopt_string(zmq.LAST_ENDPOINT)
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        @request_handler()
+        def query_prefetch_status(self, request_id: str) -> int | None:
+            assert request_id == key.request_id
+            return next(polls)
 
-    def start(self) -> None:
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._thread.join(timeout=2)
-        self._router.close(linger=0)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            if not self._router.poll(100, zmq.POLLIN):
-                continue
-            frames = self._router.recv_multipart()
-            identity, uid_f, type_f, *payload = frames
-            operation = decode_operation(type_f)
-            if operation == "lookup":
-                # Void reply: no payload frame.
-                self._router.send_multipart([identity, uid_f, type_f])
-            elif operation == "query_prefetch_status":
-                req_id = msgspec.msgpack.decode(payload[0], type=str)
-                self.last_query_request_id = req_id
-                if self._in_progress_left > 0:
-                    self._in_progress_left -= 1
-                    body = msgspec.msgpack.encode(None)
-                else:
-                    body = msgspec.msgpack.encode(self._hit_chunks)
-                self._router.send_multipart([identity, uid_f, type_f, body])
-
-
-class TestLookupProtocol:
-    def _make_client(self, endpoint: str) -> RequestClient:
-        ctx = zmq.Context.instance()
-        return RequestClientFactory.create(endpoint, context=ctx)
-
-    def test_send_lookup_void_reply_is_success(
-        self,
-        router_endpoint: str,
-    ) -> None:
-        """LOOKUP handler returns None (void) — must not be timeout."""
-        router = _LookupRouter(router_endpoint)
-        router.start()
-        try:
-            client = self._make_client(router.endpoint)
-            key = _make_key((1, 9906, 9906), request_id="req-void")
-            assert _send_lookup(client, key) is True
-            client.close()
-        finally:
-            router.stop()
-
-    def test_poll_prefetch_status_uses_request_id(
-        self,
-        router_endpoint: str,
-    ) -> None:
-        """QUERY_PREFETCH_STATUS payload is keyed by request_id str."""
-        router = _LookupRouter(
-            router_endpoint,
-            in_progress_polls=2,
-            hit_chunks=5,
+    config = MPServerConfig(host="127.0.0.1", port=0, grpc_server_mode="sync")
+    server = build_grpc_request_server([cast(EngineModule, Lookup())], config)
+    server.start()
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{server.bound_port}")
+    try:
+        assert _send_lookup(client, key)
+        assert (
+            _poll_prefetch_status(client, "req-42", max_polls=2, poll_interval=0) == 5
         )
-        router.start()
-        try:
-            client = self._make_client(router.endpoint)
-            hit = _poll_prefetch_status(
-                client,
-                "req-42",
-                max_polls=10,
-                poll_interval=0.0,
-            )
-            assert hit == 5
-            assert router.last_query_request_id == "req-42"
-            client.close()
-        finally:
-            router.stop()
+    finally:
+        client.close()
+        server.close()
 
 
 # ------------------------------------------------------------------ #
@@ -985,7 +901,6 @@ class TestClientMultiWorker:
             client_module, "create_transfer_context", lambda *a, **kw: context
         )
         monkeypatch.setattr(torch_dev, "is_available", lambda: True)
-        monkeypatch.setattr(zmq, "Context", MagicMock)
         monkeypatch.setattr(RequestClientFactory, "create", MagicMock())
         monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
         monkeypatch.setattr(
@@ -1070,8 +985,6 @@ class TestClientMultiWorker:
         )
         register.side_effect = [ready, timed_out]
         unregister.return_value = ready
-        context = MagicMock()
-        monkeypatch.setattr(zmq, "Context", lambda: context)
         monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
         monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 16)
         monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
@@ -1099,7 +1012,6 @@ class TestClientMultiWorker:
 
         assert unregister.call_args_list == [call(1000), call(1001)]
         transport.close.assert_called_once_with()
-        context.term.assert_called_once_with()
         gc.collect()
         assert all(ref() is None for ref in tensor_refs)
 
@@ -1131,14 +1043,6 @@ class TestClientMultiWorker:
         transfer_calls: list[tuple[Any, ...]] = []
         tensor_refs: list[weakref.ReferenceType[torch.Tensor]] = []
         lifetimes: list[tuple[str, bool]] = []
-
-        class FakeContext:
-            def setsockopt(self, option: int, value: int) -> None:
-                """Accept socket defaults without creating a real socket."""
-                pass
-
-            def term(self) -> None:
-                pass
 
         class FakeClient:
             def lookup(self, *payloads: Any) -> SimpleNamespace:
@@ -1247,7 +1151,6 @@ class TestClientMultiWorker:
             return FakeTransferContext(instance_id, req_client)
 
         monkeypatch.setattr(client_module, "KVCacheBuffers", fake_allocate)
-        monkeypatch.setattr(zmq, "Context", FakeContext)
         monkeypatch.setattr(
             RequestClientFactory,
             "create",
@@ -1516,7 +1419,6 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
     transport.unregister_kv_cache.return_value = ready
     transport.store.return_value = raw_future
     transport.retrieve.return_value = raw_future
-    monkeypatch.setattr(zmq, "Context", MagicMock)
     monkeypatch.setattr(RequestClientFactory, "create", lambda *a, **kw: transport)
     monkeypatch.setattr(client_module, "_get_chunk_size", lambda client: 2)
     monkeypatch.setattr(

@@ -16,7 +16,6 @@ import uuid
 
 # Third Party
 import torch
-import zmq
 
 # First Party
 from lmcache.v1.client.chunk_hashes import ChunkHashCache
@@ -142,7 +141,7 @@ class AtomMPSchedulerAdapter:
     def __init__(
         self,
         server_url: str,
-        context: zmq.Context,
+        context: object | None,
         model_name: str,
         block_size: int,
         parallel_config: AtomMPParallelConfig,
@@ -150,6 +149,20 @@ class AtomMPSchedulerAdapter:
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         client_chunk_hashes: bool = False,
     ) -> None:
+        """Connect the scheduler and align the server minimum to an ATOM block.
+
+        Args:
+            server_url: Multiprocess server request endpoint.
+            context: Legacy caller-owned context. gRPC ignores it.
+            model_name: Model identifier used in cache keys.
+            block_size: Number of tokens in an ATOM cache block.
+            parallel_config: ATOM parallel ranks and world sizes.
+            mq_timeout: Timeout in seconds for blocking requests.
+            client_chunk_hashes: Accept precomputed chunk hashes for cache keys.
+
+        Raises:
+            ValueError: If the request endpoint is invalid or unsupported.
+        """
         client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
         self._parallel = parallel_config
@@ -357,7 +370,7 @@ class AtomMPWorkerAdapter:
     def __init__(
         self,
         server_url: str,
-        context: zmq.Context,
+        context: object | None,
         model_name: str,
         block_size: int,
         parallel_config: AtomMPParallelConfig,
@@ -367,6 +380,22 @@ class AtomMPWorkerAdapter:
         transfer_mode: str | None = None,
         client_chunk_hashes: bool = False,
     ) -> None:
+        """Connect the worker and initialize its cache transfer state.
+
+        Args:
+            server_url: Multiprocess server request endpoint.
+            context: Legacy caller-owned context. gRPC ignores it.
+            model_name: Model identifier used in cache keys.
+            block_size: Number of tokens in an ATOM cache block.
+            parallel_config: ATOM parallel ranks and world sizes.
+            mq_timeout: Timeout in seconds for blocking requests.
+            heartbeat_interval: Seconds between worker liveness probes.
+            transfer_mode: Server transfer mode to use when registering KV caches.
+            client_chunk_hashes: Accept precomputed chunk hashes for cache keys.
+
+        Raises:
+            ValueError: If the request endpoint is invalid or unsupported.
+        """
         client = RequestClientFactory.create(server_url, context=context)
         self._model_name = model_name
         self._block_size = block_size

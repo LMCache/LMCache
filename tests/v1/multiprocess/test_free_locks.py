@@ -5,6 +5,7 @@ server handler, and client-side adapter API.
 """
 
 # Standard
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 # Third Party
@@ -24,8 +25,13 @@ from lmcache.v1.distributed.api import (
     ShardReplicationDesc,
 )
 from lmcache.v1.mp_observability.event import EventType
+from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
+    build_grpc_request_server,
+)
 from lmcache.v1.transport.rpc import get_rpc_spec
 
 # Test helpers
@@ -33,15 +39,13 @@ from tests.v1.mp_scheduler_adapter_test_utils import (
     make_request_client,
     make_scheduler_adapter,
 )
-from tests.v1.multiprocess.test_mq import (
-    create_cache_key,
-)
-from tests.v1.multiprocess.transport_test_utils import (
-    REQUEST_TRANSPORTS,
-    RequestTransport,
-    request_server_url,
-    start_lookup_request_server,
-)
+
+
+def _cache_key() -> IPCCacheServerKey:
+    return IPCCacheServerKey.from_token_ids(
+        "testmodel", 1, 0, [0] * 256, start=0, end=256, request_id="test_request_0"
+    )
+
 
 # ============================================================================
 # Protocol definition tests
@@ -84,17 +88,14 @@ class _FreeLocksHandler:
         self.call = (key, tp_size, extra_ranges)
 
 
-@pytest.mark.parametrize("request_transport", REQUEST_TRANSPORTS)
-def test_free_locks_request_transport(request_transport: RequestTransport) -> None:
-    """FREE_LOOKUP_LOCKS round-trips over every request transport."""
-    key = create_cache_key(0)
+def test_free_locks_request_transport() -> None:
+    """FREE_LOOKUP_LOCKS round-trips over gRPC."""
+    key = _cache_key()
     handler = _FreeLocksHandler()
-    server_url = request_server_url(
-        request_transport,
-        15570 if request_transport == "zmq" else 15571,
-    )
-    server = start_lookup_request_server(request_transport, server_url, handler)
-    client = RequestClientFactory.create(server_url)
+    config = MPServerConfig(host="127.0.0.1", port=0)
+    server = build_grpc_request_server([cast(EngineModule, handler)], config)
+    server.start()
+    client = RequestClientFactory.create(f"grpc://127.0.0.1:{server.bound_port}")
     try:
         assert client.free_lookup_locks(key, 1, ((256, 512),)).result(timeout=5) is None
         assert handler.call is not None
@@ -168,7 +169,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     module = LookupModule(ctx)
 
     # Build a key
-    key = create_cache_key(0).no_worker_id_version()
+    key = _cache_key().no_worker_id_version()
 
     sentinel_obj_keys = [MagicMock()]
     with patch(

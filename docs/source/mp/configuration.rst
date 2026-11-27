@@ -202,7 +202,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--kv-event-log-size``
      - ``32768``
      - CPU store-completion and eviction records retained for subscriptions
-       and reconnects. The scheduler receives pushes over ZMQ or gRPC and republishes
+       and reconnects. The scheduler receives pushes over gRPC and republishes
        them as KV events. ``0`` disables the channel. The channel requires
        the observability event bus, which ``--disable-observability`` turns
        off. When vLLM KV events are enabled, its scheduler subscribes to every
@@ -929,10 +929,8 @@ vLLM Client Configuration
 --------------------------
 
 On the vLLM side, specify the LMCache server host and port via the
-``kv_connector_extra_config`` parameter. The URL scheme selects the request
-transport: use ``grpc://`` for gRPC (the default) or ``tcp://`` for ZMQ,
-matching the server's ``--transport`` setting. A bare host is accepted and
-normalized to ``grpc://``; ``tcp://`` keeps working until ZMQ is removed:
+``kv_connector_extra_config`` parameter. Use a gRPC listener with a bare host,
+``grpc://``, or the legacy ``tcp://`` alias:
 
 .. code-block:: bash
 
@@ -1129,7 +1127,7 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - ``lmcache.mp.host``
      - ``grpc://localhost``
      - Single-server deployment: request transport and host of the LMCache MP
-       server. Use ``grpc://`` for gRPC (default) or ``tcp://`` for ZMQ. A
+       server. Both ``grpc://`` and ``tcp://`` use gRPC. A
        bare ``localhost`` / ``127.0.0.1`` is normalized to ``grpc://`` by the
        connector. Ignored when ``lmcache.mp.server_urls`` is set.
    * - ``lmcache.mp.port``
@@ -1173,11 +1171,8 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
      - Whether vLLM worker 0 should start a local ``lmcache server`` process
        before workers connect to it. Other local workers wait for the server to
        become reachable. Only ``localhost`` and ``127.0.0.1`` are supported.
-       The URL scheme picks the server transport: ``grpc://`` or a host
-       without a scheme starts a gRPC server, and ``tcp://`` starts a
-       deprecated ZMQ server.
-       IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup
-       for either transport.
+       A bare host, ``grpc://``, and ``tcp://`` all start a gRPC server.
+       IPv6 endpoints, including ``::1``, raise ``ValueError`` before startup.
        Auto-start supports exactly one server endpoint; configuring
        multiple ``lmcache.mp.server_urls`` raises ``ValueError`` during
        connector initialization.

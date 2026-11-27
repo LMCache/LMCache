@@ -166,21 +166,20 @@ def test_run_cache_server_closes_engine_when_peer_listener_build_fails(
 
 
 @pytest.mark.parametrize(
-    ("worker_transport", "peer_mode"),
+    ("peer_mode", "fixed_port"),
     [
-        ("zmq", "sync"),
-        ("zmq", "aio"),
-        pytest.param("zmq", "native", marks=requires_pygrpc_native),
-        ("grpc", "sync"),
+        ("sync", True),
+        ("aio", False),
+        pytest.param("native", False, marks=requires_pygrpc_native),
     ],
 )
 def test_independent_peer_channel(
-    worker_transport: Literal["zmq", "grpc"],
+    fixed_port: bool,
     peer_mode: Literal["sync", "aio", "native"],
     unused_tcp_port_factory: Callable[[], int],
     tmp_path: Path,
 ) -> None:
-    """P2P has its own port and lifetime with either worker transport."""
+    """The P2P listener has its own port and lifetime."""
     keys = [ObjectKey(b"chunk", "model", 0)]
     layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
     addresses = [TransferChannelAddress(offset=8, size=16)]
@@ -235,12 +234,11 @@ def test_independent_peer_channel(
     key_file = tmp_path / "key"
     key_file.write_text("secret\n")
     parser = add_p2p_args(argparse.ArgumentParser())
-    peer_port = unused_tcp_port_factory() if worker_transport == "grpc" else 0
+    peer_port = unused_tcp_port_factory() if fixed_port else 0
     args = ["--p2p-rpc-port", str(peer_port)] if peer_port else []
     p2p_config = parse_args_to_p2p_config(parser.parse_args(args))
     assert p2p_config.rpc_port == peer_port
     config = MPServerConfig(
-        transport=worker_transport,
         grpc_server_mode=peer_mode,
         host="127.0.0.1",
         port=unused_tcp_port_factory(),
@@ -264,9 +262,8 @@ def test_independent_peer_channel(
     peer_url = f"grpc://127.0.0.1:{peer_port}"
     worker = create_request_server(modules_for_service(modules, "worker"), config)
     worker.start()
-    scheme = "tcp" if worker_transport == "zmq" else "grpc"
     worker_client = RequestClientFactory.create(
-        f"{scheme}://127.0.0.1:{config.port}", api_key="secret"
+        f"grpc://127.0.0.1:{config.port}", api_key="secret"
     )
     client = P2PClient(peer_url, api_key="secret")
     unauthorized = P2PClient(peer_url, api_key="wrong")
