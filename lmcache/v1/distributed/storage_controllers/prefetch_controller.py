@@ -17,6 +17,8 @@ releasing a request at any point is a walk over its maps.
 
 # Standard
 from collections import Counter, defaultdict, deque
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import enum
@@ -26,8 +28,8 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.logging import init_logger
-from lmcache.utils import get_size_bytes
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import get_size_bytes
 from lmcache.v1.distributed.api import (
     FetchingPolicy,
     GroupedObjectKeys,
@@ -35,12 +37,13 @@ from lmcache.v1.distributed.api import (
     MemoryTags,
     ObjectKey,
     PrefetchLockMode,
+    PrefetchPriority,
     PrefetchResult,
     PrefetchTaskSpec,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_grouped
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.internal_api import L1ManagerInterface, L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.storage_controller import StorageControllerInterface
 from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
@@ -136,6 +139,32 @@ def _gather_keys(
     return [
         key for _group, keys in _gather_keys_by_row(key_groups, bitmaps) for key in keys
     ]
+
+
+def _gather_keys_by_chunk(
+    key_groups: list[GroupedObjectKeys],
+    bitmaps: Bitmap2D,
+) -> list[ObjectKey]:
+    """Gather selected keys in chunk order for eviction recency.
+
+    Use the original bitmap positions so sparse or sliding-window rows
+    stay aligned. Prefix-preserving eviction gives earlier input keys
+    higher recency, so each chunk must precede the next across all rows.
+
+    Args:
+        key_groups: The request's chunk-ordered key rows.
+        bitmaps: Selection grid with the same rows and widths as key_groups.
+
+    Returns:
+        Selected keys in increasing chunk order, preserving the input row
+        order within each chunk.
+    """
+    _, num_chunks = bitmaps.size()
+    keys_by_chunk: list[list[ObjectKey]] = [[] for _ in range(num_chunks)]
+    for group, bitmap in zip(key_groups, bitmaps, strict=True):
+        for chunk_idx in bitmap.get_indices_list():
+            keys_by_chunk[chunk_idx].append(group.keys[chunk_idx])
+    return [key for chunk_keys in keys_by_chunk for key in chunk_keys]
 
 
 def _gather_keys_by_row(
@@ -270,6 +299,7 @@ def _reserve_l1_cells(
     cells: Bitmap2D,
     retain: dict[ObjectKey, bool],
     tag: str,
+    allow_resident: bool,
 ) -> tuple[Bitmap2D, dict[ObjectKey, "MemoryObj"], int]:
     """Reserve a staging buffer in one L1 manager for every cell in ``cells``.
 
@@ -283,6 +313,10 @@ def _reserve_l1_cells(
         retain: Whether each key in ``cells`` stays resident after the
             reader is done.
         tag: The writer tag for the reservations.
+        allow_resident: Also stage keys already resident in ``l1_manager``;
+            admission then read-locks the resident copy. Pass ``True`` only
+            for an L1 the request may read, as the lock pass covers only
+            those: a resident key there landed after the lock pass.
 
     Returns:
         The tuple of (L1 reserve result, reserved objects, failed count).
@@ -304,6 +338,7 @@ def _reserve_l1_cells(
             is_temporary=[not retain[key] for key in keys],
             layout_desc=group.layout_desc,
             tag=tag,
+            allow_resident=allow_resident,
         )
         for col, key in zip(cols, keys, strict=True):
             error, mem_obj = results[key]
@@ -335,8 +370,8 @@ def _reserve_l1_cells(
             )
         )
     if contended_keys:
-        # The key became resident in L1 after the lock pass; the caller
-        # falls back to the L1-only hit.
+        # The key is resident in an L1 this request may not read, so it can
+        # neither be reused nor loaded there again; the caller drops it.
         event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_FAILED,
@@ -499,6 +534,37 @@ class InFlightPrefetchRequest:
         return not self.inflight_load_tasks
 
 
+class _AdmissionWakeListener(L1ManagerListener):
+    """Wake blocked prefetches after L1 readers, writers or eviction free capacity."""
+
+    def __init__(self, wake: Callable[[], None]) -> None:
+        self._wake = wake
+
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+        if keys:
+            self._wake()
+
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
+        if keys:
+            self._wake()
+
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+        if keys:
+            self._wake()
+
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
+
 class PrefetchController(StorageControllerInterface):
     """
     Asynchronously prefetches data from L2 adapters into L1 memory.
@@ -527,9 +593,11 @@ class PrefetchController(StorageControllerInterface):
         l2_adapters: List of L2 adapter instances.
         adapter_descriptors: Descriptors for each L2 adapter (same order).
         policy: The prefetch policy for load plan and retention decisions.
-        inflight_watermark: Fraction of an L1 manager's capacity that
-            in-flight prefetch requests may stage before new requests wait,
-            in ``(0, 1]``.
+        inflight_watermark: Fraction of an L1 manager's capacity, in
+            ``(0, 1]``, that prefetch may hold before new requests wait:
+            buffers being staged, lookups not yet planned, and loaded
+            objects still read-locked for a request that has not consumed
+            them.
     """
 
     # Singleton dispatch for the in-flight load gauges: tests may construct
@@ -583,6 +651,10 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = deque()
+        # HIGH-priority requests: none of the NORMAL ones starts while one waits.
+        self._high_priority_queue: deque[tuple[PrefetchRequestId, PrefetchTaskSpec]] = (
+            deque()
+        )
 
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
@@ -648,6 +720,7 @@ class PrefetchController(StorageControllerInterface):
                 ),
             )
 
+        self._admission_listener = _AdmissionWakeListener(self._wake_pending_admission)
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
             target=self._prefetch_loop,
@@ -758,6 +831,7 @@ class PrefetchController(StorageControllerInterface):
             "inflight_watermark": self._inflight_watermark,
             "submission_queue_size": submission_queue_size,
             "pending_queue_size": len(self._pending_queue),
+            "high_priority_queue_size": len(self._high_priority_queue),
             "in_flight_request_count": len(in_flight),
             "lookup_phase_count": lookup_phase_count,
             "load_phase_count": len(in_flight) - lookup_phase_count,
@@ -833,10 +907,22 @@ class PrefetchController(StorageControllerInterface):
     # Lifecycle
     # =========================================================================
 
+    def _wake_pending_admission(self) -> None:
+        # A blocked head stays in the queue until admitted. New requests wake
+        # the loop themselves, so a release with empty queues needs no syscall.
+        if self._high_priority_queue or self._pending_queue:
+            self._submission_efd.notify()
+
     def start(self) -> None:
         """Start the background prefetch loop thread."""
         logger.info("Starting PrefetchController...")
-        self._thread.start()
+        # Roll back registrations if a later manager or thread startup fails.
+        with ExitStack() as rollback:
+            for manager in self._l1_managers.values():
+                manager.register_listener(self._admission_listener)
+                rollback.callback(manager.unregister_listener, self._admission_listener)
+            self._thread.start()
+            rollback.pop_all()
 
     def stop(self) -> None:
         """
@@ -848,6 +934,8 @@ class PrefetchController(StorageControllerInterface):
         self._stop_flag.set()
         self._submission_efd.notify()
         self._thread.join()
+        for manager in self._l1_managers.values():
+            manager.unregister_listener(self._admission_listener)
         self._cleanup_in_flight_requests()
         self._submission_efd.close()
         self._adapter_ctrl_efd.close()
@@ -1091,20 +1179,28 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _drain_submission_queue(self) -> None:
-        """Move items from the thread-safe submission queue to the
-        pending queue."""
+        """Move items from the thread-safe submission queue to the pending
+        and high-priority queues."""
         with self._submission_lock:
             items = self._submission_queue
             self._submission_queue = []
-        self._pending_queue.extend(items)
+        for item in items:
+            if item[1].priority == PrefetchPriority.HIGH:
+                self._high_priority_queue.append(item)
+            else:
+                self._pending_queue.append(item)
 
     def _start_pending_requests(self) -> None:
-        """Start pending requests in arrival order while L1 can admit the
-        head of the queue (see ``_can_admit_new_prefetch``)."""
-        while self._pending_queue and self._can_admit_new_prefetch(
-            self._pending_queue[0][1]
-        ):
-            request_id, spec = self._pending_queue.popleft()
+        """Start queued requests while L1 can admit them (see
+        ``_can_admit_new_prefetch``): ``HIGH`` priority first, in arrival
+        order, then ``NORMAL`` ones, none of which starts while a ``HIGH`` one
+        waits.
+        """
+        while self._high_priority_queue or self._pending_queue:
+            queue = self._high_priority_queue or self._pending_queue
+            if not self._can_admit_new_prefetch(queue[0][1]):
+                return
+            request_id, spec = queue.popleft()
             try:
                 self._start_lookup_phase(request_id, spec)
             except Exception:
@@ -1119,11 +1215,13 @@ class PrefetchController(StorageControllerInterface):
         The request can be admitted when both of the following conditions
         are met:
 
-        1. staging bytes + lookup bytes < ``inflight_watermark`` * capacity.
+        1. staging bytes + lookup bytes + prefetch-locked bytes + request bytes
+           <= ``inflight_watermark`` * capacity.
         2. free bytes - lookup bytes >= request bytes.
 
-        With no request in flight, ``spec`` is admitted regardless, so a
-        request that can never fit does not block the queue.
+        With no request in flight and no prefetch-locked bytes, ``spec`` is admitted
+        regardless, so a request that can never fit does not block the
+        queue.
 
         Args:
             spec: The request at the head of the pending queue.
@@ -1131,8 +1229,6 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             True if ``spec`` may start.
         """
-        if not self._in_flight_requests:
-            return True
         request_bytes = _get_max_load_bytes(spec.key_groups)
         lookup_bytes = sum(
             request.get_max_load_bytes()
@@ -1144,13 +1240,19 @@ class PrefetchController(StorageControllerInterface):
             for adapter_idx in self._l2_adapters
             if adapter_idx not in self._draining
         }
+        idle = not self._in_flight_requests
         for l1_idx in target_l1_indices:
             l1_manager = self._l1_managers[l1_idx]
             used_bytes, total_bytes = l1_manager.get_memory_usage()
             if total_bytes == 0:
                 continue  # a shadow L1: views cost no local bytes
-            staged_bytes = l1_manager.get_staging_memory_usage() + lookup_bytes
-            if staged_bytes >= self._inflight_watermark * total_bytes:
+            locked_bytes = l1_manager.get_prefetch_locked_bytes()
+            if idle and locked_bytes == 0:
+                continue  # nothing of prefetch's to wait for in this L1
+            held_bytes = (
+                l1_manager.get_staging_memory_usage() + lookup_bytes + locked_bytes
+            )
+            if held_bytes + request_bytes > self._inflight_watermark * total_bytes:
                 return False
             if total_bytes - used_bytes - lookup_bytes < request_bytes:
                 return False
@@ -1246,11 +1348,17 @@ class PrefetchController(StorageControllerInterface):
                     ).items()
                 }
                 res_bitmap = Bitmap(len(flattened_keys))
+                locked_keys: list[ObjectKey] = []
                 for i, key in enumerate(flattened_keys):
                     error, _obj = result[key]
                     if error != L1Error.SUCCESS:
                         continue
                     res_bitmap.set(i)
+                    locked_keys.append(key)
+                # Hits stay pinned for the request until it is consumed, like
+                # loads from L2, so they count against the watermark too.
+                if locked_keys:
+                    l1_manager.track_prefetch_locked(locked_keys)
                 l1_found_bitmap = _scatter_bitmaps_full_global(
                     res_bitmap, num_rows, num_cols
                 )
@@ -1374,8 +1482,19 @@ class PrefetchController(StorageControllerInterface):
 
         cells_by_l1, retain = self._build_l1_allocation_plans(request)
         for l1_idx, cells in cells_by_l1.items():
+            l1_manager = self._l1_managers[l1_idx]
+            # A key that landed in a readable L1 after the lock pass is staged
+            # anyway and admission read-locks the resident copy, so it stays a
+            # hit; in an L1 the request may not read it stays a miss.
             success, objs, l1_failed_count = _reserve_l1_cells(
-                self._l1_managers[l1_idx], request.key_groups, cells, retain, tag
+                l1_manager,
+                request.key_groups,
+                cells,
+                retain,
+                tag,
+                allow_resident=_tags_allowed(
+                    l1_manager.get_memory_tags(), request.allowed_l1_memory_tags
+                ),
             )
             l1_reserved_keys[l1_idx] = success
             reserved_objs.update(objs)
@@ -1594,6 +1713,9 @@ class PrefetchController(StorageControllerInterface):
                     l1_manager.finish_write_and_reserve_read(
                         keys, read_locks=row.num_kv_readers, tag=tag
                     )
+            # Loads count against the watermark until their reader is done.
+            if loaded_keys:
+                l1_manager.track_prefetch_locked(loaded_keys)
             if failed_keys:
                 l1_manager.finish_write_and_delete(failed_keys, tag=tag)
 
@@ -1659,8 +1781,8 @@ class PrefetchController(StorageControllerInterface):
         """Settle the request's L1 locks and publish its result.
 
         The prefetch policy plans once more on the L1 locks alone: the cells
-        it keeps are the hit, and the rest are released. It will also touch
-        the L1 keys so that the eviction module can be updated.
+        it keeps are the hit, and the rest are released. Touch hit keys in
+        chunk order so eviction prioritizes earlier chunks across groups.
 
         Args:
             request: The request to finish. Its L2 locked map and reserved
@@ -1685,7 +1807,7 @@ class PrefetchController(StorageControllerInterface):
                         )
 
             # Notify the eviction module
-            hit_keys = _gather_keys(request.key_groups, locked)
+            hit_keys = _gather_keys_by_chunk(request.key_groups, locked)
             if hit_keys:
                 self._l1_managers[l1_idx].touch_keys(hit_keys)
 

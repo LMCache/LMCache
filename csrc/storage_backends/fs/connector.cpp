@@ -245,11 +245,16 @@ bool FSConnector::do_single_exists(WorkerFSConn& conn, const std::string& key) {
   return std::filesystem::exists(file_path);
 }
 
-bool FSConnector::do_single_delete(WorkerFSConn& conn, const std::string& key) {
+DeleteResult FSConnector::do_single_delete_result(WorkerFSConn& conn,
+                                                  const std::string& key) {
   std::string filename = key_to_filename(key);
   auto file_path = conn.base_path / filename;
   std::error_code ec;
-  return std::filesystem::remove(file_path, ec);
+  if (std::filesystem::remove(file_path, ec)) {
+    return DeleteResult::DELETED;
+  }
+  // remove() returns false without an error only when the file did not exist.
+  return ec ? DeleteResult::NOT_DELETED : DeleteResult::NOT_FOUND;
 }
 
 // ---------------------------------------------------------------
@@ -260,64 +265,81 @@ size_t FSConnector::read_budget_bytes() const {
   return read_max_bytes_in_flight_;
 }
 
-size_t FSConnector::choose_num_tiles(Op op, size_t num_items) const {
-  if (op != Op::BATCH_TILE_GET || read_threads_.empty()) {
-    return ConnectorBase::choose_num_tiles(op, num_items);
+uint64_t FSConnector::submit_batch_get(const std::vector<std::string>& keys,
+                                       const std::vector<void*>& bufs,
+                                       const std::vector<size_t>& lens,
+                                       size_t batch_chunk_num_bytes) {
+  if (read_max_bytes_in_flight_ == 0) {
+    return ConnectorBase::submit_batch_get(keys, bufs, lens,
+                                           batch_chunk_num_bytes);
   }
-  return 1;
+  validate_batch_inputs(keys, bufs, lens);
+
+  auto batch = new_pool_batch(keys);
+  batch->buf_ptrs = bufs;
+  batch->buf_lens = lens;
+  batch->batch_chunk_num_bytes = batch_chunk_num_bytes;
+  const uint64_t future_id = batch->future_id;
+  enqueue_pool_batch(get_queue_, std::move(batch));
+  return future_id;
 }
 
-void FSConnector::do_batch_get(WorkerFSConn& conn, const Request& req) {
-  if (read_threads_.empty()) {
-    ConnectorBase::do_batch_get(conn, req);
-    return;
+uint64_t FSConnector::submit_batch_exists(
+    const std::vector<std::string>& keys) {
+  if (read_max_bytes_in_flight_ == 0) {
+    return ConnectorBase::submit_batch_exists(keys);
   }
-  do_batch_get_pooled(req);
+  if (keys.empty()) {
+    throw std::runtime_error("keys list is empty");
+  }
+
+  auto batch = new_pool_batch(keys);
+  const uint64_t future_id = batch->future_id;
+  enqueue_pool_batch(exists_queue_, std::move(batch));
+  return future_id;
 }
 
 void FSConnector::on_workers_stopped() { stop_read_pool(); }
+
+std::shared_ptr<FSConnector::PoolBatch> FSConnector::new_pool_batch(
+    const std::vector<std::string>& keys) {
+  auto batch = std::make_shared<PoolBatch>();
+  batch->future_id = next_future_id_.fetch_add(1, std::memory_order_relaxed);
+  batch->keys = keys;
+  batch->ok.assign(keys.size(), 0);
+  batch->remaining = keys.size();
+  return batch;
+}
+
+void FSConnector::enqueue_pool_batch(PoolQueue& queue,
+                                     std::shared_ptr<PoolBatch> batch) {
+  bool wake = false;
+  {
+    std::lock_guard<std::mutex> lk(read_mu_);
+    if (!read_stop_) {
+      queue.push_back(std::move(batch));
+      wake = has_ready_read_work();
+    }
+  }
+  if (wake) {
+    read_cv_.notify_one();
+  }
+}
 
 bool FSConnector::read_budget_admits(size_t len) const {
   return reads_in_flight_ < kMinReadsInFlight ||
          read_bytes_in_flight_ + len <= read_max_bytes_in_flight_;
 }
 
-void FSConnector::do_batch_get_pooled(const Request& req) {
-  const size_t num_keys = req.keys.size();
-  ReadTile tile;
-  tile.ok.assign(num_keys, 1);
-  tile.remaining = num_keys;
-  // Allocated before anything is published, so nothing below can throw
-  // while readers hold pointers into this frame.
-  std::vector<ReadTask> tasks(num_keys);
-
-  {
-    std::unique_lock<std::mutex> lk(read_mu_);
-    for (size_t i = 0; i < num_keys; ++i) {
-      const size_t len = req.buf_lens[i];
-      if (!read_budget_admits(len)) {
-        ++read_budget_waiters_;
-        read_budget_cv_.wait(lk,
-                             [this, len] { return read_budget_admits(len); });
-        --read_budget_waiters_;
-      }
-      read_bytes_in_flight_ += len;
-      ++reads_in_flight_;
-      tasks[i] = ReadTask{&req, i, &tile, nullptr};
-      if (read_queue_tail_ != nullptr) {
-        read_queue_tail_->next = &tasks[i];
-      } else {
-        read_queue_head_ = &tasks[i];
-      }
-      read_queue_tail_ = &tasks[i];
-      read_cv_.notify_one();
-    }
-    tile.done_cv.wait(lk, [&tile] { return tile.remaining == 0; });
+bool FSConnector::has_ready_read_work() const {
+  if (!exists_queue_.empty()) {
+    return true;
   }
-
-  for (size_t i = 0; i < num_keys; ++i) {
-    req.batch->per_key_results[req.start_idx + i] = tile.ok[i];
+  if (get_queue_.empty()) {
+    return false;
   }
+  const PoolBatch& front = *get_queue_.front();
+  return read_budget_admits(front.buf_lens[front.next_idx]);
 }
 
 // Connections are built here so a failure surfaces in the constructor.
@@ -337,8 +359,8 @@ void FSConnector::start_read_pool(int num_read_workers) {
   }
 }
 
-// Only after the workers are joined; see on_workers_stopped().
 void FSConnector::stop_read_pool() {
+  // Runs from on_workers_stopped(), before ConnectorBase closes notifier_.
   {
     std::lock_guard<std::mutex> lk(read_mu_);
     read_stop_ = true;
@@ -349,66 +371,115 @@ void FSConnector::stop_read_pool() {
       t.join();
     }
   }
+  exists_queue_.clear();
+  get_queue_.clear();
   read_threads_.clear();
   read_conns_.clear();
 }
 
 void FSConnector::read_thread_main(WorkerFSConn& conn) {
-  // The lock taken to record a completion is kept to pop the next task, so
-  // a busy reader takes read_mu_ once per object, not twice.
   std::unique_lock<std::mutex> lk(read_mu_);
   for (;;) {
-    read_cv_.wait(lk,
-                  [this] { return read_stop_ || read_queue_head_ != nullptr; });
-    if (read_queue_head_ == nullptr) {
-      return;  // the predicate admits an empty queue only on stop
+    read_cv_.wait(lk, [this] { return read_stop_ || has_ready_read_work(); });
+    if (read_stop_) {
+      return;
     }
-    ReadTask* task = read_queue_head_;
-    read_queue_head_ = task->next;
-    if (read_queue_head_ == nullptr) {
-      read_queue_tail_ = nullptr;
-    }
-    lk.unlock();
-
-    uint8_t ok = 1;
-    const Request& req = *task->req;
-    const std::string& key = req.keys[task->index];
-    try {
-      do_single_get(conn, key, req.buf_ptrs[task->index],
-                    req.buf_lens[task->index], req.batch_chunk_num_bytes);
-    } catch (const std::exception& e) {
-      ok = 0;
-      fprintf(stderr, "[LMCache GET] key %s failed: %s\n", key.c_str(),
-              e.what());
-    } catch (...) {
-      ok = 0;
-      fprintf(stderr, "[LMCache GET] key %s failed: unknown exception\n",
-              key.c_str());
-    }
-
-    // The submitting worker may destroy `task` and its tile as soon as it
-    // takes read_mu_ and sees remaining == 0, so nothing touches them
-    // after the notify below; notifying under the lock keeps the tile
-    // alive until then.
-    lk.lock();
-    task->tile->ok[task->index] = ok;
-    read_bytes_in_flight_ -= req.buf_lens[task->index];
-    --reads_in_flight_;
-    if (--task->tile->remaining == 0) {
-      task->tile->done_cv.notify_one();
-    }
-    // Large objects can hold more than the budget, so the free bytes are
-    // computed without wrapping.
-    const size_t free_bytes =
-        read_bytes_in_flight_ < read_max_bytes_in_flight_
-            ? read_max_bytes_in_flight_ - read_bytes_in_flight_
-            : 0;
-    if (read_budget_waiters_ != 0 &&
-        (reads_in_flight_ < kMinReadsInFlight ||
-         free_bytes >= read_max_bytes_in_flight_ / kReadBudgetWakeSlices)) {
-      read_budget_cv_.notify_all();
+    if (!exists_queue_.empty()) {
+      run_lookup(conn, lk);
+    } else {
+      run_read(conn, lk);
     }
   }
+}
+
+void FSConnector::run_lookup(WorkerFSConn& conn,
+                             std::unique_lock<std::mutex>& lk) {
+  auto [batch, idx] = claim_next_key(exists_queue_);
+  unlock_and_wake_next(lk);
+
+  uint8_t found = 0;
+  bool failed = false;
+  std::string err;
+  try {
+    found = do_single_exists(conn, batch->keys[idx]) ? 1 : 0;
+  } catch (const std::exception& e) {
+    failed = true;
+    err = e.what();
+  } catch (...) {
+    failed = true;
+    err = "unknown exception";
+  }
+
+  lk.lock();
+  if (failed) {
+    batch->any_failed = true;
+    if (batch->first_error.empty()) {
+      batch->first_error = std::move(err);
+    }
+  }
+  finish_key(lk, *batch, idx, found);
+}
+
+void FSConnector::run_read(WorkerFSConn& conn,
+                           std::unique_lock<std::mutex>& lk) {
+  auto [batch, idx] = claim_next_key(get_queue_);
+  const size_t len = batch->buf_lens[idx];
+  read_bytes_in_flight_ += len;
+  ++reads_in_flight_;
+  unlock_and_wake_next(lk);
+
+  uint8_t ok = 1;
+  const std::string& key = batch->keys[idx];
+  try {
+    do_single_get(conn, key, batch->buf_ptrs[idx], len,
+                  batch->batch_chunk_num_bytes);
+  } catch (const std::exception& e) {
+    ok = 0;
+    fprintf(stderr, "[LMCache GET] key %s failed: %s\n", key.c_str(), e.what());
+  } catch (...) {
+    ok = 0;
+    fprintf(stderr, "[LMCache GET] key %s failed: unknown exception\n",
+            key.c_str());
+  }
+
+  lk.lock();
+  read_bytes_in_flight_ -= len;
+  --reads_in_flight_;
+  finish_key(lk, *batch, idx, ok);
+}
+
+std::pair<std::shared_ptr<FSConnector::PoolBatch>, size_t>
+FSConnector::claim_next_key(PoolQueue& queue) {
+  std::shared_ptr<PoolBatch> batch = queue.front();
+  const size_t idx = batch->next_idx++;
+  if (batch->next_idx == batch->keys.size()) {
+    queue.pop_front();
+  }
+  return {std::move(batch), idx};
+}
+
+void FSConnector::unlock_and_wake_next(std::unique_lock<std::mutex>& lk) {
+  const bool more = has_ready_read_work();
+  lk.unlock();
+  if (more) {
+    read_cv_.notify_one();
+  }
+}
+
+void FSConnector::finish_key(std::unique_lock<std::mutex>& lk, PoolBatch& batch,
+                             size_t idx, uint8_t ok) {
+  batch.ok[idx] = ok;
+  if (--batch.remaining != 0) {
+    return;
+  }
+  Completion comp;
+  comp.future_id = batch.future_id;
+  comp.ok = !batch.any_failed;
+  comp.error = std::move(batch.first_error);
+  comp.result_bytes = std::move(batch.ok);
+  unlock_and_wake_next(lk);
+  push_completion(std::move(comp));
+  lk.lock();
 }
 
 }  // namespace connector

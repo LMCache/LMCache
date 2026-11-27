@@ -2,25 +2,32 @@
 """P2P L2 adapter: reads KV objects from, and optionally writes them to, a
 single peer cache server.
 
-Lookups and unlocks are sent to the peer's P2P controller over the MQ; the
-located objects are pulled from the peer's L1 over the transfer channel. With
-``write_enabled`` a store reserves buffers in the peer's L1, pushes the
-objects over the transfer channel and commits them. Without it a store is a
-no-op. The adapter never evicts or deletes on the peer.
+Control RPCs are sent to the peer's P2P controller over its independent gRPC
+service; located objects are pulled from the peer's L1 over the transfer
+channel. With ``write_enabled`` a store reserves buffers in the peer's L1,
+pushes the objects over the transfer channel and commits them. Without it a
+store is a no-op. The adapter never evicts or deletes on the peer.
 
-Because neither the RPCs nor the transfer channel expose a completion fd, the
-lookup and load event fds (and the store fd when writes are enabled) are
-pulsed by the ``PeriodicEventNotifier`` singleton so the controllers re-poll
-periodically. A store does not wait for a pulse to act on an RPC answer: the
-answer's callback moves the store on.
+A lookup is two RPCs: ``p2p_lookup_and_lock`` returns the peer's task id and
+``p2p_query_lookup_results`` returns the addresses. Both are chained from the
+RPC completions: the lookup acknowledgement issues the query, and the query
+result signals the lookup event fd, so a lookup completes without waiting for
+a periodic pulse and the prefetch loop never blocks on a peer RPC. The
+transfer-channel read exposes no completion fd, so the load event fd (and a
+lookup whose result was not ready yet) is pulsed by the
+``PeriodicEventNotifier`` singleton and re-polled through ``query_*``; so is
+the store fd when writes are enabled. A store does not wait for a pulse to act
+on an RPC answer: the answer's callback moves the store on.
 
 Thread model: the lookup / load / unlock calls all come from the single
 prefetch-controller loop thread, and the store calls come from the
 store-controller loop thread. The two paths share no mutable state of this
-class (each owns its own task-id counter and bookkeeping dicts). With writes
-enabled, the answer to a store's reservation is handled on the request
-client's receive thread, so the store bookkeeping is guarded by a lock. The
-request client and the transfer-channel client lock internally.
+class (each owns its own task-id counter and bookkeeping dicts). Lookup RPC
+completions run on the gRPC channel's thread (or on the sending thread when
+the call is already done), so lookup task state is guarded by a lock. With
+writes enabled, the answer to a store's reservation is handled on the request
+client's receive thread, so the store bookkeeping is guarded by a lock too.
+The request client and the transfer-channel client lock internally.
 """
 
 # Standard
@@ -32,14 +39,9 @@ import functools
 import threading
 import time
 
-# Third Party
-import zmq
-
 # First Party
 from lmcache.lmcache_native import Bitmap, PeriodicEventNotifier
-from lmcache.logging import init_logger
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
-from lmcache.v1.client.transport.factory import RequestClientFactory
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -55,11 +57,13 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
+from lmcache.v1.distributed.p2p import P2PClient
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
 logger = init_logger(__name__)
 
@@ -70,8 +74,12 @@ _PERIODIC_NOTIFIER_INTERVAL_MS = 5
 @dataclass
 class _LookupTask:
     keys: list[ObjectKey]
-    remote_task_id: int
     deadline: float
+    ack_deadline: float
+    remote_task_id: int | None = None
+    addresses: list[TransferChannelAddress] | None = None
+    query_in_flight: bool = False
+    query_failures: int = 0
     failed: bool = False
 
 
@@ -122,6 +130,8 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
     - load_timeout_s: deadline for a load before it counts as a failure.
     - write_enabled: store objects into the peer's L1; off makes stores no-ops.
     - store_timeout_s: deadline for a store before it counts as a failure.
+    - write_l1_usage_threshold: used fraction of the local DRAM L1 at which
+      the ``p2p`` store policy starts storing objects into this peer.
     """
 
     def __init__(
@@ -132,18 +142,21 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         load_timeout_s: float = 10.0,
         write_enabled: bool = False,
         store_timeout_s: float = 10.0,
+        write_l1_usage_threshold: float = 0.7,
     ) -> None:
         super().__init__(peer_mq_server_url, lookup_timeout_s)
         self.peer_transfer_channel_server_url = peer_transfer_channel_server_url
         self.load_timeout_s = load_timeout_s
         self.write_enabled = write_enabled
         self.store_timeout_s = store_timeout_s
+        self.write_l1_usage_threshold = write_l1_usage_threshold
 
     @classmethod
     def from_dict(cls, d: dict) -> "P2PL2AdapterConfig":
         peer_mq_server_url = d.get("peer_mq_server_url")
         if not isinstance(peer_mq_server_url, str) or not peer_mq_server_url:
             raise ValueError("peer_mq_server_url must be a non-empty string")
+        parse_grpc_target(peer_mq_server_url)
 
         peer_tc_url = d.get("peer_transfer_channel_server_url")
         if not isinstance(peer_tc_url, str) or not peer_tc_url:
@@ -164,6 +177,13 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
         store_timeout_s = d.get("store_timeout_s", 10.0)
         if not isinstance(store_timeout_s, (int, float)) or store_timeout_s <= 0:
             raise ValueError("store_timeout_s must be a positive number")
+        write_l1_usage_threshold = d.get("write_l1_usage_threshold", 0.7)
+        if (
+            not isinstance(write_l1_usage_threshold, (int, float))
+            or isinstance(write_l1_usage_threshold, bool)
+            or not 0 < write_l1_usage_threshold <= 1
+        ):
+            raise ValueError("write_l1_usage_threshold must be a number in (0, 1]")
 
         return cls(
             peer_mq_server_url=peer_mq_server_url,
@@ -172,6 +192,7 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
             load_timeout_s=float(load_timeout_s),
             write_enabled=write_enabled,
             store_timeout_s=float(store_timeout_s),
+            write_l1_usage_threshold=float(write_l1_usage_threshold),
         )
 
     @classmethod
@@ -188,8 +209,25 @@ class P2PL2AdapterConfig(PeerL2AdapterConfigBase):
             "- write_enabled (bool): store objects into the peer's L1 "
             "(optional, default false)\n"
             "- store_timeout_s (float): store deadline in seconds "
-            "(optional, default 10)"
+            "(optional, default 10)\n"
+            "- write_l1_usage_threshold (float): used fraction of the local "
+            "DRAM L1 at which the p2p store policy stores into this peer "
+            "(optional, default 0.7)"
         )
+
+
+def _unregister_from_notifier(fd: int) -> None:
+    """Unregister ``fd`` from the notifier, if it is still running.
+
+    Looks the singleton up again: a saved handle dangles once ``shutdown``
+    frees the native instance.
+
+    Args:
+        fd: The registered event fd.
+    """
+    notifier = PeriodicEventNotifier.get()
+    if notifier is not None:
+        notifier.unregister_fd(fd)
 
 
 class PeerL2AdapterBase(L2AdapterInterface):
@@ -221,6 +259,11 @@ class PeerL2AdapterBase(L2AdapterInterface):
         # Prefetch-loop-thread state (lookup / load).
         self._next_task_id: L2TaskId = 0
         self._lookup_tasks: dict[L2TaskId, _LookupTask] = {}
+        # Guards _lookup_tasks and _closed against lookup RPC completions,
+        # which run on the gRPC channel's thread. Reentrant because RPCs are
+        # sent under it, and a completion that is already there runs on the
+        # sending thread.
+        self._lookup_lock = threading.RLock()
 
         # Store-loop-thread state (store no-op completions).
         self._next_store_task_id: L2TaskId = 0
@@ -229,9 +272,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
         self._closed = False
 
         with ExitStack() as resources:
-            self._req_client: RequestClient = RequestClientFactory.create(
+            self._req_client: P2PClient = P2PClient(
                 config.peer_mq_server_url,
-                context=zmq.Context.instance(),
             )
             resources.callback(self._req_client.close)
             self._store_efd = create_event_notifier()
@@ -254,7 +296,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 polled_events.append(self._store_efd)
             for event in polled_events:
                 notifier.register_fd(event.fileno())
-                resources.callback(notifier.unregister_fd, event.fileno())
+                resources.callback(_unregister_from_notifier, event.fileno())
             self._register_peer_region()
             self._resources = resources.pop_all()
 
@@ -309,57 +351,57 @@ class PeerL2AdapterBase(L2AdapterInterface):
     ) -> L2TaskId:
         task_id = self._next_task_id
         self._next_task_id += 1
-
-        if self._closed:
-            self._lookup_tasks[task_id] = _LookupTask(
-                keys=keys, remote_task_id=-1, deadline=0.0, failed=True
-            )
-            return task_id
-
-        future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
-        failed = False
-        remote_task_id = -1
-        try:
-            remote_task_id = future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
-        except TimeoutError:
-            logger.warning(
-                "P2P lookup submit to %s timed out; treating as a miss",
-                self._config.peer_mq_server_url,
-            )
-            failed = True
-
-        self._lookup_tasks[task_id] = _LookupTask(
+        now = time.monotonic()
+        task = _LookupTask(
             keys=keys,
-            remote_task_id=remote_task_id,
-            deadline=time.monotonic() + self._config.lookup_timeout_s,
-            failed=failed,
+            deadline=now + self._config.lookup_timeout_s,
+            ack_deadline=now + _LOOKUP_RPC_TIMEOUT_S,
         )
+        with self._lookup_lock:
+            self._lookup_tasks[task_id] = task
+            if self._closed:
+                task.failed = True
+                return task_id
+            future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
+            future.add_done_callback(lambda fut: self._on_lookup_ack(task_id, fut))
         return task_id
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
-        task = self._lookup_tasks.get(task_id)
-        if task is None:
-            return None
-        if task.failed:
+        with self._lookup_lock:
+            task = self._lookup_tasks.get(task_id)
+            if task is None:
+                return None
+            now = time.monotonic()
+            # A landed result wins over an expired deadline: the peer already
+            # holds read locks for it, which the prefetch controller releases.
+            done = task.failed or task.addresses is not None
+            expired = now > task.deadline or (
+                task.remote_task_id is None and now > task.ack_deadline
+            )
+            if not (done or expired):
+                # The peer had no result yet: ask again. The answer signals
+                # the fd, or is already here if it completed synchronously.
+                # An unanswered query is not re-sent: a gRPC call fails on
+                # its own when cut off, and the lookup deadline bounds one
+                # stuck behind an unready channel.
+                if (
+                    task.remote_task_id is not None
+                    and not task.query_in_flight
+                    and not self._closed
+                ):
+                    task.query_in_flight = True
+                    self._submit_query(task_id, task.remote_task_id)
+                if not (task.failed or task.addresses is not None):
+                    return None
             del self._lookup_tasks[task_id]
-            return Bitmap(len(task.keys))
-        if time.monotonic() > task.deadline:
-            del self._lookup_tasks[task_id]
+
+        # The task left the table under the lock, so no completion can change
+        # it any more.
+        if task.addresses is not None:
+            return self._process_lookup_result(task.keys, task.addresses)
+        if not task.failed:
             logger.warning("P2P lookup task %d timed out; treating as a miss", task_id)
-            return Bitmap(len(task.keys))
-
-        future = self._req_client.p2p_query_lookup_results(task.remote_task_id)
-        try:
-            addresses = future.result(timeout=_LOOKUP_RPC_TIMEOUT_S)
-        except TimeoutError:
-            return None
-
-        if addresses is None:
-            return None
-
-        bitmap = self._process_lookup_result(task.keys, addresses)
-        del self._lookup_tasks[task_id]
-        return bitmap
+        return Bitmap(len(task.keys))
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
         if not keys:
@@ -382,7 +424,8 @@ class PeerL2AdapterBase(L2AdapterInterface):
         if self._closed:
             return
         self._unregister_peer_region()
-        self._closed = True
+        with self._lookup_lock:
+            self._closed = True
         self._resources.close()
 
     def report_status(self) -> dict[str, Any]:
@@ -429,6 +472,112 @@ class PeerL2AdapterBase(L2AdapterInterface):
         and drain reads. If it raises, ``close`` leaves the adapter open,
         with its RPC resources, so teardown can be retried.
         """
+
+    def _on_lookup_ack(self, task_id: L2TaskId, future: MessagingFuture[int]) -> None:
+        """Record the peer task id and chain the result query.
+
+        Runs when ``p2p_lookup_and_lock`` completes: on the gRPC channel's
+        thread, or on the sending thread when the call is already done.
+
+        Args:
+            task_id: The local lookup task id.
+            future: The completed ``p2p_lookup_and_lock`` future.
+        """
+        try:
+            remote_task_id = future.result()
+        # Any transport or server error must become a miss now: an error that
+        # escapes the callback is only logged, leaving the task pending until
+        # its ack deadline.
+        except Exception:
+            if not self._closed:
+                logger.exception(
+                    "P2P lookup submit to %s failed; treating as a miss",
+                    self._config.peer_mq_server_url,
+                )
+            self._finish_lookup(task_id, failed=True)
+            return
+        with self._lookup_lock:
+            task = self._lookup_tasks.get(task_id)
+            if task is None or self._closed:
+                return
+            task.remote_task_id = remote_task_id
+            task.query_in_flight = True
+            self._submit_query(task_id, remote_task_id)
+
+    def _submit_query(self, task_id: L2TaskId, remote_task_id: int) -> None:
+        """Send ``p2p_query_lookup_results`` and handle its answer when it lands.
+
+        Call holding ``_lookup_lock``, after checking ``_closed``.
+
+        Args:
+            task_id: The local lookup task id.
+            remote_task_id: The peer's task id for the lookup.
+        """
+        future = self._req_client.p2p_query_lookup_results(remote_task_id)
+        future.add_done_callback(lambda fut: self._on_query_result(task_id, fut))
+
+    def _on_query_result(
+        self,
+        task_id: L2TaskId,
+        future: MessagingFuture[list[TransferChannelAddress] | None],
+    ) -> None:
+        """Store the lookup addresses and signal the lookup event fd.
+
+        Runs on the gRPC channel's thread, or on the sending thread when the
+        call is already done. A query that finds no result
+        yet leaves the task to be re-queried on the next poll; a first failed
+        query is retried the same way, a second one makes the lookup a miss.
+
+        Args:
+            task_id: The local lookup task id.
+            future: The completed ``p2p_query_lookup_results`` future.
+        """
+        error: Exception | None = None
+        try:
+            addresses = future.result()
+        # Same as the ack: an error here must not escape the client thread.
+        except Exception as exc:
+            addresses, error = None, exc
+        with self._lookup_lock:
+            task = self._lookup_tasks.get(task_id)
+            if task is None or self._closed:
+                return
+            task.query_in_flight = False
+            if error is not None:
+                task.query_failures += 1
+                if task.query_failures < 2:
+                    logger.warning(
+                        "P2P lookup query to %s failed (%s); retrying once",
+                        self._config.peer_mq_server_url,
+                        error,
+                    )
+                    return
+                logger.error(
+                    "P2P lookup query to %s failed again (%s); treating as a miss",
+                    self._config.peer_mq_server_url,
+                    error,
+                )
+                task.failed = True
+                self._lookup_efd.notify()
+                return
+            if addresses is None:
+                return
+            task.addresses = addresses
+            self._lookup_efd.notify()
+
+    def _finish_lookup(self, task_id: L2TaskId, failed: bool) -> None:
+        """Mark a lookup finished and signal the lookup event fd.
+
+        Args:
+            task_id: The local lookup task id.
+            failed: Whether the lookup failed (reported as a miss).
+        """
+        with self._lookup_lock:
+            task = self._lookup_tasks.get(task_id)
+            if task is None or self._closed:
+                return
+            task.failed = failed
+            self._lookup_efd.notify()
 
     @abstractmethod
     def _process_lookup_result(
@@ -551,7 +700,7 @@ class P2PL2Adapter(PeerL2AdapterBase):
         # Registered outside the lock: an already answered request runs the
         # callback right here, and the callback takes the lock.
         reserve_future.add_done_callback(
-            functools.partial(self._on_reservation_answered, task_id)
+            functools.partial(self._on_reservation_answered, task_id, keys)
         )
         return task_id
 
@@ -671,23 +820,30 @@ class P2PL2Adapter(PeerL2AdapterBase):
     def _on_reservation_answered(
         self,
         task_id: L2TaskId,
+        keys: list[ObjectKey],
         reserve_future: MessagingFuture[list[TransferChannelAddress]],
     ) -> None:
         """Start a store's transfer as soon as the peer answered its reservation.
 
         Args:
             task_id: The store the reservation belongs to.
+            keys: The keys the reservation was requested for.
             reserve_future: The answered reservation request.
 
         Note:
             Runs on the thread that completed the request, normally the
             request client's receive thread, so the store does not wait for
-            the next pulse of the store loop. A store that already failed
-            (deadline, close) is left alone.
+            the next pulse of the store loop. When the store already failed
+            at its deadline, the buffers a late answer reserved are handed
+            back to the peer at once instead of staying reserved until the
+            peer's write TTL.
         """
         with self._store_lock:
+            if self._closed:
+                return
             task = self._store_tasks.get(task_id)
-            if task is None or self._closed:
+            if task is None:
+                self._discard_late_reservation(keys, reserve_future)
                 return
             result = self._start_transfer(task, reserve_future)
             if result is None:
@@ -695,6 +851,28 @@ class P2PL2Adapter(PeerL2AdapterBase):
             del self._store_tasks[task_id]
             self._completed_store_tasks[task_id] = result
         self._store_efd.notify()
+
+    def _discard_late_reservation(
+        self,
+        keys: list[ObjectKey],
+        reserve_future: MessagingFuture[list[TransferChannelAddress]],
+    ) -> None:
+        """Tell the peer to drop the buffers of a reservation nobody will use.
+
+        Args:
+            keys: The keys the reservation was requested for.
+            reserve_future: The reservation, answered after its store failed.
+        """
+        try:
+            addresses = reserve_future.result()
+        except REQUEST_FAILURES:
+            # The request itself failed, so the peer reserved nothing.
+            return
+        reserved = [
+            key for key, addr in zip(keys, addresses, strict=True) if addr.is_valid()
+        ]
+        if reserved:
+            self._req_client.p2p_finish_write(reserved, [False] * len(reserved))
 
     def _on_commit_answered(self, commit_future: MessagingFuture[list[bool]]) -> None:
         """Wake the store loop to collect a store whose commit was answered.

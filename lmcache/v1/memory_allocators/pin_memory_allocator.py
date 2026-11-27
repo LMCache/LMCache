@@ -9,7 +9,7 @@ import threading
 import torch
 
 # First Party
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.common.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_allocators.paged_tensor_memory_allocator import (
     PagedTensorMemoryAllocator,
 )

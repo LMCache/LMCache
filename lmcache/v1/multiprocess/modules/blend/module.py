@@ -10,8 +10,8 @@ import time
 import weakref
 
 # First Party
-from lmcache.logging import init_logger
 from lmcache.v1.common.custom_types import IPCCacheServerKey
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import unpack_token_ids
 from lmcache.v1.mp_coordinator.blend_client import BlendCoordinatorClient
 from lmcache.v1.multiprocess.engine_context import (
@@ -151,7 +151,8 @@ class BlendModule(
         self._dedup_content = enable_dedup_content_fingerprint
 
         self._token_range_matcher = BlendTokenRangeMatcher(
-            ctx.chunk_size, dedup_content=enable_dedup_content_fingerprint
+            ctx.default_chunk_size,
+            dedup_content=enable_dedup_content_fingerprint,
         )
         # Reorder planner (copy one cached prompt). Off with a coordinator: a
         # plan sees only this server's prompts.
@@ -160,8 +161,7 @@ class BlendModule(
             logger.warning("--enable-blend-reorder is ignored with a coordinator")
         self._prompt_store = blend_reorder.PromptStore() if reorder else None
         if reorder:  # compile the probe's numba kernels now, not in a plan
-            self._token_range_matcher.match_sub_sequence([0] * ctx.chunk_size)
-        ctx.add_chunk_size_bind_listener(self._reset_token_range_matcher)
+            self._token_range_matcher.match_sub_sequence([0] * ctx.default_chunk_size)
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
 
@@ -233,14 +233,6 @@ class BlendModule(
         self._fingerprint_eviction = FingerprintEvictionTracker()
         self._subscribe_fingerprint_eviction()
 
-    def _reset_token_range_matcher(self, chunk_size: int) -> None:
-        """Recreate the blend matcher after chunk-size negotiation."""
-        self._token_range_matcher = BlendTokenRangeMatcher(
-            chunk_size, dedup_content=self._dedup_content
-        )
-        if self._prompt_store is not None:
-            self._token_range_matcher.match_sub_sequence([0] * chunk_size)
-
     @property
     def context(self) -> MPCacheServerContext:
         return self._ctx
@@ -289,10 +281,15 @@ class BlendModule(
             cands, base = store.candidates(
                 ns,
                 [h.hash for h in hits],
-                self._ctx.token_hasher.compute_chunk_hashes(P),
+                self._ctx.default_token_hasher.compute_chunk_hashes(P),
             )
             perm = blend_reorder.plan(
-                P, cands, self._ctx.chunk_size, base, deadline, keep_prefix
+                P,
+                cands,
+                self._ctx.default_chunk_size,
+                base,
+                deadline,
+                keep_prefix,
             )
         except Exception:
             logger.exception("CB reorder: planning %s failed", key.request_id)

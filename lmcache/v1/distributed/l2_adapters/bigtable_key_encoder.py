@@ -32,7 +32,6 @@ class BigtableL2KeyEncoder:
             The formatted row key as bytes.
         """
         suffix = f"@lg{self.layer_group_size}" if self.layer_group_size > 0 else ""
-        row_key = format_storage_key(key, self.template, model_suffix=suffix)
-        if hasattr(key, "layer_id"):
-            row_key += f"@layer_{key.layer_id}"
-        return row_key.encode("utf-8")
+        return format_storage_key(key, self.template, model_suffix=suffix).encode(
+            "utf-8"
+        )

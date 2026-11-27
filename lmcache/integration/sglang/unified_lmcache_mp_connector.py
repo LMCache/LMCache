@@ -11,6 +11,7 @@ by SGLang; the selected transfer context moves their KV data.
 from __future__ import annotations
 
 # Standard
+from math import lcm
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 import hashlib
 import logging
@@ -225,7 +226,7 @@ class UnifiedLMCacheMPConnector:
             )
         host = str(config.mp_host)
         if "://" not in host:
-            host = f"tcp://{host}"
+            host = f"grpc://{host}"
         self.server_url = f"{host.rstrip(':')}:{config.mp_port}"
         self._mq_timeout = float(
             config.get_extra_config_value(
@@ -240,6 +241,9 @@ class UnifiedLMCacheMPConnector:
         )
         self._mp_transfer_mode = config.get_extra_config_value(
             "lmcache.mp.mp_transfer_mode", None
+        )
+        self._client_minimum_chunk_size: int | None = config.get_extra_config_value(
+            "lmcache.mp.chunk_size", None
         )
 
         self.model_name = model_config.model_path
@@ -295,6 +299,7 @@ class UnifiedLMCacheMPConnector:
         self._control_futures: list[Any] = []
         self._heartbeat: Optional[HeartbeatThread] = None
         self._heartbeat_lock = threading.Lock()
+        self._needs_store_progress_reset = False
 
         self.chunk_size = self._get_chunk_size()
         if self.chunk_size <= 0 or any(
@@ -388,7 +393,27 @@ class UnifiedLMCacheMPConnector:
         return specs, tuple(spec["engine_group_id"] for spec in specs)
 
     def _get_chunk_size(self) -> int:
-        return int(self._req_client.get_chunk_size().result(timeout=self._mq_timeout))
+        server_minimum = self._req_client.get_chunk_size().result(
+            timeout=self._mq_timeout
+        )
+        if server_minimum <= 0:
+            raise ValueError(
+                "LMCache server minimum chunk size must be positive, got "
+                f"{server_minimum}"
+            )
+        client_minimum = self._client_minimum_chunk_size
+        if client_minimum is not None and client_minimum <= 0:
+            raise ValueError(
+                "LMCache client minimum chunk size must be positive, got "
+                f"{client_minimum}"
+            )
+        alignment = lcm(*(group.tokens_per_block for group in self._kv_groups))
+        base = (
+            server_minimum
+            if client_minimum is None
+            else max(server_minimum, client_minimum)
+        )
+        return ((base + alignment - 1) // alignment) * alignment
 
     @property
     def is_lookup_leader(self) -> bool:
@@ -442,7 +467,10 @@ class UnifiedLMCacheMPConnector:
     def ready_prefix_count(
         self, operations: Sequence[LMCacheLoadOperation | LMCacheStoreOperation]
     ) -> int:
-        """Return the cross-rank count of ready leading operations."""
+        """Return the cross-rank count of ready leading operations.
+
+        Synchronize store progress resets across TP/PP ranks.
+        """
         count = 0
         for operation in operations:
             try:
@@ -456,9 +484,16 @@ class UnifiedLMCacheMPConnector:
             if not ready:
                 break
             count += 1
-        tensor = torch.tensor([count], dtype=torch.int64, device="cpu")
+        with self._heartbeat_lock:
+            keep_store_progress = not self._needs_store_progress_reset
+            self._needs_store_progress_reset = False
+        tensor = torch.tensor(
+            [count, int(keep_store_progress)], dtype=torch.int64, device="cpu"
+        )
         self._parallel_all_reduce(tensor, dist.ReduceOp.MIN)
-        return int(tensor.item())
+        if not tensor[1].item():
+            self._store_submitted_tokens.clear()
+        return int(tensor[0].item())
 
     def _sync_leader_int(self, value: int) -> int:
         tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
@@ -494,8 +529,8 @@ class UnifiedLMCacheMPConnector:
     def _register_transfer_context(self) -> bool:
         """Build, register, and publish a replacement transfer context."""
         # First Party
-        from lmcache.utils import EngineType
         from lmcache.v1.client.worker_transfer import create_transfer_context
+        from lmcache.v1.common.custom_types import EngineType
         from lmcache.v1.common.group_view import EngineGroupInfo, is_kv_writer
 
         transfer_ctx = create_transfer_context(
@@ -579,7 +614,7 @@ class UnifiedLMCacheMPConnector:
             heartbeat.start()
 
     def _reregister_kv_cache_after_recovery(self) -> bool:
-        """Re-register KV tensors before publishing a recovered server."""
+        """Re-register KV tensors and request a store progress reset."""
         heartbeat = self._heartbeat
         if (
             self._closed
@@ -598,7 +633,9 @@ class UnifiedLMCacheMPConnector:
         if not registered:
             return False
         # A restarted server has no record of the previously stored prefixes.
-        self._store_submitted_tokens.clear()
+        # Reset store progress together to keep collective calls aligned.
+        with self._heartbeat_lock:
+            self._needs_store_progress_reset = True
         logger.warning("Re-registered SGLang KV tensors after LMCache recovery")
         return True
 

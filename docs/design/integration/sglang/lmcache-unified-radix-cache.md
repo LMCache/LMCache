@@ -100,7 +100,7 @@ and node locks. It does not initialize a HiCache host pool.
 | Engine-driven registration, store, and retrieve | `lmcache/v1/multiprocess/modules/engine_driven_transfer.py` |
 | Worker-side transfer selection and gather/scatter | `lmcache/v1/client/transfer_context/` |
 | Engine-group registration contract | `lmcache/v1/common/group_view.py` |
-| Server-side transfer grouping | `lmcache/v1/kv_layer_groups.py` |
+| Server-side transfer grouping | `lmcache/v1/common/kv_layer_groups.py` |
 
 ## Configuration and initialization
 
@@ -169,6 +169,12 @@ replacement transfer context before health is published. Replacing the context
 is required for engine-driven mode because a restarted server exposes a new
 shared-memory/IPC context. Operations skipped while unhealthy return cache
 misses or failed placeholders, allowing SGLang to recompute the KV data.
+
+Recovery callbacks flag a store progress reset. `ready_prefix_count()` propagates
+the request through its existing `MIN` collective so all TP/PP ranks reset together.
+This keeps store decisions aligned. For example, if TP0 recovers after all ranks
+stored `[0, 512)`, every rank resets to zero at the next poll, allowing that range
+to be retried.
 
 ## Data model and registration
 

@@ -137,9 +137,10 @@ B→C ≈ no change (0 % hit, saturated); C→D TTFT collapses + decode rises (h
 ## Family turnkey configs
 
 **Mamba/GDN** (Qwen3.5/3.6, …): every run uses `--mamba-cache-mode align`; keep the server's
-default object-group separation enabled, and treat `--chunk-size` as a minimum that negotiates up
-to a multiple of the unified block size N (vLLM logs `Setting attention block size to N tokens`). Also
-`--max-num-seqs ≤ #Mamba cache blocks` vLLM reports, or CUDA-graph capture fails.
+default object-group separation enabled, and treat `--chunk-size` as the server minimum. The vLLM
+connector resolves the effective size locally to a multiple of the unified block size N (vLLM logs
+`Setting attention block size to N tokens`). Also `--max-num-seqs ≤ #Mamba cache blocks` vLLM
+reports, or CUDA-graph capture fails.
 
 **DeepSeek-V4 sparse-MLA + fp8**: `export CUDA_HOME=/usr/local/cuda-<ver>
 PATH=$CUDA_HOME/bin:$PATH` (sparse-attn JIT fails on the default toolchain) for **every** launch;

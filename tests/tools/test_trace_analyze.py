@@ -162,6 +162,22 @@ class TestPrefixReplay:
         assert res.total_tokens == 6
         assert res.prefix_hit_tokens == 0
 
+    def test_budget_smaller_than_one_chunk(self) -> None:
+        records = [
+            _record(1, [1, 2, 3, 4]),
+            _record(2, [1, 2, 3, 4]),
+            _record(3, [9, 1, 2, 3, 4]),
+        ]
+        too_small, exact = analyze(records, [4], [3, 4])
+
+        assert too_small.capacity_chunks == 0
+        assert too_small.per_request_prefix_hit_tokens == [0, 0, 0]
+        assert too_small.per_request_non_prefix_hit_tokens == [0, 0, 0]
+        assert too_small.eviction_count == 0
+        assert too_small.total_tokens == 13
+        assert exact.per_request_prefix_hit_tokens == [0, 4, 0]
+        assert exact.per_request_non_prefix_hit_tokens == [0, 0, 4]
+
     def test_grid_order_and_hash_sharing(self) -> None:
         results = analyze(self.RECORDS, [4, 8], [8, 16])
         assert [(r.chunk_size, r.capacity_tokens) for r in results] == [

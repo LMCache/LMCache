@@ -22,18 +22,18 @@ import torch
 # First Party
 from lmcache import device_ops, torch_dev, torch_device_type
 from lmcache.lmcache_native import EngineKVFormat, TransferDirection
-from lmcache.v1.platform import resolve_device_ops
-from lmcache.v1.platform.base.device_ops import DeviceOps
-from lmcache.v1.platform.base.device_spec import DeviceSpec
-from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
-from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
-from lmcache.v1.platform.ops_types import (
+from lmcache.v1.common.ops_types import (
     BatchStep,
     KernelGroupSpec,
     LaunchVar,
     PageBufferShapeDesc,
     StagingCopy,
 )
+from lmcache.v1.platform import resolve_device_ops
+from lmcache.v1.platform.base.device_ops import DeviceOps
+from lmcache.v1.platform.base.device_spec import DeviceSpec
+from lmcache.v1.platform.devices.cpu.device_ops import CpuDeviceOps
+from lmcache.v1.platform.devices.cuda.device_ops import CudaDeviceOps
 import lmcache.v1.platform as platform_pkg
 
 # Derive op names from the class body: regular instance-method functions,

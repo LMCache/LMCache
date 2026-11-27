@@ -450,14 +450,15 @@ def replay(
         records: Requests in replay order.
         hashes: Chunk hashes per request, as from :func:`hash_records`.
         chunk_size: Tokens per chunk the hashes were computed with.
-        capacity_tokens: Cache capacity in tokens.
+        capacity_tokens: Cache capacity in tokens. Only whole chunks fit;
+            smaller budgets yield zero prefix and non-prefix hits.
 
     Returns:
         Aggregate and per-request hit accounting.
     """
-    capacity_chunks = max(1, capacity_tokens // chunk_size)
+    capacity_chunks = capacity_tokens // chunk_size
     cache = LRUCacheFast(capacity_chunks)
-    matcher = BlendTokenRangeMatcher(chunk_size)
+    matcher = BlendTokenRangeMatcher(chunk_size) if capacity_chunks else None
 
     total_tokens = 0
     prefix_total = 0
@@ -474,7 +475,7 @@ def replay(
         prefix_tokens = hit_prefix * chunk_size
 
         non_prefix_tokens = 0
-        if chunk_hashes:
+        if matcher is not None and chunk_hashes:
             segments = select_non_prefix_segments(
                 matcher.match_sub_sequence(record.input_ids), prefix_tokens
             )

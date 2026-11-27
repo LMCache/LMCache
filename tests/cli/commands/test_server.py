@@ -15,6 +15,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.server import ServerCommand
+from lmcache.v1.multiprocess.config import parse_args_to_p2p_config
 import lmcache
 
 
@@ -89,6 +90,37 @@ class TestServerCommandArguments:
             ]
         )
         assert hasattr(args, "func")
+
+    def test_p2p_write_args_reach_the_p2p_config(self, parser):
+        args = parser.parse_args(
+            [
+                "server",
+                "--l1-size-gb",
+                "4",
+                "--eviction-policy",
+                "LRU",
+                "--p2p-advertise-url",
+                "10.0.0.1:8700",
+                "--enable-p2p-write",
+                "--p2p-write-l1-usage-threshold",
+                "0.5",
+                "--p2p-store-timeout",
+                "12",
+            ]
+        )
+        config = parse_args_to_p2p_config(args)
+        assert config.enable_write is True
+        assert config.write_l1_usage_threshold == 0.5
+        assert config.store_timeout == 12.0
+
+    def test_p2p_writes_are_off_by_default(self, parser):
+        args = parser.parse_args(
+            ["server", "--l1-size-gb", "4", "--eviction-policy", "LRU"]
+        )
+        config = parse_args_to_p2p_config(args)
+        assert config.enable_write is False
+        assert config.write_l1_usage_threshold == 0.7
+        assert config.store_timeout == 30.0
 
     def test_mp_server_args_registered(self, parser):
         args = parser.parse_args(

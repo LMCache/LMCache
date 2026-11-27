@@ -21,6 +21,10 @@ example usage (see `redis/pybind.cpp`):
   py::class_<MyConnector>(m, "MyConnectorClient")
       .def(py::init<...>(), ...)
       LMCACHE_BIND_CONNECTOR_METHODS(MyConnector);
+
+Changing the methods below changes the Python API of the NIXL connector, which
+ships as the separate lmcache-nixl package: bump API_VERSION in
+`nixl/pybind.cpp` too.
 */
 
 #define LMCACHE_BIND_CONNECTOR_METHODS(ConnectorType)                  \
@@ -144,6 +148,7 @@ auto bind_drain_completions() {
       if (!c.result_bytes.empty()) {
         py::list bools_list;
         for (uint8_t b : c.result_bytes) {
+          // any non-zero byte is True: a DELETE's NOT_FOUND reads as deleted
           bools_list.append(bool(b));
         }
         bools_obj = bools_list;
