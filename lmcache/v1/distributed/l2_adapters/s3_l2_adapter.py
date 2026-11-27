@@ -16,13 +16,21 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 import asyncio
+import bisect
 import ctypes
 import threading
+import time
 import xml.etree.ElementTree as ET
+
+# Local
+from . import (
+    s3_bucket_router as _bucket_router,  # per-cache_salt bucket routing (PR feature)
+)
 
 if TYPE_CHECKING:
     # First Party
@@ -235,6 +243,64 @@ class MemoryViewStream:
         return len(self.mv)
 
 
+#: Seconds before a tenant bucket that could not be verified or created is
+#: tried again.
+_BUCKET_RETRY_SECONDS = 30.0
+
+
+class _BucketUnavailable(RuntimeError):
+    """A key routes to a tenant bucket this process must not use (yet).
+
+    Raised while building a request; the request is reported as failed
+    (store) or as a miss (lookup / load) without reaching S3.
+    """
+
+
+def _aws_error_code(exc: BaseException) -> str:
+    """The AWS error code of a botocore ``ClientError`` ("" for anything else).
+
+    Read from ``exc.response`` so that botocore is not imported here.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    return str(response.get("Error", {}).get("Code", ""))
+
+
+def _list_owned_buckets(client: Any, prefix: str, region: str) -> list[str]:
+    """Names of buckets owned by the caller's account that start with ``prefix``.
+
+    ``ListBuckets`` only returns buckets the requester owns, so membership
+    here is proof of ownership. ``Prefix``, ``BucketRegion`` and pagination
+    are used when the installed botocore knows them; otherwise the single
+    unfiltered page is filtered here.
+    """
+    try:
+        op = client.meta.service_model.operation_model("ListBuckets")
+        supported = set(op.input_shape.members)
+    except Exception:
+        supported = set()
+    params: dict[str, str] = {}
+    if prefix and "Prefix" in supported:
+        params["Prefix"] = prefix
+    if "BucketRegion" in supported:
+        params["BucketRegion"] = region
+    names: list[str] = []
+    token: Optional[str] = None
+    while True:
+        kwargs = dict(params)
+        if token:
+            kwargs["ContinuationToken"] = token
+        resp = client.list_buckets(**kwargs)
+        for bucket in resp.get("Buckets", []):
+            name = bucket.get("Name")
+            if name and name.startswith(prefix):
+                names.append(name)
+        token = resp.get("ContinuationToken")
+        if not token or "ContinuationToken" not in supported:
+            return names
+
+
 def _is_connection_error(error_msg: str) -> bool:
     return (
         "CONNECTION_REFUSED" in error_msg
@@ -271,6 +337,33 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
     - max_capacity_gb (float): aggregate capacity used by
       ``get_usage()``; ``0`` disables aggregate eviction
       (``usage_fraction == -1.0``).
+    - s3_bucket_mode (str): ``"single"`` (default, upstream behavior — one
+      bucket) or ``"per_cache_salt"`` (route each ``cache_salt`` to its own
+      physical bucket for multi-tenant isolation on a shared box).
+    - s3_bucket_template (str): bucket-name format used in ``per_cache_salt``
+      mode; ``{base}`` is the ``s3_endpoint``'s bucket name and ``{salt}``
+      (required, once) becomes ``<readable>-<hash>``, where ``<hash>`` is 12
+      hex digits of SHA-256 over the original cache_salt and ``<readable>``
+      is its sanitized, truncated form (see ``s3_bucket_router``). E.g.
+      ``"kv-cache-{salt}"`` or ``"{base}-{salt}"``. Empty (default) →
+      ``"{base}-{salt}"``. Unsalted KV and ``"single"`` mode both use the
+      ``s3_endpoint`` bucket unchanged.
+    - s3_bucket_auto_create (bool): in ``per_cache_salt`` mode, create a
+      missing tenant bucket on the first store for its tenant. Default
+      ``True``, except in us-east-1, where it defaults to ``False`` and
+      ``True`` is refused: there ``CreateBucket`` answers 200 for a bucket
+      the caller already owns (one created out of band after the ownership
+      check, say) and can reset its ACL, and the TTL write would replace its
+      lifecycle rules, so tenant buckets must be pre-created. With ``False``,
+      a missing tenant bucket makes stores for that tenant fail and reads
+      miss.
+    - s3_bucket_ttl_days (int): expiration rule, in days, put on a tenant
+      bucket the adapter creates (default ``30``; ``0`` = no rule). Never
+      applied to a bucket that already exists.
+    - s3_expected_bucket_owner (str): optional 12-digit AWS account id. In
+      ``per_cache_salt`` mode, requests to tenant buckets carry
+      ``x-amz-expected-bucket-owner`` so S3 refuses them if the bucket is
+      owned by another account.
     """
 
     def __init__(
@@ -284,6 +377,11 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
         max_capacity_gb: float = 0.0,
+        s3_bucket_mode: str = "single",
+        s3_bucket_template: str = "",
+        s3_expected_bucket_owner: Optional[str] = None,
+        s3_bucket_auto_create: Optional[bool] = None,
+        s3_bucket_ttl_days: int = 30,
     ):
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
@@ -294,6 +392,65 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.max_capacity_gb = max_capacity_gb
+        # Multi-tenant per-cache_salt bucket isolation (opt-in; the default
+        # reproduces the single-bucket behavior exactly).
+        if s3_bucket_mode not in ("single", "per_cache_salt"):
+            raise ValueError("s3_bucket_mode must be 'single' or 'per_cache_salt'")
+        self.s3_bucket_mode = s3_bucket_mode
+        self.s3_bucket_template = s3_bucket_template
+        if s3_expected_bucket_owner is not None and not (
+            len(s3_expected_bucket_owner) == 12 and s3_expected_bucket_owner.isdigit()
+        ):
+            raise ValueError("s3_expected_bucket_owner must be a 12-digit account id")
+        self.s3_expected_bucket_owner = s3_expected_bucket_owner
+        if s3_bucket_ttl_days < 0:
+            raise ValueError("s3_bucket_ttl_days must be >= 0")
+        self.s3_bucket_ttl_days = s3_bucket_ttl_days
+        #: True when tenant buckets live in us-east-1 (per_cache_salt only).
+        self.s3_bucket_us_east_1 = False
+        auto_create = s3_bucket_auto_create
+        # Fail fast on a template that can produce an illegal bucket name, at
+        # config time rather than on the first request in per_cache_salt mode.
+        if s3_bucket_mode == "per_cache_salt":
+            template = s3_bucket_template or _bucket_router.DEFAULT_TEMPLATE
+            # The tenant bucket replaces the endpoint's first host label, so
+            # the whole host must be an unambiguous AWS virtual-hosted name:
+            # a path-style or dotted-bucket endpoint would route tenants into
+            # the wrong bucket or share one bucket among all of them.
+            try:
+                parsed = _bucket_router.parse_virtual_hosted_endpoint(s3_endpoint)
+            except ValueError as e:
+                raise ValueError(
+                    f"s3_bucket_mode 'per_cache_salt' needs a virtual-hosted "
+                    f"s3_endpoint ('s3://<bucket>.s3.<region>.amazonaws.com'): {e}"
+                ) from e
+            region = s3_region or _bucket_router.GLOBAL_ENDPOINT_REGION
+            if parsed.effective_region != region:
+                raise ValueError(
+                    f"s3_endpoint {s3_endpoint!r} is in region "
+                    f"{parsed.effective_region!r} but s3_region is {s3_region!r}"
+                )
+            base_bucket = parsed.bucket
+            self.s3_bucket_us_east_1 = region == "us-east-1"
+            if self.s3_bucket_us_east_1:
+                if auto_create:
+                    raise ValueError(
+                        "s3_bucket_auto_create cannot be true in us-east-1: "
+                        "CreateBucket there succeeds for a bucket this account "
+                        "already owns and can reset its ACL, and the TTL write "
+                        "would replace its lifecycle rules. Pre-create the tenant "
+                        "buckets and leave s3_bucket_auto_create unset or false."
+                    )
+                auto_create = False
+            try:
+                _bucket_router.validate_template(template, base_bucket)
+            except (KeyError, ValueError, IndexError) as e:
+                raise ValueError(
+                    f"invalid s3_bucket_template {s3_bucket_template!r}: {e}"
+                ) from e
+        self.s3_bucket_auto_create: bool = (
+            True if auto_create is None else bool(auto_create)
+        )
 
     @classmethod
     def from_dict(cls, d: dict) -> "S3L2AdapterConfig":
@@ -324,6 +481,10 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
                 raise ValueError(f"{key} must be a string")
             return v
 
+        ttl_days = d.get("s3_bucket_ttl_days", 30)
+        if not isinstance(ttl_days, int) or isinstance(ttl_days, bool) or ttl_days < 0:
+            raise ValueError("s3_bucket_ttl_days must be a non-negative integer")
+
         max_cap = d.get("max_capacity_gb", 0.0)
         if not isinstance(max_cap, (int, float)) or isinstance(max_cap, bool):
             raise ValueError("max_capacity_gb must be a number")
@@ -338,6 +499,15 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             aws_access_key_id=_opt_str("aws_access_key_id"),
             aws_secret_access_key=_opt_str("aws_secret_access_key"),
             max_capacity_gb=float(max_cap),
+            s3_bucket_mode=d.get("s3_bucket_mode", "single"),
+            s3_bucket_template=(_opt_str("s3_bucket_template") or ""),
+            s3_expected_bucket_owner=_opt_str("s3_expected_bucket_owner") or None,
+            s3_bucket_auto_create=(
+                None
+                if d.get("s3_bucket_auto_create") is None
+                else _bool("s3_bucket_auto_create", None)
+            ),
+            s3_bucket_ttl_days=ttl_days,
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
         return cfg
@@ -356,6 +526,17 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             "- aws_access_key_id / aws_secret_access_key (str): static creds; "
             "when unset, boto3 resolves credentials\n"
             "- max_capacity_gb (float): capacity for get_usage (0 = disabled)\n"
+            "- s3_bucket_mode (str): 'single' (default) or 'per_cache_salt' "
+            "(one bucket per cache_salt)\n"
+            "- s3_bucket_template (str): per_cache_salt bucket name, with "
+            "{salt} once and optional {base} (default '{base}-{salt}')\n"
+            "- s3_bucket_auto_create (bool): create a missing tenant bucket on "
+            "its first store (default true; in us-east-1 it defaults to false and "
+            "true is refused, so tenant buckets must be pre-created)\n"
+            "- s3_bucket_ttl_days (int): expiration rule for tenant buckets the "
+            "adapter creates (default 30, 0 = none)\n"
+            "- s3_expected_bucket_owner (str): 12-digit account id sent as "
+            "x-amz-expected-bucket-owner on tenant-bucket requests\n"
             "- eviction (dict): optional, see L2AdapterConfigBase"
         )
 
@@ -402,6 +583,38 @@ class S3L2Adapter(L2AdapterInterface):
         self._endpoint = endpoint
         self._region = config.s3_region
         self._enable_s3express = config.s3_enable_s3express
+        # per-cache_salt bucket routing (multi-tenant isolation)
+        self._bucket_mode = config.s3_bucket_mode
+        self._bucket_template = (
+            config.s3_bucket_template or _bucket_router.DEFAULT_TEMPLATE
+        )
+        self._base_bucket = endpoint.split(".", 1)[0]
+        self._host_suffix = endpoint.partition(".")[2]  # s3.<region>.amazonaws.com
+        # Tenant bucket names (not salts) observed → buckets to list.
+        self._tenant_buckets: set[str] = set()
+        # Tenant bucket names owned by another account: never read or written.
+        self._foreign_buckets: set[str] = set()
+        self._ensured_buckets: set[str] = (
+            set()
+        )  # tenant buckets provisioned this process
+        # Bucket checks and creation run here, never on the event loop or in a
+        # request: bucket name → whether the queued check may create it.
+        self._bucket_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="s3-l2-buckets"
+        )
+        self._pending_buckets: dict[str, bool] = {}
+        # Missing tenant buckets already reported (auto-create off).
+        self._missing_logged: set[str] = set()
+        # (bucket, may_create) → monotonic time before which not to retry.
+        self._bucket_retry_at: dict[tuple[str, bool], float] = {}
+        # lazy boto3 client for bucket create/lifecycle (control plane)
+        self._mgmt_s3: Optional[Any] = None
+        # Auto-provision a tenant bucket on first use (+ TTL). Disable to require
+        # buckets to be pre-created by an onboarding hook.
+        self._auto_create_bucket = (
+            config.s3_bucket_mode == "per_cache_salt" and config.s3_bucket_auto_create
+        )
+        self._bucket_ttl_days = config.s3_bucket_ttl_days
 
         # awscrt client setup (mirrors s3_connector.py:103-153)
         event_loop_group = io.EventLoopGroup(config.s3_num_io_threads)
@@ -482,6 +695,12 @@ class S3L2Adapter(L2AdapterInterface):
         self._loop_thread.start()
 
         self._closed = False
+
+        # Tenant buckets that already exist survive a restart: find them in
+        # storage so listing covers them before their tenants come back.
+        self._tenant_buckets_discovered = False
+        if self._bucket_mode == "per_cache_salt":
+            self._discover_tenant_buckets()
 
         logger.info(
             "Initialized S3L2Adapter (endpoint=%s region=%s "
@@ -695,11 +914,59 @@ class S3L2Adapter(L2AdapterInterface):
                     "S3 connection disabled (circuit-broken); listing unavailable"
                 )
 
-        fut = asyncio.run_coroutine_threadsafe(
-            self._execute_list(prefix, max_keys, cursor),
-            self._loop,
-        )
-        entries, next_token = fut.result(timeout=30.0)
+        if self._bucket_mode != "per_cache_salt":
+            fut = asyncio.run_coroutine_threadsafe(
+                self._execute_list(prefix, max_keys, cursor),
+                self._loop,
+            )
+            entries, next_token = fut.result(timeout=30.0)
+        else:
+            # Per-tenant buckets: list the base, then every known tenant bucket
+            # in name order, paginating across them with a composite cursor
+            # (bucket name, in-bucket token). The cursor names the bucket
+            # rather than its position, so a tenant bucket that appears
+            # between pages cannot shift the walk: buckets sorting after the
+            # cursor are still visited once, and one sorting before it is
+            # picked up by the next pass. Deletes route back to the right
+            # bucket via _make_request.
+            if cursor is None and not self._tenant_buckets_discovered:
+                self._discover_tenant_buckets()  # retry a failed startup scan
+            with self._lock:
+                tenant_buckets = set(self._tenant_buckets)
+            hosts = _bucket_router.bucket_hosts(self._endpoint, tenant_buckets)
+            names = [_bucket_router.bucket_of_host(h) for h in hosts]
+            start, token = _bucket_router.decode_cursor(cursor)
+            if start is None or start == names[0]:
+                idx = 0
+            else:
+                idx = 1 + bisect.bisect_left(names[1:], start)
+            if idx >= len(names) or names[idx] != start:
+                token = None  # that bucket is gone: start the next one fresh
+            entries, next_token = [], None
+            while idx < len(hosts):
+                # Request only the remaining page budget so many small tenant
+                # buckets aggregate into one full page instead of forcing a
+                # round-trip per (mostly-empty) bucket.
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._execute_list(
+                        prefix, max_keys - len(entries), token, host=hosts[idx]
+                    ),
+                    self._loop,
+                )
+                e, t = fut.result(timeout=30.0)
+                entries.extend(e)
+                if t:  # this bucket has more pages → resume here next call
+                    next_token = _bucket_router.encode_cursor(names[idx], t)
+                    break
+                idx += 1  # bucket exhausted → continue into the next bucket
+                token = None
+                if len(entries) >= max_keys:  # page full → resume at next bucket
+                    next_token = (
+                        _bucket_router.encode_cursor(names[idx], None)
+                        if idx < len(hosts)
+                        else None
+                    )
+                    break
         page_entries = tuple(
             KeyEntry(key=k.to_encoded_object_key(), size_bytes=sz) for k, sz in entries
         )
@@ -754,6 +1021,7 @@ class S3L2Adapter(L2AdapterInterface):
                 pass
             self._loop.call_soon_threadsafe(self._loop.stop)
 
+        self._bucket_executor.shutdown(wait=False, cancel_futures=True)
         self._loop_thread.join(timeout=5)
         try:
             self._loop.close()
@@ -782,11 +1050,263 @@ class S3L2Adapter(L2AdapterInterface):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
+    # ---- Multi-tenant per-cache_salt bucket routing (PR feature) ----------
+    # Pure routing logic lives in s3_bucket_router (dependency-free + unit-tested).
+    def _endpoint_for_key(self, key_str: str, *, write: bool = False) -> str:
+        """Host for ``key_str``; raise ``_BucketUnavailable`` if not usable now.
+
+        A tenant bucket is used only once this process knows the account
+        owns it (found at startup, or verified/created by
+        :meth:`_resolve_bucket`). For any other tenant bucket the request is
+        not sent: a store fails and a lookup, load or delete is a miss, and
+        resolution is started in the background, so the request never waits
+        on bucket calls and the event loop is never blocked by them. Only a
+        store (``write=True``) may lead to the bucket being created; a read
+        only checks whether it exists.
+        """
+        host = _bucket_router.resolve_bucket_host(
+            key_str,
+            base_endpoint=self._endpoint,
+            mode=self._bucket_mode,
+            template=self._bucket_template,
+        )
+        if host == self._endpoint:
+            return host
+        bucket = _bucket_router.bucket_of_host(host)
+        create = write and self._auto_create_bucket
+        with self._lock:
+            if bucket in self._ensured_buckets:
+                return host
+            if bucket in self._foreign_buckets:
+                raise _BucketUnavailable(bucket)
+            pending = self._pending_buckets.get(bucket)
+            retry_at = self._bucket_retry_at.get((bucket, create), 0.0)
+            schedule = (
+                not self._closed
+                and (pending is None or (create and not pending))
+                and time.monotonic() >= retry_at
+            )
+            if schedule:
+                self._pending_buckets[bucket] = create
+        if schedule:
+            try:
+                self._bucket_executor.submit(self._resolve_bucket, bucket, create)
+            except RuntimeError:  # closed concurrently
+                with self._lock:
+                    self._pending_buckets.pop(bucket, None)
+        raise _BucketUnavailable(bucket)
+
+    def _tenant_headers(self, host: str) -> list[tuple[str, str]]:
+        """Extra headers for a request to ``host``.
+
+        With ``s3_expected_bucket_owner`` set, every request to a tenant
+        bucket carries ``x-amz-expected-bucket-owner``, so S3 rejects it with
+        403 if that bucket name now belongs to another account (for example
+        after the bucket was deleted and the name taken). The base bucket is
+        left untouched, so single-bucket requests stay as they were.
+        """
+        owner = self._config.s3_expected_bucket_owner
+        if owner and host != self._endpoint:
+            return [("x-amz-expected-bucket-owner", owner)]
+        return []
+
+    def _new_mgmt_client(self) -> Any:
+        """boto3 S3 client for bucket-level (control-plane) calls."""
+        # Third Party
+        import boto3
+
+        return boto3.client(
+            "s3",
+            region_name=self._region,
+            aws_access_key_id=self._config.aws_access_key_id,
+            aws_secret_access_key=self._config.aws_secret_access_key,
+        )
+
+    def _mgmt_client(self) -> Any:
+        with self._lock:
+            if self._mgmt_s3 is None:
+                self._mgmt_s3 = self._new_mgmt_client()
+            return self._mgmt_s3
+
+    def _discover_tenant_buckets(self) -> bool:
+        """Merge the account's existing tenant buckets into the known set.
+
+        Matches names against the template exactly, so unrelated buckets that
+        happen to share the prefix are ignored. Discovered buckets are owned
+        by this account (``ListBuckets`` returns nothing else), so they are
+        also recorded as provisioned and never re-created. Failure is logged
+        and retried at the start of the next listing pass.
+        """
+        prefix = _bucket_router.tenant_bucket_prefix(
+            self._bucket_template, self._base_bucket
+        )
+        pattern = _bucket_router.tenant_bucket_pattern(
+            self._bucket_template, self._base_bucket
+        )
+        try:
+            names = _list_owned_buckets(self._mgmt_client(), prefix, self._region)
+        except Exception:
+            logger.warning(
+                "S3L2Adapter could not list existing tenant buckets; listing "
+                "covers only buckets used by this process until a retry succeeds",
+                exc_info=True,
+            )
+            return False
+        found = {n for n in names if pattern.match(n) and n != self._base_bucket}
+        with self._lock:
+            self._tenant_buckets |= found
+            self._ensured_buckets |= found
+            self._tenant_buckets_discovered = True
+        logger.info("S3L2Adapter found %d existing tenant bucket(s)", len(found))
+        return True
+
+    def _resolve_bucket(self, bucket: str, create: bool) -> None:
+        """Find out whether ``bucket`` can be used, creating it if allowed.
+
+        Runs on the bucket worker thread, one bucket at a time. Outcomes:
+
+        - owned by this account (``ListBuckets`` lists it) → usable, as-is;
+          its lifecycle rules are never touched;
+        - absent and ``create`` (never in us-east-1) → ``create_bucket``.
+          Success, or
+          ``BucketAlreadyOwnedByYou`` from a concurrent creator, makes it
+          usable; only a bucket this call created gets the TTL rule.
+          ``BucketAlreadyExists`` means another account owns the name: the
+          bucket is fenced off for the life of the process, logged once;
+        - absent and not ``create``, or any failure → retried no sooner than
+          ``_BUCKET_RETRY_SECONDS`` later by a request of the same kind. With
+          auto-create off, a missing bucket is logged once.
+        """
+        try:
+            mgmt_s3 = self._mgmt_client()
+            # Ownership check first: an owned bucket is used as-is and never
+            # re-created, so its ACL and lifecycle rules are left alone.
+            if bucket in _list_owned_buckets(mgmt_s3, bucket, self._region):
+                self._mark_bucket_usable(bucket)
+                return
+            # Never create in us-east-1 (config refuses it there too).
+            may_create = create and not self._config.s3_bucket_us_east_1
+            if not may_create:
+                if not self._auto_create_bucket:
+                    self._log_missing_bucket_once(bucket)
+                self._retry_bucket_later(bucket, create)
+                return
+            created = False
+            try:
+                # Never reached in us-east-1, where CreateBucket would also
+                # succeed for an existing bucket we own (see may_create).
+                mgmt_s3.create_bucket(
+                    Bucket=bucket,
+                    CreateBucketConfiguration={"LocationConstraint": self._region},
+                )
+                created = True
+                logger.info("Auto-provisioned tenant KV bucket %s", bucket)
+            except Exception as e:
+                code = _aws_error_code(e)
+                if code == "BucketAlreadyExists":
+                    with self._lock:
+                        self._foreign_buckets.add(bucket)
+                    logger.error(
+                        "Tenant bucket name %s is owned by another AWS account; "
+                        "KV for its tenant will not be stored or read until the "
+                        "bucket template changes",
+                        bucket,
+                    )
+                    return
+                if code != "BucketAlreadyOwnedByYou":
+                    raise
+            if created and self._bucket_ttl_days > 0:
+                self._set_bucket_ttl(mgmt_s3, bucket)
+            self._mark_bucket_usable(bucket)
+        except Exception:
+            logger.warning(
+                "S3L2Adapter could not %s tenant bucket %s; retrying in %.0f s",
+                "provision" if create else "verify",
+                bucket,
+                _BUCKET_RETRY_SECONDS,
+                exc_info=True,
+            )
+            self._retry_bucket_later(bucket, create)
+        finally:
+            with self._lock:
+                # A store may have queued a create behind this check; leave
+                # the marker to that run.
+                if self._pending_buckets.get(bucket) == create:
+                    del self._pending_buckets[bucket]
+
+    def _log_missing_bucket_once(self, bucket: str) -> None:
+        with self._lock:
+            if bucket in self._missing_logged:
+                return
+            self._missing_logged.add(bucket)
+        logger.warning(
+            "Tenant bucket %s does not exist and s3_bucket_auto_create is off%s; "
+            "stores for its tenant fail and reads miss until it is created",
+            bucket,
+            " (required in us-east-1)" if self._config.s3_bucket_us_east_1 else "",
+        )
+
+    def _mark_bucket_usable(self, bucket: str) -> None:
+        with self._lock:
+            self._ensured_buckets.add(bucket)
+            self._tenant_buckets.add(bucket)
+
+    def _retry_bucket_later(self, bucket: str, create: bool) -> None:
+        retry_at = time.monotonic() + _BUCKET_RETRY_SECONDS
+        with self._lock:
+            self._bucket_retry_at[(bucket, create)] = retry_at
+            if create:  # a failed create also says nothing new to a read
+                self._bucket_retry_at[(bucket, False)] = retry_at
+
+    def _set_bucket_ttl(self, mgmt_s3: Any, bucket: str) -> None:
+        """Give a bucket this process just created its expiration rule.
+
+        ``put_bucket_lifecycle_configuration`` replaces every rule on the
+        bucket, which is why it is only ever called for a new, empty
+        bucket. A failure leaves the bucket usable without a TTL.
+        """
+        try:
+            mgmt_s3.put_bucket_lifecycle_configuration(
+                Bucket=bucket,
+                LifecycleConfiguration={
+                    "Rules": [
+                        {
+                            "ID": "kv-cache-ttl",
+                            "Filter": {"Prefix": ""},
+                            "Status": "Enabled",
+                            "Expiration": {"Days": self._bucket_ttl_days},
+                        }
+                    ]
+                },
+                **self._expected_owner_kwargs(),
+            )
+        except Exception:
+            logger.warning(
+                "Created tenant bucket %s but could not set its %d-day "
+                "expiration rule; objects there will not expire",
+                bucket,
+                self._bucket_ttl_days,
+                exc_info=True,
+            )
+
+    def _expected_owner_kwargs(self) -> dict[str, str]:
+        owner = self._config.s3_expected_bucket_owner
+        return {"ExpectedBucketOwner": owner} if owner else {}
+
     def _make_request(
-        self, method: str, key_str: str, *, body_stream=None, extra_headers=None
+        self,
+        method: str,
+        key_str: str,
+        *,
+        write: bool = False,
+        body_stream=None,
+        extra_headers=None,
     ):
         headers = HttpHeaders()
-        headers.add("Host", self._endpoint)
+        host = self._endpoint_for_key(key_str, write=write)
+        headers.add("Host", host)
+        for k, v in self._tenant_headers(host):
+            headers.add(k, v)
         if extra_headers:
             for k, v in extra_headers:
                 headers.add(k, v)
@@ -873,6 +1393,7 @@ class S3L2Adapter(L2AdapterInterface):
         req = self._make_request(
             "PUT",
             key_str,
+            write=True,
             body_stream=stream,
             extra_headers=[
                 ("Content-Length", str(total_len)),
@@ -930,8 +1451,9 @@ class S3L2Adapter(L2AdapterInterface):
         prefix: Optional[str],
         max_keys: int,
         continuation_token: Optional[str],
+        host: Optional[str] = None,
     ):
-        """Build a ListObjectsV2 request.
+        """Build a ListObjectsV2 request against ``host`` (default: the base bucket).
 
         Returns ``(s3_req, body_chunks, captured)``. The caller awaits
         ``s3_req.finished_future`` and assembles the XML from
@@ -950,7 +1472,9 @@ class S3L2Adapter(L2AdapterInterface):
         path = "/?" + urlencode(params, quote_via=url_quote)
 
         headers = HttpHeaders()
-        headers.add("Host", self._endpoint)
+        headers.add("Host", host or self._endpoint)
+        for k, v in self._tenant_headers(host or self._endpoint):
+            headers.add(k, v)
         req = HttpRequest("GET", path, headers)
 
         body_chunks: list[bytes] = []
@@ -1024,6 +1548,9 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req = self._put_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 indexed.append((i, key, obj, key_str))
+            except _BucketUnavailable:
+                indexed.append((i, key, obj, None))
+                futures.append(None)
             except Exception:
                 logger.exception("S3L2Adapter failed to launch PUT")
                 indexed.append((i, key, obj, None))
@@ -1111,6 +1638,9 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req, captured = self._head_request(key_str)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 captured_list.append(captured)
+            except _BucketUnavailable:
+                futures.append(None)  # a miss
+                captured_list.append({"status": None, "len": None})
             except Exception:
                 logger.exception("S3L2Adapter failed to launch HEAD")
                 futures.append(None)
@@ -1198,6 +1728,8 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req, progress = self._get_request(key_str, obj)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 launched.append((i, key_str, expected, progress))
+            except _BucketUnavailable:
+                continue  # a miss
             except Exception:
                 logger.exception("S3L2Adapter failed to launch GET")
 
@@ -1249,10 +1781,11 @@ class S3L2Adapter(L2AdapterInterface):
         prefix: Optional[str],
         max_keys: int,
         continuation_token: Optional[str],
+        host: Optional[str] = None,
     ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
-        """Issue one ``ListObjectsV2`` call and parse the response."""
+        """Issue one ``ListObjectsV2`` call against ``host`` and parse the response."""
         s3_req, body_chunks, _captured = self._list_request(
-            prefix, max_keys, continuation_token
+            prefix, max_keys, continuation_token, host=host
         )
         await asyncio.wrap_future(s3_req.finished_future)
         return _parse_list_response_xml(b"".join(body_chunks))
@@ -1277,6 +1810,8 @@ class S3L2Adapter(L2AdapterInterface):
                 s3_req = self._delete_request(key_str)
                 futures.append(asyncio.wrap_future(s3_req.finished_future))
                 indexed.append((key, key_str))
+            except _BucketUnavailable:
+                continue
             except Exception:
                 logger.exception("S3L2Adapter failed to launch DELETE")
 
