@@ -1375,6 +1375,12 @@ Use ``--interval 0`` when comparing throughput, otherwise the delay
 dominates. ``Requests / s`` counts cold/warm sequence pairs, matching
 ``Total requests``.
 
+In ``lmcache_driven`` mode a STORE reply can arrive before the stored objects
+are visible to lookups. The bench retries a warm LOOKUP that fully misses
+right after a successful cold STORE for up to 0.5 s, and logs
+``LOOKUP retried N time(s)``. A miss that outlasts the retries is a real miss
+(for example a dropped store) and lowers the checksum pass rate.
+
 Size the server's L1 to hold the whole run. If stores arrive faster than
 the eviction controller frees memory, the server drops them, and the
 affected warm lookups miss and fail their checks.

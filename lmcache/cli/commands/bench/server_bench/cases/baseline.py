@@ -16,9 +16,18 @@ import time
 from lmcache.cli.commands.bench.server_bench.cases.base import BenchResult
 from lmcache.cli.commands.bench.server_bench.client import (
     LookupResult,
+    RequestContext,
     ServerBenchClient,
     TransferResult,
 )
+
+
+# A STORE reply can arrive before the stored objects are visible to lookups
+# (lmcache_driven mode commits them with a later stream callback). A warm
+# LOOKUP that fully misses right after a successful cold STORE is retried for
+# at most this long before it is accepted as a real miss.
+_VISIBILITY_RETRY_INTERVAL_S = 0.01
+_VISIBILITY_RETRY_BUDGET_S = 0.5
 
 
 def _lookup_succeeded(outcome: _RequestOutcome | None) -> bool:
@@ -30,6 +39,15 @@ def _transfer_succeeded(transfer: TransferResult | None) -> bool:
         transfer is not None
         and bool(transfer.attempted_worker_ranks)
         and transfer.succeeded
+    )
+
+
+def _stored_new_chunks(outcome: _RequestOutcome | None) -> bool:
+    """Return whether a cold request stored chunks the warm one must find."""
+    return (
+        outcome is not None
+        and outcome.store is not None
+        and _transfer_succeeded(outcome.store)
     )
 
 
@@ -122,7 +140,13 @@ class BaselineBenchCase:
 
         time.sleep(self.interval_seconds)
 
-        warm_outcome = self._execute_request(client, sequence_id, "warm")
+        warm_outcome = self._execute_request(
+            client,
+            sequence_id,
+            "warm",
+            expect_visible=_stored_new_chunks(cold_outcome),
+            log=log,
+        )
         self._record_request_latencies(result, "warm", warm_outcome)
 
         result.completed_runs += 1
@@ -218,6 +242,8 @@ class BaselineBenchCase:
         client: ServerBenchClient,
         sequence_id: int,
         request_kind: Literal["cold", "warm"],
+        expect_visible: bool = False,
+        log: Callable[[str], None] | None = None,
     ) -> _RequestOutcome | None:
         # First Party
         from lmcache.cli.commands.bench.server_bench.helpers import _build_token_ids
@@ -233,6 +259,8 @@ class BaselineBenchCase:
 
         try:
             lookup = client.lookup(request)
+            if expect_visible:
+                lookup = self._retry_until_visible(client, request, lookup, log)
             if not lookup.succeeded:
                 return _RequestOutcome(lookup=lookup)
 
@@ -290,3 +318,35 @@ class BaselineBenchCase:
             )
         finally:
             client.release_request(request)
+
+    @staticmethod
+    def _retry_until_visible(
+        client: ServerBenchClient,
+        request: RequestContext,
+        lookup: LookupResult,
+        log: Callable[[str], None] | None,
+    ) -> LookupResult:
+        """Re-run a warm LOOKUP that fully missed a just-completed STORE.
+
+        The STORE reply does not mean the objects are readable yet. The retry
+        is bounded, so a store the server really dropped still shows as a miss.
+        """
+        deadline = time.monotonic() + _VISIBILITY_RETRY_BUDGET_S
+        retries = 0
+        while lookup.is_full_miss and time.monotonic() < deadline:
+            time.sleep(_VISIBILITY_RETRY_INTERVAL_S)
+            lookup = client.lookup(request)
+            retries += 1
+        if retries and log is not None:
+            if lookup.is_full_miss:
+                log(
+                    "  [seq %d/warm] LOOKUP retried %d time(s); cold STORE "
+                    "still not visible after retry budget"
+                    % (request.sequence_id, retries)
+                )
+            else:
+                log(
+                    "  [seq %d/warm] LOOKUP retried %d time(s) until the cold "
+                    "STORE was visible" % (request.sequence_id, retries)
+                )
+        return lookup
