@@ -136,7 +136,7 @@ engine_add_lmcache_server_environment() {
 
 engine_prepare_additional_instance() {
     local instance_name="$1"
-    export SGLANG_LMCACHE_CONFIG_FILE="/tmp/lmcache_sglang_${BUILD_ID}_${instance_name}.yaml"
+    export SGLANG_LMCACHE_CONFIG_FILE="/tmp/lmcache_sglang_${BUILD_ID:-local_$$}_${instance_name}.yaml"
 }
 
 engine_write_lmcache_config() {

@@ -141,6 +141,7 @@ elif [ "$TEST_NAME" = "multi_chunk_size" ]; then
     export GPU_FOR_SECOND_ENGINE="${GPU_FOR_SECOND_ENGINE:-1}"
     export MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
     export LAUNCH_SECOND_ENGINE=true
+    export LAUNCH_BASELINE=false
     export ENGINE_USE_ALL_DEVICES=true
 elif [ "$TEST_NAME" = "eviction_aware_lazy_offload" ]; then
     export LMCACHE_MP_LAZY_OFFLOAD=true
@@ -208,8 +209,7 @@ echo ""
 SELF_CONTAINED_TESTS=" mp_autostart_tp2 client_wheel p2p p2p_write kimi_linear_tp dsv4_flash_tp "
 
 # Tests that compare against a baseline engine (no LMCache) on a second GPU.
-# Only these need the baseline server (and thus a 2-GPU pod); everything
-# else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
+# Other tests skip the baseline by default.
 # Respect an explicit environment override from a device-specific wrapper
 # before applying the default baseline heuristic below.
 BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 preemption_correctness "
