@@ -669,6 +669,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self._repair_generations: dict[str, int] = {}
         self._repair_attempts: dict[str, LMCacheMPRequestMetadata] = {}
+        self._preserved_store_frontiers: dict[str, tuple[str, int]] = {}
         self._repair_reports: list[Any] = []
         self._repair_attestations: list[Any] = []
         self._repair_represented: set[str] = set()
@@ -1170,17 +1171,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return attestations
 
     def _collect_hybrid_load_evidence(self) -> None:
+        """Drain terminal coverage for storage bookkeeping and engine recovery.
+
+        Complete registered-group coverage with healthy recurrent delivery can
+        preserve the external stored-prefix frontier for either engine policy.
+        Only the repair policy receives native engine replay descriptors.
+
+        Raises:
+            ValueError: If terminal coverage is malformed.
+        """
         # This queue is populated only after MP's GPU completion event drains.
         from vllm.v1.outputs import KVLoadAttestation, KVLoadFailureReport
 
         for rid, coverage in self.worker_adapter.get_retrieve_completions():
             meta = self._repair_attempts.pop(rid, None)
-            if meta is None or not self._repair_policy:
+            if meta is None:
                 continue
             coverage.validate()
             if (
                 coverage.groups is None
-                or meta.transfer_generation is None
                 or meta.op.skip_first_n_tokens
                 or not coverage.attention_only_failure
             ):
@@ -1188,7 +1197,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 # failures stay on the normal request-level recompute channel.
                 if not bool(coverage):
                     continue
-            if coverage.groups is None or meta.transfer_generation is None:
+            if coverage.groups is None:
                 continue
             seen = [gid for group in coverage.groups for gid in group.engine_group_ids]
             expected_groups = set(self._hybrid_attention_groups) | set(
@@ -1213,6 +1222,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     for gid in group.engine_group_ids
                 )
             ):
+                continue
+            if coverage.attention_only_failure:
+                generation = (meta.request_configs or {}).get("recomputed_generation")
+                if isinstance(generation, str) and generation:
+                    self._preserved_store_frontiers[rid] = (generation, meta.op.end)
+            if not self._repair_policy or meta.transfer_generation is None:
                 continue
             expected = failed = 0
             failed_blocks: dict[int, list[int]] = {}
@@ -1497,10 +1512,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """Build ordinary STORE results and contradicted lookup ranges.
 
         Returns:
-            Missing ranges and exact-range store outcomes, plus lazy-offload
-            completion counts when enabled; None when no new results exist.
+            Missing ranges, validated healthy-prefix bookkeeping and exact-range
+            store outcomes, plus lazy-offload completion counts when enabled;
+            None when no new results exist.
         """
         raw_loads, writebacks = self.worker_adapter.get_writeback_results()
+        frontiers, self._preserved_store_frontiers = self._preserved_store_frontiers, {}
         loads, grouped = {}, {}
         for rid, spans in raw_loads.items():
             for span in spans:
@@ -1522,9 +1539,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     {},
                     failed_load_ranges=loads,
                     failed_group_load_ranges=grouped,
+                    preserved_store_frontiers=frontiers,
                     writeback_results=writebacks,
                 )
-                if loads or grouped or writebacks
+                if loads or grouped or writebacks or frontiers
                 else None
             )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
@@ -1535,10 +1553,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             or loads
             or grouped
             or writebacks
+            or frontiers
         ):
             return LMCacheMPWorkerMetadata(
                 failed_load_ranges=loads,
                 failed_group_load_ranges=grouped,
+                preserved_store_frontiers=frontiers,
                 writeback_results=writebacks,
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
@@ -1681,7 +1701,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             )
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             tracker.allocated_block_ids.clear()
-            tracker.num_stored_tokens = 0
+            if tracker.preserved_store_frontier:
+                tracker.num_stored_tokens = max(
+                    tracker.num_stored_tokens, tracker.preserved_store_frontier
+                )
+            elif not (
+                self._writeback_supported
+                and not self._hybrid_coverage
+                and tracker.writeback.has_pending
+                and tracker.num_lmcache_hit_tokens
+                % self.scheduler_adapter.lmcache_tokens_per_chunk
+                == 0
+            ):
+                tracker.num_stored_tokens = 0
             tracker.num_vllm_hit_tokens = 0
             tracker.num_lmcache_hit_tokens = 0
             tracker.apc_covered_tokens = 0
@@ -2006,6 +2038,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         meta = connector_output.kv_connector_worker_meta
         if isinstance(meta, LMCacheMPWorkerMetadata):
+            for rid, (generation, end) in meta.preserved_store_frontiers.items():
+                tracker = self.request_trackers.get(rid)
+                if (
+                    tracker is not None
+                    and self._writeback_supported
+                    and generation == tracker.writeback_generation
+                    and end == tracker.num_lmcache_hit_tokens
+                    and end > 0
+                    and end % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
+                ):
+                    tracker.preserved_store_frontier = end
             for rid, spans in meta.failed_load_ranges.items():
                 tracker = self.request_trackers.get(rid)
                 if tracker is not None and self._writeback_supported:
@@ -2271,6 +2314,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for request_tracker in self.request_trackers.values():
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
+            # The next terminal delivery must certify its own healthy frontier.
+            request_tracker.preserved_store_frontier = 0
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
                 request_tracker,
                 lmcache_tokens_per_chunk,

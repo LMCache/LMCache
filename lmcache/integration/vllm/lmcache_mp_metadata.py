@@ -100,6 +100,10 @@ class LMCacheMPRequestTracker:
     # chunk size; unfull chunks are tracked in ``unfull_chunk_boundaries``.
     num_stored_tokens: int = 0
 
+    # A terminal, validated attention-only delivery failure can rewind engine
+    # computation without invalidating the healthy external stored prefix.
+    preserved_store_frontier: int = 0
+
     # Whether a STORE was sent to the workers since this tracker was created.
     store_scheduled: bool = False
 
@@ -159,6 +163,7 @@ class LMCacheMPRequestTracker:
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
+        self.preserved_store_frontier = 0
         self.store_scheduled = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
@@ -384,6 +389,8 @@ class LMCacheMPRequestMetadata:
             tracker: Owner whose completed forward made this range valid.
             span: Exact chunk-aligned token range below the committed boundary.
             group_tokens_per_block: Engine group block geometry.
+            group_id: Attention engine group to store; other groups use null
+                source blocks and are skipped by ordinary STORE.
 
         Returns:
             Normal STORE metadata and its revisioned bookkeeping ticket.
@@ -793,6 +800,10 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         failed_load_ranges: Exact token ranges and transfer generation whose
             delivery contradicted a previous lookup. Independent of the
             stored-prefix frontier.
+        preserved_store_frontiers: Terminally covered external prefixes, keyed
+            by request with storage generation and end position. Healthy
+            recurrent delivery is required for hybrids. Dirty attention ranges
+            remain independent; this does not acknowledge storage persistence.
         writeback_results: Missing-range operation identities mapped to normal
             STORE admission outcomes. These do not acknowledge L2 persistence.
     """
@@ -806,6 +817,11 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
     failed_group_load_ranges: dict[str, list[tuple[int, int, int, str]]] = field(
         default_factory=dict
     )
+
+    # Request -> (storage-bookkeeping generation, covered external frontier).
+    # Sent only after validating complete registered groups and healthy state;
+    # dirty attention ranges still override this normal stored-prefix cursor.
+    preserved_store_frontiers: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -831,12 +847,22 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         }
         for rid, spans in other.failed_group_load_ranges.items():
             grouped.setdefault(rid, []).extend(spans)
+        frontiers = dict(self.preserved_store_frontiers)
+        for rid, (generation, end) in other.preserved_store_frontiers.items():
+            previous = frontiers.get(rid)
+            if previous is None:
+                frontiers[rid] = (generation, end)
+            elif previous[0] == generation:
+                frontiers[rid] = (generation, min(previous[1], end))
+            else:
+                frontiers[rid] = ("", 0)
         results = dict(self.writeback_results)
         for identity, success in other.writeback_results.items():
             results[identity] = results.get(identity, True) and success
         return LMCacheMPWorkerMetadata(
             failed_load_ranges=loads,
             failed_group_load_ranges=grouped,
+            preserved_store_frontiers=frontiers,
             writeback_results=results,
             completed_store_requests=merged,
             failed_store_requests=(

@@ -37,3 +37,12 @@ vLLM's subpaged attention and opaque state page views must retain the resolved
 NHD/HND axis order during format detection. Re-viewing bytes as synthetic NHD
 while declaring HND can turn a 576-token block into 576 heads. The adapter
 normalizes only addressing metadata, preserving the allocation and byte order.
+
+A request-level suffix rewind must not reset the normal stored-prefix cursor
+when validated terminal coverage certifies the healthy groups. The worker sends
+a generation-bound preserved frontier independently of the engine's replay
+verdict. The scheduler retains it while dirty attention ranges use ordinary
+STORE. Missing/unknown recurrent delivery supplies no such proof and keeps the
+conservative full-store fallback. Full-chunk single-attention-group failures can
+retain the cursor because their independent dirty ledger covers every failed
+range, including whole-load failures. A new retrieve clears any prior proof.

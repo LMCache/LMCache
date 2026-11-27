@@ -449,6 +449,7 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     connector._writeback_backlog = {}
     connector._writeback_supported = False
     connector._hybrid_coverage = False
+    connector._preserved_store_frontiers = {}
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
@@ -534,14 +535,16 @@ def test_hybrid_writeback_targets_only_attention_after_block_adoption():
 
 @pytest.mark.parametrize("state_groups", [1, 3])
 @pytest.mark.parametrize("healthy_checkpoint", [False, True])
+@pytest.mark.parametrize("repair_policy", [False, True])
 def test_hybrid_delivery_reports_attention_hole_and_healthy_checkpoint(
-    state_groups, healthy_checkpoint
+    state_groups, healthy_checkpoint, repair_policy
 ):
     from lmcache.v1.common.custom_types import RetrieveCoverage, RetrieveGroupCoverage
     from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 
     connector, _ = _connector(0)
-    connector._hybrid_coverage = connector._repair_policy = True
+    connector._hybrid_coverage = True
+    connector._repair_policy = repair_policy
     connector._report_request_errors = True
     connector._can_store = True
     connector._delay_free_req_ids = set()
@@ -564,6 +567,7 @@ def test_hybrid_delivery_reports_attention_hole_and_healthy_checkpoint(
                 end=384,
             ),
             transfer_generation=7,
+            request_configs={"recomputed_generation": "storage-gen"},
         )
     }
     coverage = RetrieveCoverage(
@@ -587,7 +591,18 @@ def test_hybrid_delivery_reports_attention_hole_and_healthy_checkpoint(
     worker.get_finished.return_value = (set(), {"req"})
     worker.get_failed_request_ids.return_value = {"req"}
     worker.get_retrieve_completions.return_value = [("req", coverage)]
+    worker.get_writeback_results.return_value = ({}, {})
     transfers = connector.get_transfer_results(set())
+    metadata = connector.build_connector_worker_meta()
+    if healthy_checkpoint:
+        assert metadata.preserved_store_frontiers == {"req": ("storage-gen", 384)}
+    else:
+        assert metadata is None
+    if not repair_policy:
+        assert transfers.failed_recving == {"req"}
+        assert connector.get_load_failure_reports() == []
+        assert connector.get_load_attestations() == []
+        return
     if not healthy_checkpoint:
         assert transfers.failed_recving == {"req"}
         assert connector.get_load_failure_reports() == []
@@ -608,3 +623,95 @@ def test_hybrid_delivery_reports_attention_hole_and_healthy_checkpoint(
         and attestation.failed_objects == 16
     )
     assert attestation.certifies_content()
+
+
+@pytest.mark.parametrize("proof", ["current", "stale", "unknown"])
+def test_suffix_recompute_keeps_covered_store_frontier_and_only_writes_hole(proof):
+    from vllm.v1.outputs import KVConnectorOutput
+    from lmcache.integration.vllm.lmcache_mp_metadata import LMCacheMPWorkerMetadata
+
+    connector, adapter = _connector(2 * CHUNK)
+    connector._writeback_supported = connector._hybrid_coverage = True
+    connector._gpu_block_pool = None
+    connector._pending_writebacks = {}
+    adapter.world_size = 1
+    request = _request()
+    connector.get_num_new_matched_tokens(request, 0)
+    tracker = connector.request_trackers[request.request_id]
+    tracker.state = LMCacheMPRequestState.READY
+    generation = tracker.writeback_generation
+    receipts = (
+        {}
+        if proof == "unknown"
+        else {
+            request.request_id: (generation if proof == "current" else "old", 2 * CHUNK)
+        }
+    )
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=LMCacheMPWorkerMetadata(
+                {},
+                failed_group_load_ranges={
+                    request.request_id: [(0, 0, CHUNK, generation)]
+                },
+                preserved_store_frontiers=receipts,
+            )
+        )
+    )
+    assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert tracker.num_stored_tokens == (2 * CHUNK if proof == "current" else 0)
+    if proof != "current":
+        return
+    # The bypass deliberately drops stale delivery destinations. The next
+    # ordinary allocation supplies the recompute's physical source blocks.
+    assert not tracker.allocated_block_ids
+    tracker.replace_block_ids((list(range(2000, 2022)), MAMBA_BLOCKS))
+    tracker.increase_num_scheduled_tokens(2 * CHUNK)
+    request.num_computed_tokens = 2 * CHUNK
+    assert (
+        LMCacheMPRequestMetadata.GetStoreMetadata(
+            tracker,
+            CHUNK,
+            GROUP_TOKENS_PER_BLOCK,
+        )
+        is None
+    )
+    metadata, _ = LMCacheMPRequestMetadata.GetWritebackMetadata(
+        tracker,
+        (0, CHUNK),
+        GROUP_TOKENS_PER_BLOCK,
+        group_id=0,
+    )
+    assert (metadata.op.start, metadata.op.end) == (0, CHUNK)
+    assert metadata.op.block_ids == [list(range(2000, 2008)), [0]]
+
+
+@pytest.mark.parametrize("whole_load_failed", [False, True])
+def test_attention_only_zero_rewind_keeps_frontier_with_independent_dirty_ranges(
+    whole_load_failed,
+):
+    from vllm.v1.outputs import KVConnectorOutput
+    from lmcache.integration.vllm.lmcache_mp_metadata import LMCacheMPWorkerMetadata
+
+    connector, _ = _connector(2 * CHUNK)
+    connector._writeback_supported = True
+    connector._gpu_block_pool = None
+    connector._pending_writebacks = {}
+    request = _request()
+    connector.get_num_new_matched_tokens(request, 0)
+    tracker = connector.request_trackers[request.request_id]
+    tracker.state = LMCacheMPRequestState.READY
+    failed_end = 2 * CHUNK if whole_load_failed else CHUNK
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=LMCacheMPWorkerMetadata(
+                {},
+                failed_load_ranges={
+                    request.request_id: [(0, failed_end, tracker.writeback_generation)]
+                },
+            )
+        )
+    )
+    assert connector.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert tracker.num_stored_tokens == 2 * CHUNK
+    assert tracker.writeback.ready(2 * CHUNK) == [(0, failed_end)]
