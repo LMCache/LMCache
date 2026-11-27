@@ -114,6 +114,24 @@ query_load_result(task_id) -> Bitmap | None
   was successfully loaded.
 - **One-shot query:** Same semantics as lookup — returns the Bitmap exactly once.
 
+### Python filesystem buffered reads
+
+`FSL2Adapter` submits one executor job per file to open, read into the
+caller-provided buffer and close it. The worker retries short reads until
+the destination is full or EOF is reached. An optional `read_ahead_size`
+splits the read into an initial prefix and a remainder within the same job.
+Files within a load task remain sequential; separate tasks can overlap.
+
+This avoids an event-loop round trip for each open, read and close while
+keeping filesystem operations off the event-loop thread. A full destination
+sets the key's result bit; missing files, short files and I/O failures remain
+misses. O_DIRECT keeps its existing aligned-read and buffered-fallback path.
+
+`close()` cancels coroutine tasks, then waits for the default executor's
+workers before closing the loop and event notifiers. Cancelling an asyncio
+future does not stop an already-running file read, so callers must not
+release their destination buffers until this wait has finished.
+
 ### Thread Safety
 
 The adapter must be safe for concurrent calls from the StoreController thread
