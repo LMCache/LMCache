@@ -111,7 +111,8 @@ class CoordinatorCommand(BaseCommand):
                 "Low watermark of the eviction hysteresis band. When above "
                 "0.0 and below --trigger-watermark, a firing sweep evicts "
                 "down to this fraction of the quota in one pass instead of "
-                "a fixed --eviction-ratio (default: 0.0, legacy behaviour)."
+                "a fixed --eviction-ratio (default: 0.0, legacy behaviour). "
+                "Any other value is refused at startup."
             ),
         )
         parser.add_argument(

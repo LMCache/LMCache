@@ -96,6 +96,11 @@ class FleetEvictionController(Controller):
             burst can't pin usage at the cap. ``0.0`` keeps legacy
             behaviour.
         check_interval: Seconds between sweeps. Zero runs no loop.
+
+    Raises:
+        ValueError: If ``target_watermark`` is neither ``0.0`` nor strictly
+            between ``0.0`` and ``trigger_watermark``, the range
+            ``EvictionConfig`` enforces.
     """
 
     def __init__(
@@ -107,6 +112,14 @@ class FleetEvictionController(Controller):
         target_watermark: float = 0.0,
         check_interval: float = 0.0,
     ) -> None:
+        if target_watermark != 0.0 and not (0.0 < target_watermark < trigger_watermark):
+            # A target at or above the trigger frees nothing when a sweep
+            # fires, so usage would stay at the quota.
+            raise ValueError(
+                "target_watermark must be 0.0 (legacy fixed-ratio) or in "
+                f"(0.0, trigger_watermark={trigger_watermark}); "
+                f"got {target_watermark}"
+            )
         self._quota_manager = QuotaManager()
         self._usage_manager = usage_manager
         self._registry = registry

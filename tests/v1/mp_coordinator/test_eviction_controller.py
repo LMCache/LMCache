@@ -359,6 +359,15 @@ def test_target_watermark_zero_uses_legacy_ratio():
     assert len(result["a"]) == 1  # eviction_ratio 0.1 of 10 keys
 
 
+@pytest.mark.parametrize("target", [1.0, 1.1, 0.95, -0.1])
+def test_target_watermark_outside_the_hysteresis_band_is_rejected(target):
+    # trigger=1.0, target=1.1 would compute a zero eviction ratio at quota.
+    # Same range as EvictionConfig: 0.0 or strictly in (0.0, trigger).
+    trigger = 0.95 if target == 0.95 else 1.0
+    with pytest.raises(ValueError, match="target_watermark"):
+        _setup(trigger_watermark=trigger, target_watermark=target)
+
+
 def test_hysteresis_no_eviction_below_trigger():
     # Usage below the high watermark -> no sweep even with hysteresis on.
     ctrl, qs, ut = _setup(

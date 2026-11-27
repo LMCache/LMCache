@@ -56,7 +56,8 @@ Options
      - Low watermark of the hysteresis band: a salt over
        ``--trigger-watermark`` is evicted down to this fraction of its quota
        in one pass instead of ``--eviction-ratio``.  ``0.0`` (default) keeps
-       the fixed ratio.
+       the fixed ratio.  Must be ``0.0`` or strictly between ``0.0`` and
+       ``--trigger-watermark``; anything else is refused at startup.
    * - ``--chunk-size N``
      - Tokens per KV chunk (default: ``256``). Every registered MP server must
        report the same configured size for CacheBlend matching and pin-key

@@ -178,6 +178,14 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
+        if self.target_watermark != 0.0 and not (
+            0.0 < self.target_watermark < self.trigger_watermark
+        ):
+            raise ValueError(
+                "target_watermark must be 0.0 (legacy fixed-ratio) or in "
+                f"(0.0, trigger_watermark={self.trigger_watermark}); "
+                f"got {self.target_watermark}"
+            )
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be positive")
         if not self.hash_algorithm:

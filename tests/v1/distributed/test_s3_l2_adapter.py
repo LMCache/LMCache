@@ -74,6 +74,8 @@ class _FakeBackend:
         # flight while it submits another.
         self._put_gate: threading.Event | None = None
         self._put_started = threading.Event()
+        # When True, a PUT held on ``_put_gate`` fails once released.
+        self._fail_held_put = False
 
     def reset(self):
         with self._lock:
@@ -87,6 +89,7 @@ class _FakeBackend:
             self._bulk_delete_requests = self._single_delete_requests = 0
             self._put_gate = None
             self._put_started = threading.Event()
+            self._fail_held_put = False
 
     def get(self, key: str) -> bytes | None:
         with self._lock:
@@ -346,6 +349,10 @@ class _FakeS3Request:
                 if gate is not None:
                     _BACKEND._put_started.set()
                     gate.wait(timeout=5.0)
+                    # Lets a test fail an upload that others coalesced onto,
+                    # without failing any other PUT.
+                    if _BACKEND._fail_held_put:
+                        raise RuntimeError("held PUT failed")
                 data = b""
                 body = request.body_stream
                 # body is a MemoryViewStream — read it fully
@@ -1412,7 +1419,8 @@ def test_store_coalesces_duplicate_keys():
 
 def test_store_coalesces_across_separate_tasks():
     # Task 1's PUT is held in flight; task 2 stores the same key and must be
-    # coalesced: completed successfully with 0 bytes, no second PUT.
+    # coalesced: no second PUT, and task 2 completes only once task 1's PUT
+    # has, successfully with 0 bytes.
     config = S3L2AdapterConfig(
         s3_endpoint="s3://test-bucket",
         s3_region="us-east-1",
@@ -1430,17 +1438,134 @@ def test_store_coalesces_across_separate_tasks():
         assert a.report_status()["store_in_flight_chunks"] == 1
 
         second = a.submit_store_task([k], [create_memory_obj()])
-        assert wait_for_event_fd(a.get_store_event_fd())
-        done = a.pop_completed_store_tasks()
-        assert done[second].is_successful()
-        assert done[second].bytes_transferred() == 0
-        assert first not in done
         assert a.report_status()["store_coalesced_chunks"] == 1
+        # Nothing completes while the PUT it joined is in flight.
+        assert not wait_for_event_fd(a.get_store_event_fd(), timeout=0.2)
+        assert a.pop_completed_store_tasks() == {}
 
         gate.set()
-        assert wait_until(lambda: first in a.pop_completed_store_tasks(), timeout=5.0)
+        done: dict = {}
+        assert wait_until(
+            lambda: done.update(a.pop_completed_store_tasks())
+            or {first, second} <= done.keys(),
+            timeout=5.0,
+        )
+        assert done[first].is_successful()
+        assert done[second].is_successful()
+        assert done[second].bytes_transferred() == 0
         assert _BACKEND.counts()["put"] == 1
         assert a.report_status()["store_in_flight_chunks"] == 0
     finally:
         gate.set()
         a.close()
+
+
+def test_coalesced_store_fails_when_the_joined_put_fails():
+    # Task 2 = [in-flight key, new key]. Its own PUT succeeds, but the PUT it
+    # joined fails, so it must report failure: its caller would otherwise
+    # treat a chunk that was never stored as stored.
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    gate = threading.Event()
+    _BACKEND._put_gate = gate
+    try:
+        shared, own = create_object_key(21), create_object_key(22)
+        first = a.submit_store_task([shared], [create_memory_obj()])
+        assert _BACKEND._put_started.wait(timeout=5.0)
+        # Only the held PUT waits on the gate (and fails); task 2's own PUT
+        # runs after it and succeeds.
+        _BACKEND._put_gate = None
+        second = a.submit_store_task(
+            [shared, own], [create_memory_obj(), create_memory_obj()]
+        )
+        assert a.pop_completed_store_tasks() == {}
+
+        _BACKEND._fail_held_put = True
+        gate.set()
+        done: dict = {}
+        assert wait_until(
+            lambda: done.update(a.pop_completed_store_tasks())
+            or {first, second} <= done.keys(),
+            timeout=5.0,
+        )
+        assert not done[first].is_successful()
+        assert not done[second].is_successful()
+        assert not _BACKEND.contains(_object_key_to_string(shared))
+        # Task 2's own key was stored: it failed on the PUT it joined.
+        assert _BACKEND.contains(_object_key_to_string(own))
+        assert a.report_status()["store_in_flight_chunks"] == 0
+    finally:
+        gate.set()
+        a.close()
+
+
+def test_repeated_key_in_one_task_does_not_wait_on_itself():
+    # A key listed twice in one task is written once by that task's own PUT;
+    # the task must still complete (it must not wait for itself).
+    config = S3L2AdapterConfig(
+        s3_endpoint="s3://test-bucket",
+        s3_region="us-east-1",
+        s3_prefer_http2=False,
+        s3_num_io_threads=1,
+        max_capacity_gb=0.001,
+    )
+    a = S3L2Adapter(config)
+    try:
+        k = create_object_key(23)
+        task = a.submit_store_task([k, k], [create_memory_obj(), create_memory_obj()])
+        done: dict = {}
+        assert wait_until(
+            lambda: done.update(a.pop_completed_store_tasks()) or task in done,
+            timeout=5.0,
+        )
+        assert done[task].is_successful()
+        assert _BACKEND.counts()["put"] == 1
+    finally:
+        a.close()
+
+
+@pytest.mark.parametrize(
+    "reject, trigger, ok",
+    [
+        (0.8, 0.9, False),  # stores stop before eviction can fire
+        (0.9, 0.9, True),
+        (1.1, 0.9, True),
+        (0.0, 0.9, True),  # off
+    ],
+)
+def test_reject_watermark_must_not_sit_below_the_trigger(reject, trigger, ok):
+    spec = {
+        "s3_endpoint": "s3://test-bucket",
+        "s3_region": "us-west-2",
+        "max_capacity_gb": 10,
+        "store_reject_watermark": reject,
+        "eviction": {"eviction_policy": "LRU", "trigger_watermark": trigger},
+    }
+    if ok:
+        S3L2AdapterConfig.from_dict(spec)
+    else:
+        with pytest.raises(ValueError, match="store_reject_watermark"):
+            S3L2AdapterConfig.from_dict(spec)
+
+
+def test_reject_watermark_below_trigger_allowed_without_aggregate_eviction():
+    # Without a capacity there is no usage fraction, so neither the ceiling
+    # nor aggregate eviction applies; without an eviction block there is no
+    # trigger to stay above.
+    base = {"s3_endpoint": "s3://test-bucket", "s3_region": "us-west-2"}
+    S3L2AdapterConfig.from_dict(
+        {
+            **base,
+            "store_reject_watermark": 0.5,
+            "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9},
+        }
+    )
+    S3L2AdapterConfig.from_dict(
+        {**base, "max_capacity_gb": 10, "store_reject_watermark": 0.5}
+    )

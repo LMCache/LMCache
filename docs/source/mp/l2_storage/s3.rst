@@ -30,7 +30,10 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
   stores are dropped instead of written: the store task completes as failed,
   and the chunk is recomputed on a later miss.  This bounds how far usage can
   overshoot the cap while eviction catches up.  ``0`` disables it, and it
-  never applies without ``max_capacity_gb`` (usage is then ``-1``).
+  never applies without ``max_capacity_gb`` (usage is then ``-1``).  With
+  ``max_capacity_gb`` and an ``eviction`` block, a non-zero value below
+  ``eviction.trigger_watermark`` is refused at config load: stores would stop
+  before usage reached the trigger, so eviction would never run.
 - ``eviction`` (object): L2 eviction settings shared by all adapters,
   including the ``target_watermark`` hysteresis; see
   :ref:`mp-l2-eviction` and the example below.
@@ -49,8 +52,11 @@ Two behaviours are always on and have no setting:
   at a time, at most 64 in flight, in the same sweep.  It logs one WARNING
   and keeps using per-key deletes for the rest of the process.
 - **Write coalescing.**  A store of a key whose upload is already in flight
-  is skipped, so concurrent stores of the same chunk upload it once.  A store
-  task whose keys were all coalesced completes as successful with 0 bytes.
+  does not upload it again, so concurrent stores of the same chunk upload it
+  once.  The later store task waits for that upload and takes its outcome: it
+  completes once its own uploads and every upload it joined have finished, and
+  succeeds only if all of them did.  A task whose keys were all coalesced
+  reports 0 bytes.
 
 Two are opt-in: ``store_reject_watermark`` above, and eviction hysteresis
 (``"target_watermark"`` in the ``eviction`` object), which makes a sweep that

@@ -79,7 +79,8 @@ keeps the default below.
        ``--trigger-watermark``, a salt over the trigger is evicted down to
        this fraction of its quota in one pass instead of
        ``--eviction-ratio``, so a sustained write burst cannot pin it at the
-       quota. ``0.0`` keeps the fixed ratio.
+       quota. ``0.0`` keeps the fixed ratio. Any other value (at or above
+       the trigger, or negative) is refused at startup.
    * - ``--chunk-size``
      - ``256``
      - Tokens per KV chunk: the CacheBlend match unit and the unit used to

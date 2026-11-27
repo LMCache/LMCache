@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
@@ -342,6 +343,15 @@ def _is_connection_error(error_msg: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _PendingStore:
+    """A store task waiting for in-flight PUTs it coalesced onto."""
+
+    outstanding: int
+    success: bool = True
+    bytes_transferred: int = 0
+
+
 class S3L2AdapterConfig(L2AdapterConfigBase):
     """Config for the S3 L2 adapter.
 
@@ -446,6 +456,19 @@ class S3L2AdapterConfig(L2AdapterConfigBase):
             store_reject_watermark=float(reject_wm),
         )
         cfg.eviction_config = cls._parse_eviction_config(d)
+        eviction = cfg.eviction_config
+        if (
+            eviction is not None
+            and cfg.max_capacity_gb > 0.0
+            and 0.0 < cfg.store_reject_watermark < eviction.trigger_watermark
+        ):
+            # Stores would stop before usage reached the trigger, so eviction
+            # would never fire and the tier would sit below it for good.
+            raise ValueError(
+                "store_reject_watermark must be 0.0 (off) or at least "
+                f"eviction.trigger_watermark={eviction.trigger_watermark}; "
+                f"got {cfg.store_reject_watermark}"
+            )
         return cfg
 
     @classmethod
@@ -573,7 +596,12 @@ class S3L2Adapter(L2AdapterInterface):
         self._store_reject_watermark: float = config.store_reject_watermark
         # Keys with an in-flight S3 PUT — used to single-flight concurrent stores
         # of the same content-addressed chunk (the shared-prefix thundering herd).
-        self._in_flight_store_keys: set[ObjectKey] = set()
+        # Each maps to the store tasks that coalesced onto that PUT; they are
+        # completed with its outcome, not before it.
+        self._in_flight_store_keys: dict[ObjectKey, list[L2TaskId]] = {}
+        # Store tasks that coalesced onto another task's PUT and are still
+        # waiting for at least one outcome.
+        self._pending_store_tasks: dict[L2TaskId, _PendingStore] = {}
         # Observability counters (surfaced via report_status / metrics).
         self._store_rejected_chunks: int = 0
         self._store_coalesced_chunks: int = 0
@@ -656,21 +684,41 @@ class S3L2Adapter(L2AdapterInterface):
 
             # A4 single-flight: skip keys already mid-store (same content-addressed
             # chunk in flight) so a shared-prefix thundering herd doesn't PUT the
-            # same object N times. Reserve the rest; _execute_store releases them.
+            # same object N times. A skipped key makes this task wait for the
+            # in-flight PUT's outcome: the task succeeds only if every key it
+            # asked for was stored, by its own PUT or by the one it joined.
+            # Reserve the rest; _execute_store releases them.
             filtered_keys: list[ObjectKey] = []
             filtered_objects: list[MemoryObj] = []
+            seen: set[ObjectKey] = set()
+            joined = 0
             for key, obj in zip(keys, objects, strict=True):
-                if key in self._in_flight_store_keys:
+                if key in seen:
+                    # Repeated within this task: one PUT covers both.
                     self._store_coalesced_chunks += 1
                     continue
-                self._in_flight_store_keys.add(key)
+                seen.add(key)
+                waiters = self._in_flight_store_keys.get(key)
+                if waiters is not None:
+                    waiters.append(task_id)
+                    joined += 1
+                    self._store_coalesced_chunks += 1
+                    continue
+                self._in_flight_store_keys[key] = []
                 filtered_keys.append(key)
                 filtered_objects.append(obj)
 
+            if joined:
+                self._pending_store_tasks[task_id] = _PendingStore(
+                    outstanding=joined + (1 if filtered_keys else 0)
+                )
             if not filtered_keys:
-                # Everything coalesced into in-flight stores — nothing to write.
-                self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
-                self._store_efd.notify()
+                if not joined:
+                    # Nothing to write (an empty task).
+                    self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
+                    self._store_efd.notify()
+                # Otherwise every key is in flight under another task, and this
+                # task completes when those PUTs do.
                 return task_id
 
         asyncio.run_coroutine_threadsafe(
@@ -1233,6 +1281,9 @@ class S3L2Adapter(L2AdapterInterface):
         # for the same object.
         newly_stored_keys: list[ObjectKey] = []
         newly_stored_sizes: list[int] = []
+        # Keys whose PUT succeeded; tasks that coalesced onto a key get its
+        # outcome from this set.
+        stored_keys: set[ObjectKey] = set()
         try:
             futures: list[Optional[asyncio.Future]] = []
             indexed: list[tuple[int, ObjectKey, MemoryObj, Optional[str]]] = []
@@ -1274,6 +1325,7 @@ class S3L2Adapter(L2AdapterInterface):
                 # aggregate-watermark eviction. Matches the convention used
                 # by ``native_connector_l2_adapter`` and ``mock_l2_adapter``.
                 size = obj.get_size()
+                stored_keys.add(key)
                 with self._lock:
                     is_new = key not in self._key_sizes
                     self._key_sizes[key] = size
@@ -1290,17 +1342,41 @@ class S3L2Adapter(L2AdapterInterface):
             success = False
         finally:
             with self._lock:
-                self._completed_store_tasks[task_id] = L2StoreResult(
-                    success, bytes_transferred
-                )
+                self._finish_store_part_locked(task_id, success, bytes_transferred)
                 # ALWAYS release the in-flight reservations (A4) for every
                 # key this task owned, including launch-failed ones and on
                 # cancel/error, so a later store can retry them rather than
-                # coalesce-skip forever.
-                self._in_flight_store_keys.difference_update(keys)
+                # coalesce-skip forever. Tasks that joined a key get its
+                # outcome.
+                for key in keys:
+                    for waiter in self._in_flight_store_keys.pop(key, ()):
+                        self._finish_store_part_locked(waiter, key in stored_keys, 0)
             if newly_stored_keys:
                 self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
             self._store_efd.notify()
+
+    def _finish_store_part_locked(
+        self, task_id: L2TaskId, success: bool, bytes_transferred: int
+    ) -> None:
+        """Record one outcome for a store task; caller holds ``self._lock``.
+
+        A task that joined in-flight PUTs completes once its own PUT (if any)
+        and every PUT it joined have finished, as successful only if all were.
+        """
+        pending = self._pending_store_tasks.get(task_id)
+        if pending is None:
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
+            return
+        pending.outstanding -= 1
+        pending.success = pending.success and success
+        pending.bytes_transferred += bytes_transferred
+        if pending.outstanding == 0:
+            del self._pending_store_tasks[task_id]
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                pending.success, pending.bytes_transferred
+            )
 
     async def _execute_lookup(
         self,
