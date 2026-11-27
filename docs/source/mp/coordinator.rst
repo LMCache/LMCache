@@ -75,9 +75,9 @@ keeps the default below.
        (0.0 exclusive to 1.0).
    * - ``--chunk-size``
      - ``256``
-     - Tokens per KV chunk: the CacheBlend match unit and the unit used to
-       resolve pin ``token_ids`` to keys. Must equal the MP servers'
-       ``--chunk-size``.
+     - Fleet-wide size in tokens for KV chunks, CacheBlend matching, and
+       resolving pin ``token_ids`` to keys. Set the same ``--chunk-size`` on
+       every MP server. See :ref:`mp-global-chunk-size`.
    * - ``--hash-algorithm``
      - ``blake3``
      - Token hash algorithm for pin key resolution. Must equal the MP servers'
@@ -384,6 +384,11 @@ detected gap is a follow-up.
 The server registers under its stable identity (``--instance-id`` / OTel
 ``service.instance.id``); if the flag is not passed, the server mints a
 random UUID v4 at startup and registers under that.
+
+Coordinator requires a single chunk size across the fleet. It rejects a
+server registration with HTTP 409 if the server's configured ``--chunk-size``
+differs from its own. Each connected MP server also requires every model's
+effective size to equal its configured value. See :ref:`mp-global-chunk-size`.
 
 Registration is best-effort: if the coordinator is unreachable, the MP server
 logs a warning, keeps retrying, and continues serving. A malformed

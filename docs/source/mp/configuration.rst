@@ -88,9 +88,9 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Port to bind the selected request server.
    * - ``--chunk-size``
      - ``256``
-     - Minimum chunk size for KV cache operations (in tokens). MP engine
-       connectors may resolve a larger model-specific effective size to satisfy
-       the engine's KV geometry; see :doc:`chunk_size_negotiation`.
+     - Server minimum chunk size in tokens. MP connectors can resolve a larger
+       size per model and world size. CacheBlend and Coordinator require an
+       exact match with the configured value. See :doc:`chunk_size_negotiation`.
    * - ``--null-block-id``
      - ``0``
      - Engine block ID that denotes absent KV data. Keep the default for
@@ -329,7 +329,10 @@ by chunk. A client may instead send the hashes itself
 chunk in ``[0, end)``, computed with the server's own ``TokenHasher`` so the
 keys are byte-identical. The server then neither decodes nor hashes tokens.
 The ATOM adapters send them when built with ``client_chunk_hashes=True``;
-other clients keep sending tokens. This key form has these requirements:
+other clients keep sending tokens. Use the adapter's
+``lmcache_tokens_per_chunk`` when computing hashes for ATOM. See
+:doc:`chunk_size_negotiation` for how the adapter resolves this value.
+This key form has these requirements:
 
 - **blake3 only.** Client hashes are blake3. A server started with another
   ``--hash-algorithm`` rejects such keys.
@@ -1085,6 +1088,11 @@ from the in-process connector's ``save_decode_cache`` YAML/environment setting.
    * - Key
      - Default
      - Description
+   * - ``lmcache.mp.chunk_size``
+     - *(unset)*
+     - Optional positive client minimum in tokens. The connector takes the
+       larger of this value and the server minimum, then rounds it up to the
+       model's alignment. See :doc:`chunk_size_negotiation` for an example.
    * - ``lmcache.mp.save_decode_cache``
      - ``false``
      - Cache generated tokens in addition to prompt tokens.
@@ -1389,7 +1397,7 @@ configuration knob for enabling a native profile in this PR.
 nonempty opaque identity and a positive engine event block size. Before any
 context, layout or liveness state changes, the server validates:
 
-* positive world size and a block size that divides the server chunk size;
+* positive world size and a block size that divides the effective chunk size;
 * one full-attention engine block address space with the declared block size;
 * agreement across active registrations for the same model and world size,
   including whether a profile is present;
