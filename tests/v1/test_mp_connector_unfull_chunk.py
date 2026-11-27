@@ -446,6 +446,9 @@ def _connector(lookup_hit: int) -> tuple[LMCacheMPConnector, MagicMock]:
     scheduler_adapter.lmcache_tokens_per_chunk = CHUNK
     scheduler_adapter.check_lookup_result.return_value = lookup_hit
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector._writeback_backlog = {}
+    connector._writeback_supported = False
+    connector._hybrid_coverage = False
     connector.request_trackers = {}
     connector.scheduler_adapter = scheduler_adapter
     connector._reserve_last_token_for_lookup = True
@@ -510,3 +513,98 @@ def _store_tails(
         boundary_state_groups,
     )
     return [meta for meta, _block_ids in stores]
+
+
+def test_hybrid_writeback_targets_only_attention_after_block_adoption():
+    tracker = _tracker()
+    tracker.writeback.observe(CHUNK, 2 * CHUNK, group_id=0)
+    replacement = {gid: list(ids) for gid, ids in tracker.allocated_block_ids.items()}
+    replacement[0][8:16] = list(range(1000, 1008))
+    tracker.replace_block_ids(tuple(replacement[gid] for gid in range(2)))
+    meta, ticket = LMCacheMPRequestMetadata.GetWritebackMetadata(
+        tracker,
+        (CHUNK, 2 * CHUNK),
+        GROUP_TOKENS_PER_BLOCK,
+        group_id=0,
+    )
+    assert meta.op.block_ids == [list(range(1000, 1008)), [0]]
+    assert ticket.group_id == 0
+    assert tracker.allocated_block_ids[1] == MAMBA_BLOCKS
+
+
+@pytest.mark.parametrize("state_groups", [1, 3])
+@pytest.mark.parametrize("healthy_checkpoint", [False, True])
+def test_hybrid_delivery_reports_attention_hole_and_healthy_checkpoint(
+    state_groups, healthy_checkpoint
+):
+    from lmcache.v1.common.custom_types import RetrieveCoverage, RetrieveGroupCoverage
+    from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+
+    connector, _ = _connector(0)
+    connector._hybrid_coverage = connector._repair_policy = True
+    connector._report_request_errors = True
+    connector._can_store = True
+    connector._delay_free_req_ids = set()
+    connector._repair_reports = []
+    connector._repair_attestations = []
+    connector._repair_represented = set()
+    connector._hybrid_attention_groups = {0: 2}
+    connector._hybrid_attention_layers = {0: [0, 2]}
+    connector._hybrid_recurrent_groups = tuple(range(1, state_groups + 1))
+    connector._group_tokens_per_block = [16] + [128] * state_groups
+    connector._repair_attempts = {
+        "req": LMCacheMPRequestMetadata(
+            "req",
+            "RETRIEVE",
+            LoadStoreOp(
+                token_bytes=b"",
+                block_ids=[list(range(1, 25))]
+                + [[0, 0, 99 + i] for i in range(state_groups)],
+                start=0,
+                end=384,
+            ),
+            transfer_generation=7,
+        )
+    }
+    coverage = RetrieveCoverage(
+        3,
+        [0, 2] if healthy_checkpoint else [0],
+        [1] if healthy_checkpoint else [1, 2],
+        groups=[
+            RetrieveGroupCoverage(0, [0], "attention", 0, [0, 2], [1]),
+            RetrieveGroupCoverage(
+                1,
+                list(range(1, state_groups + 1)),
+                "recurrent",
+                2,
+                [2] if healthy_checkpoint else [],
+                [] if healthy_checkpoint else [2],
+            ),
+        ],
+    )
+    worker = connector.worker_adapter = MagicMock()
+    worker.lmcache_tokens_per_chunk = 128
+    worker.get_finished.return_value = (set(), {"req"})
+    worker.get_failed_request_ids.return_value = {"req"}
+    worker.get_retrieve_completions.return_value = [("req", coverage)]
+    transfers = connector.get_transfer_results(set())
+    if not healthy_checkpoint:
+        assert transfers.failed_recving == {"req"}
+        assert connector.get_load_failure_reports() == []
+        assert connector.get_load_attestations() == []
+        return
+    assert transfers.finished_recving == {"req"} and not transfers.failed_recving
+    (report,) = connector.get_load_failure_reports()
+    assert report.failed_blocks_by_group == {0: list(range(9, 17))}
+    assert report.observed_failed_layers == [0, 2]
+    assert report.token_span == (128, 256) and report.rollback_boundary == 0
+    assert (
+        report.healthy_recurrent_group_ids == tuple(range(1, state_groups + 1))
+        and report.transfer_generation == 7
+    )
+    (attestation,) = connector.get_load_attestations()
+    assert (
+        attestation.expected_objects == 48 + state_groups
+        and attestation.failed_objects == 16
+    )
+    assert attestation.certifies_content()

@@ -961,3 +961,28 @@ def test_validate_accepts_mamba_group_by_prefix_caching(edits, prefix_caching):
     else:
         with pytest.raises(ValueError, match="mamba_cache_mode='none'"):
             edits.validate_kv_cache_groups(config)
+
+
+@pytest.mark.parametrize("layout", ["NHD", "HND", "BLNHC", "BLHNC"])
+def test_opaque_subpaged_attention_retains_geometry_under_resolved_layout(
+    edits, layout
+):
+    from lmcache.v1.common.custom_types import EngineType
+    from lmcache.v1.common.kv_format.detection import detect_format
+    from lmcache.v1.common.kv_format.specs import get_spec
+
+    original = _fused_kv_cache()
+    config, caches = _hybrid_config(original, None)
+    viewed = edits.apply_kv_cache_group_edits(config, caches, {"kv_layout": layout})[
+        "attn.0"
+    ]
+    fmt, normalized = detect_format([viewed], EngineType.VLLM, {"kv_layout": layout})
+    geometry = get_spec(normalized, fmt)
+    assert geometry.block_size() == LOGICAL_BLOCK_SIZE
+    assert geometry.num_heads() == 1
+    assert geometry.num_blocks() == NUM_LOGICAL_BLOCKS
+    assert (
+        normalized[0].untyped_storage().data_ptr()
+        == original.untyped_storage().data_ptr()
+    )
+    assert torch.equal(normalized[0].reshape(-1), original.reshape(-1))

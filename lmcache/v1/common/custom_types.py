@@ -512,6 +512,23 @@ class EngineType(Enum):
 
 
 @dataclass(frozen=True)
+class RetrieveGroupCoverage:
+    """Terminal coverage for one registered object group.
+
+    Engine IDs name the block address spaces contained in this object. Only
+    chunks from ``first_chunk`` onward are required; older recurrent snapshots
+    need not be delivered. Identity and kind come from server registration.
+    """
+
+    object_group_id: int
+    engine_group_ids: list[int]
+    kind: str
+    first_chunk: int
+    loaded_chunks: list[int]
+    failed_chunks: list[int]
+
+
+@dataclass(frozen=True)
 class RetrieveCoverage:
     """Terminal GPU delivery coverage, indexed in the original chunk range.
 
@@ -523,14 +540,49 @@ class RetrieveCoverage:
     total_chunks: int
     loaded_chunks: list[int]
     failed_chunks: list[int]
+    groups: list[RetrieveGroupCoverage] | None = None
+
+    @property
+    def attention_only_failure(self) -> bool:
+        """Whether grouped evidence certifies failures only in attention KV.
+
+        Ungrouped legacy evidence cannot certify recurrent delivery. The
+        caller must additionally check all expected engine groups are present.
+        """
+        self.validate()
+        return bool(self.groups and self.failed_chunks) and all(
+            group.kind == "attention" or not group.failed_chunks
+            for group in self.groups
+        )
 
     def validate(self) -> None:
         """Reject incomplete, overlapping or out-of-range terminal coverage."""
         cells = self.loaded_chunks + self.failed_chunks
-        if sorted(cells) != list(range(self.total_chunks)):
+        if self.total_chunks < 0 or sorted(cells) != list(range(self.total_chunks)):
             raise ValueError(
                 "Retrieve coverage must partition the complete chunk range"
             )
+        if self.groups is None:
+            return
+        seen: set[int] = set()
+        failures: set[int] = set()
+        for group in self.groups:
+            if (
+                group.object_group_id < 0
+                or group.object_group_id in seen
+                or not group.engine_group_ids
+                or min(group.engine_group_ids) < 0
+                or len(set(group.engine_group_ids)) != len(group.engine_group_ids)
+                or group.kind not in ("attention", "recurrent")
+                or not 0 <= group.first_chunk <= self.total_chunks
+                or sorted(group.loaded_chunks + group.failed_chunks)
+                != list(range(group.first_chunk, self.total_chunks))
+            ):
+                raise ValueError("Invalid registered-group retrieve coverage")
+            seen.add(group.object_group_id)
+            failures.update(group.failed_chunks)
+        if not seen or failures != set(self.failed_chunks):
+            raise ValueError("Group failures disagree with aggregate coverage")
 
     def __bool__(self) -> bool:
         return not self.failed_chunks

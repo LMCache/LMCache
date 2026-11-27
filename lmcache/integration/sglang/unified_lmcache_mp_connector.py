@@ -29,7 +29,7 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     SGLangKVComponentGroup,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
-from lmcache.v1.common.custom_types import RetrieveCoverage
+from lmcache.v1.common.custom_types import RetrieveCoverage, RetrieveGroupCoverage
 from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
 
 if TYPE_CHECKING:
@@ -296,9 +296,11 @@ class UnifiedLMCacheMPConnector:
         self._store_submitted_tokens: dict[str, int] = {}
         self._writeback_supported = (
             self.tp_size == self.pp_size == 1
-            and len(self._kv_groups) == 1
-            and not self._kv_groups[0].recurrent_state
-            and self._kv_groups[0].sliding_window_size < 0
+            and any(not group.recurrent_state for group in self._kv_groups)
+            and all(
+                group.recurrent_state or group.sliding_window_size < 0
+                for group in self._kv_groups
+            )
         )
         self._recomputed_writeback: dict[str, RecomputedWriteback] = {}
         self._writeback_backlog: dict[tuple[str, bytes], RecomputedWriteback] = {}
@@ -931,7 +933,13 @@ class UnifiedLMCacheMPConnector:
         ]
         block_ids = self._expand_engine_group_block_ids(engine_group_block_ids)
         key = self._create_key(
-            operation, start=start, end=total_hit, worker_id=self.kv_worker_id
+            operation,
+            start=start,
+            end=total_hit,
+            worker_id=self.kv_worker_id,
+            request_configs={"holemiss_coverage": True}
+            if self._writeback_supported
+            else None,
         )
         if operation.lock_start != start:
             logger.warning(
@@ -990,16 +998,70 @@ class UnifiedLMCacheMPConnector:
         ).digest()
 
     def _observe_failed_writeback(
-        self, operation: LMCacheLoadOperation, failed: Sequence[int]
+        self,
+        operation: LMCacheLoadOperation,
+        failed: Sequence[int],
+        groups: Sequence[RetrieveGroupCoverage] | None = None,
     ) -> None:
         if not self._writeback_supported:
             return
         content = self._writeback_content_key(operation.lookup)
         ledger = self._writeback_backlog.setdefault(content, RecomputedWriteback())
         self._recomputed_writeback[operation.request_id] = ledger
-        for index in failed:
-            start = operation.start + index * self.chunk_size
-            ledger.observe(start, min(start + self.chunk_size, operation.end))
+        failed_groups = (
+            [
+                (gid, group.failed_chunks)
+                for group in groups
+                if group.kind == "attention"
+                for gid in group.engine_group_ids
+            ]
+            if groups is not None
+            else [
+                (gid, failed)
+                for gid, group in enumerate(self._kv_groups)
+                if not group.recurrent_state
+            ]
+        )
+        for gid, missing in failed_groups:
+            if (
+                not 0 <= gid < len(self._kv_groups)
+                or self._kv_groups[gid].recurrent_state
+            ):
+                raise ValueError("Attention failure names an invalid engine group")
+            for index in missing:
+                start = operation.start + index * self.chunk_size
+                ledger.observe(
+                    start, min(start + self.chunk_size, operation.end), group_id=gid
+                )
+
+    def supports_attention_repair(self, coverage: RetrieveCoverage) -> bool:
+        """Validate terminal coverage for the registered attention/state groups.
+
+        A hybrid requires every registered group and healthy recurrent delivery.
+        Ungrouped legacy evidence is accepted only for one full-attention group.
+        This does not wait for GPU completion; callers must drain its event.
+        """
+        coverage.validate()
+        if not self._writeback_supported:
+            return False
+        if coverage.groups is None:
+            return len(self._kv_groups) == 1 and not self._kv_groups[0].recurrent_state
+        expected = set(range(len(self._kv_groups)))
+        described = [gid for group in coverage.groups for gid in group.engine_group_ids]
+        if set(described) != expected or len(described) != len(expected):
+            return False
+        for group in coverage.groups:
+            for gid in group.engine_group_ids:
+                registered = self._kv_groups[gid]
+                if (group.kind == "recurrent") != registered.recurrent_state:
+                    return False
+                if registered.recurrent_state:
+                    required = max(0, coverage.total_chunks - 1)
+                    if group.first_chunk > required or group.failed_chunks:
+                        return False
+                elif group.first_chunk != 0:
+                    return False
+        return coverage.attention_only_failure or not coverage.failed_chunks
 
     def prepare_load_on_stream(
         self,
@@ -1035,12 +1097,15 @@ class UnifiedLMCacheMPConnector:
                 outcome.validate()
                 operation.coverage = outcome
                 if outcome.failed_chunks:
-                    self._observe_failed_writeback(operation, outcome.failed_chunks)
+                    self._observe_failed_writeback(
+                        operation, outcome.failed_chunks, outcome.groups
+                    )
             local_success = bool(outcome)
             if (
                 allow_partial
                 and isinstance(outcome, RetrieveCoverage)
                 and outcome.failed_chunks
+                and self.supports_attention_repair(outcome)
             ):
                 # Recovery may immediately free missing destinations. A stream
                 # wait alone does not permit the host allocator to reuse them.
@@ -1094,7 +1159,9 @@ class UnifiedLMCacheMPConnector:
                 outcome.validate()
                 operation.coverage = outcome
                 if outcome.failed_chunks:
-                    self._observe_failed_writeback(operation, outcome.failed_chunks)
+                    self._observe_failed_writeback(
+                        operation, outcome.failed_chunks, outcome.groups
+                    )
             elif not outcome:
                 self._observe_failed_writeback(
                     operation,
@@ -1155,7 +1222,17 @@ class UnifiedLMCacheMPConnector:
             Exact aligned ranges eligible for the ordinary STORE path.
         """
         ledger = self._recomputed_writeback.get(request_id)
-        return [] if ledger is None else ledger.ready(committed_tokens)
+        return (
+            []
+            if ledger is None
+            else sorted(
+                {
+                    span
+                    for gid in ledger.group_ids
+                    for span in ledger.ready(committed_tokens, group_id=gid)
+                }
+            )
+        )
 
     def submit_store(
         self,
@@ -1187,12 +1264,19 @@ class UnifiedLMCacheMPConnector:
 
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
         start = self.get_store_start(request_id, aligned_end)
+        target_groups = set(range(len(self._kv_groups)))
         if writeback_range is not None:
             start, aligned_end = writeback_range
             if writeback_range not in self.pending_writeback_ranges(
                 request_id, len(token_ids)
             ):
                 return None
+            ledger = self._recomputed_writeback[request_id]
+            target_groups = {
+                gid
+                for gid in ledger.group_ids
+                if writeback_range in ledger.ready(len(token_ids), group_id=gid)
+            }
         if aligned_end <= start:
             return None
         lookup = LMCacheLookupOperation(
@@ -1214,7 +1298,9 @@ class UnifiedLMCacheMPConnector:
             )
         group_indices = self._normalize_group_indices(device_indices)
         store_group_indices = []
-        for group, indices in zip(self._kv_groups, group_indices, strict=True):
+        for gid, (group, indices) in enumerate(
+            zip(self._kv_groups, group_indices, strict=True)
+        ):
             group_covered_tokens = (
                 int(indices.numel()) * group.tokens_per_block // group.slots_per_block
             )
@@ -1236,7 +1322,10 @@ class UnifiedLMCacheMPConnector:
                 * group.slots_per_block
                 // group.tokens_per_block
             )
-            store_group_indices.append(indices[start_slot:end_slot])
+            selected = indices[start_slot:end_slot]
+            store_group_indices.append(
+                selected if gid in target_groups else torch.zeros_like(selected)
+            )
         engine_group_blocks = [
             self._slots_to_blocks(
                 indices,
@@ -1253,7 +1342,10 @@ class UnifiedLMCacheMPConnector:
         locally_healthy = self.is_healthy
         can_submit = locally_healthy and all(
             self._store_group_blocks_are_valid(group, blocks)
-            for group, blocks in zip(self._kv_groups, engine_group_blocks, strict=True)
+            for gid, (group, blocks) in enumerate(
+                zip(self._kv_groups, engine_group_blocks, strict=True)
+            )
+            if gid in target_groups
         )
         if not self._sync_success(can_submit):
             if locally_healthy and not can_submit:
@@ -1264,8 +1356,15 @@ class UnifiedLMCacheMPConnector:
                 )
             return None
         ticket = None
+        tickets = ()
         if writeback_range is not None:
-            ticket = self._recomputed_writeback[request_id].begin(*writeback_range)
+            tickets = tuple(
+                self._recomputed_writeback[request_id].begin(
+                    *writeback_range, group_id=gid
+                )
+                for gid in sorted(target_groups)
+            )
+            ticket = tickets[0]
         submitted = False
         event = None
         future: MessagingFuture[Any] | _ImmediateFuture
@@ -1308,7 +1407,12 @@ class UnifiedLMCacheMPConnector:
         if ticket is None:
             self._store_submitted_tokens[request_id] = aligned_end
         operation = LMCacheStoreOperation(
-            request_id, start, aligned_end, future, writeback_ticket=ticket
+            request_id,
+            start,
+            aligned_end,
+            future,
+            writeback_ticket=ticket,
+            additional_writeback_tickets=tickets[1:],
         )
         if ticket is not None:
             logger.info(
@@ -1347,7 +1451,11 @@ class UnifiedLMCacheMPConnector:
         if operation.writeback_ticket is not None:
             ledger = self._recomputed_writeback.get(operation.request_id)
             if ledger is not None:
-                ledger.complete(operation.writeback_ticket, bool(operation.result))
+                for ticket in (
+                    operation.writeback_ticket,
+                    *operation.additional_writeback_tickets,
+                ):
+                    ledger.complete(ticket, bool(operation.result))
                 if not ledger.has_pending:
                     for content, saved in list(self._writeback_backlog.items()):
                         if saved is ledger:

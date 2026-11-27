@@ -332,7 +332,10 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
+            request_configs=None,
         ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
@@ -361,7 +364,10 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     )
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
+            request_configs=None,
         ),
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
@@ -395,7 +401,10 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
 
     _handle, ok = module.retrieve(
         key=SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
+            request_configs=None,
         ),
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
@@ -424,7 +433,10 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
     )
     _, ok = module.retrieve(
         SimpleNamespace(
-            request_id="req", cache_salt="salt", has_unfull_chunk=_no_unfull
+            request_id="req",
+            cache_salt="salt",
+            has_unfull_chunk=_no_unfull,
+            request_configs=None,
         ),
         1,
         [[1, 2], [0, 3]],
@@ -500,6 +512,7 @@ def test_downsample_full_attention_keeps_every_block():
 
 
 def _unfull_key(**kwargs):
+    kwargs.setdefault("request_configs", None)
     return SimpleNamespace(
         request_id="req",
         model_name="m",
@@ -638,3 +651,20 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
 def _no_unfull(chunk_size: int) -> bool:
     """``has_unfull_chunk`` of a key double that addresses full chunks only."""
     return False
+
+
+def test_store_refuses_partial_components_of_one_atomic_object(monkeypatch):
+    """An attention-only STORE cannot overwrite a co-packed healthy state."""
+    module, context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    context.kv_layer_groups_manager.object_groups = [_og([0, 1, 2])]
+    context.kv_layer_groups_manager.num_object_groups = 1
+    module.context.resolve_obj_keys.return_value = [["g0c0", "g0c1"]]
+    _handle, ok = module.store(
+        SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+    )
+    assert not ok
+    module.context.storage_manager.reserve_write.assert_not_called()
+    assert not transfers

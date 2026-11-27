@@ -496,7 +496,11 @@ def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
     tracker = harness.connector.request_trackers["L-new"]
     tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
     scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[SimpleNamespace(req_id="L-new", num_computed_tokens=0)],
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="L-new", num_computed_tokens=0, block_ids=([1, 2, 3, 4],)
+            )
+        ],
         num_scheduled_tokens={"L-new": 4 * TOKENS_PER_BLOCK},
     )
     connector_metadata = LMCacheMPConnectorMetadata()
@@ -575,7 +579,11 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
 
     harness.connector._process_new_requests(
         SimpleNamespace(
-            scheduled_new_reqs=[SimpleNamespace(req_id="C-new", num_computed_tokens=0)],
+            scheduled_new_reqs=[
+                SimpleNamespace(
+                    req_id="C-new", num_computed_tokens=0, block_ids=([1, 2, 3, 4],)
+                )
+            ],
             num_scheduled_tokens={"C-new": 4 * TOKENS_PER_BLOCK},
         ),
         connector_metadata,  # type: ignore[arg-type]

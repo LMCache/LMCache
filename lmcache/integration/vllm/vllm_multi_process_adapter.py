@@ -1438,7 +1438,9 @@ class LMCacheMPWorkerAdapter:
         self._writeback_futures: dict[str, MessagingFuture[StoreResult]] = {}
         self._writeback_results: dict[str, bool] = {}
         self._writeback_load_ops: dict[str, tuple[LoadStoreOp, str]] = {}
-        self._failed_load_ranges: dict[str, list[tuple[int, int, str]]] = {}
+        self._failed_load_ranges: dict[
+            str, list[tuple[int, int, str] | tuple[int, int, str, int]]
+        ] = {}
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
@@ -2264,8 +2266,19 @@ class LMCacheMPWorkerAdapter:
                 self._retrieve_completions.append((request_id, r_result))
             if not r_result:
                 failed_ids = (
-                    r_result.failed_block_ids(r_block_ids, 1)
+                    r_result.failed_block_ids(
+                        r_block_ids, len(r_block_ids) // r_result.total_chunks
+                    )
                     if isinstance(r_result, RetrieveCoverage)
+                    and (
+                        r_result.groups is None
+                        or {
+                            gid
+                            for group in r_result.groups
+                            for gid in group.engine_group_ids
+                        }
+                        == {0}
+                    )
                     else r_block_ids
                 )
                 self.error_block_ids.update(failed_ids)
@@ -2399,8 +2412,19 @@ class LMCacheMPWorkerAdapter:
                 self._retrieve_completions.append((request_id, r_result))
             if not r_result:
                 failed_ids = (
-                    r_result.failed_block_ids(r_block_ids, 1)
+                    r_result.failed_block_ids(
+                        r_block_ids, len(r_block_ids) // r_result.total_chunks
+                    )
                     if isinstance(r_result, RetrieveCoverage)
+                    and (
+                        r_result.groups is None
+                        or {
+                            gid
+                            for group in r_result.groups
+                            for gid in group.engine_group_ids
+                        }
+                        == {0}
+                    )
                     else r_block_ids
                 )
                 self.error_block_ids.update(failed_ids)
@@ -2487,6 +2511,20 @@ class LMCacheMPWorkerAdapter:
             return
         op, generation = saved
         count = (op.end - op.start) // self.lmcache_tokens_per_chunk
+        if isinstance(result, RetrieveCoverage) and result.groups is not None:
+            self._failed_load_ranges[request_id] = [
+                (
+                    op.start + index * self.lmcache_tokens_per_chunk,
+                    op.start + (index + 1) * self.lmcache_tokens_per_chunk,
+                    generation,
+                    gid,
+                )
+                for group in result.groups
+                if group.kind == "attention"
+                for gid in group.engine_group_ids
+                for index in group.failed_chunks
+            ]
+            return
         failed = (
             result.failed_chunks
             if isinstance(result, RetrieveCoverage)
@@ -2503,7 +2541,10 @@ class LMCacheMPWorkerAdapter:
 
     def get_writeback_results(
         self,
-    ) -> tuple[dict[str, list[tuple[int, int, str]]], dict[str, bool]]:
+    ) -> tuple[
+        dict[str, list[tuple[int, int, str] | tuple[int, int, str, int]]],
+        dict[str, bool],
+    ]:
         """Collect failed ranges and normal STORE outcomes for source-pin release.
 
         Returns:

@@ -32,3 +32,18 @@ def test_failure_is_retryable_and_old_success_cannot_clear_new_loss() -> None:
     assert retry.identity != current.identity
     assert ledger.complete(retry, True)
     assert ledger.ready(8064) == []
+
+
+def test_groups_keep_independent_ranges_and_completion_revisions() -> None:
+    ledger = RecomputedWriteback()
+    ledger.observe(128, 256, group_id=0)
+    ledger.observe(128, 256, group_id=2)
+    assert ledger.group_ids == [0, 2]
+    first = ledger.begin(128, 256, group_id=0)
+    second = ledger.begin(128, 256, group_id=2)
+    assert first.group_id == 0 and second.group_id == 2
+    assert ledger.complete(first, True)
+    assert ledger.complete(second, False)
+    assert ledger.group_ids == [2]
+    assert ledger.ready(256, group_id=0) == []
+    assert ledger.ready(256, group_id=2) == [(128, 256)]

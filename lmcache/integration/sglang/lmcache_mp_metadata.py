@@ -71,6 +71,7 @@ class LMCacheStoreOperation:
     future: Any
     result: Optional[bool] = None
     writeback_ticket: WritebackTicket | None = None
+    additional_writeback_tickets: tuple[WritebackTicket, ...] = ()
 
     def query(self) -> bool:
         return self.result is not None or bool(self.future.query())
@@ -96,6 +97,7 @@ class LMCacheExternalFlow:
     load_completed: bool = False
     retire_requested: bool = False
     cancelled: bool = False
+    repair_restored_extent: Optional[int] = None
 
 
 @dataclass

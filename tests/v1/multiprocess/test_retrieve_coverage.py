@@ -27,6 +27,69 @@ def test_legacy_boolean_reply_remains_supported() -> None:
     ) == (b"", False)
 
 
+def test_hybrid_coverage_roundtrip_certifies_the_required_checkpoint() -> None:
+    """A historical attention hole must not imply a lost recurrent checkpoint."""
+    from lmcache.v1.common.custom_types import RetrieveGroupCoverage
+
+    response = RetrieveCoverage(
+        3,
+        [0, 2],
+        [1],
+        groups=[
+            RetrieveGroupCoverage(0, [2], "attention", 0, [0, 2], [1]),
+            RetrieveGroupCoverage(1, [0, 1], "recurrent", 2, [2], []),
+        ],
+    )
+    response.validate()
+    restored = msgspec.msgpack.decode(
+        msgspec.msgpack.encode((b"event", response)),
+        type=tuple[bytes, bool | RetrieveCoverage],
+    )
+    assert restored == (b"event", response)
+    assert response.attention_only_failure
+    assert not bool(response)
+
+
+def test_missing_recurrent_checkpoint_is_never_attention_only_failure() -> None:
+    from lmcache.v1.common.custom_types import RetrieveGroupCoverage
+
+    response = RetrieveCoverage(
+        3,
+        [0],
+        [1, 2],
+        groups=[
+            RetrieveGroupCoverage(0, [0], "attention", 0, [0, 2], [1]),
+            RetrieveGroupCoverage(1, [1], "recurrent", 2, [], [2]),
+        ],
+    )
+    response.validate()
+    assert not response.attention_only_failure
+
+
+@pytest.mark.parametrize("invalid", ["aggregate", "checkpoint", "identity"])
+def test_hybrid_coverage_rejects_inconsistent_group_evidence(invalid: str) -> None:
+    from lmcache.v1.common.custom_types import RetrieveGroupCoverage
+
+    attention = RetrieveGroupCoverage(0, [0], "attention", 0, [0, 2], [1])
+    checkpoint = RetrieveGroupCoverage(1, [1], "recurrent", 2, [2], [])
+    if invalid == "aggregate":
+        response = RetrieveCoverage(3, [0, 1, 2], [], [attention, checkpoint])
+    elif invalid == "checkpoint":
+        response = RetrieveCoverage(
+            3,
+            [0, 2],
+            [1],
+            [
+                attention,
+                RetrieveGroupCoverage(1, [1], "recurrent", 2, [], []),
+            ],
+        )
+    else:
+        response = RetrieveCoverage(3, [0, 2], [1], [attention, attention])
+    with pytest.raises(ValueError):
+        response.validate()
+
+
 def test_incomplete_coverage_is_rejected() -> None:
     with pytest.raises(ValueError):
         RetrieveCoverage(3, [0], [1]).validate()

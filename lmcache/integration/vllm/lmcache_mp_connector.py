@@ -661,6 +661,38 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # while current vLLM's type declaration requires it.
         super().__init__(vllm_config, role, kv_cache_config)  # type: ignore[arg-type]
         self._connector_stats = LMCacheMPConnectorStats()
+        self._repair_policy = (
+            getattr(
+                vllm_config.kv_transfer_config, "kv_load_failure_policy", "recompute"
+            )
+            == "repair"
+        )
+        self._repair_generations: dict[str, int] = {}
+        self._repair_attempts: dict[str, LMCacheMPRequestMetadata] = {}
+        self._repair_reports: list[Any] = []
+        self._repair_attestations: list[Any] = []
+        self._repair_represented: set[str] = set()
+        groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else []
+        from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+        self._hybrid_attention_groups = {
+            gid: len(group.layer_names)
+            for gid, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+        }
+        self._hybrid_attention_layers: dict[int, list[int]] = {}
+        self._hybrid_recurrent_groups = tuple(
+            gid
+            for gid, group in enumerate(groups)
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        )
+        self._hybrid_coverage = (
+            len(groups) >= 2
+            and len(self._hybrid_attention_groups) == 1
+            and len(self._hybrid_recurrent_groups) == len(groups) - 1
+            and vllm_config.parallel_config.world_size == 1
+            and vllm_config.speculative_config is None
+        )
 
         # Fail fast, before the server handshake below.
         kv_cache_config = getattr(self, "_kv_cache_config", None)
@@ -674,6 +706,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and len(kv_cache_config.kv_cache_groups) > 1
         )
 
+        if self._hybrid_coverage:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            try:
+                self._hybrid_attention_layers = {
+                    gid: [extract_layer_index(name) for name in groups[gid].layer_names]
+                    for gid in self._hybrid_attention_groups
+                }
+            except (AssertionError, ValueError):
+                self._hybrid_coverage = False
+                logger.warning(
+                    "Hybrid repair requires unambiguous physical layer indices"
+                )
+
         group_tokens_per_block = get_group_tokens_per_block(
             vllm_config, kv_cache_config
         )
@@ -683,6 +729,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             is_windowed_group(group) for group in kv_cache_config.kv_cache_groups
         )
         mamba_cache_mode = vllm_mamba_cache_mode(vllm_config, kv_cache_config)
+        self._hybrid_coverage = self._hybrid_coverage and mamba_cache_mode == "align"
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
@@ -863,9 +910,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._writeback_backlog: dict[tuple[str, bytes], RecomputedWriteback] = {}
             self._writeback_supported = (
                 parallel_strategy.vllm_world_size == 1
-                and len(group_tokens_per_block) == 1
-                and not self._full_hit_holds_back_last_token
-                and mamba_cache_mode not in ("align", "all")
+                and (
+                    self._hybrid_coverage
+                    or (
+                        len(group_tokens_per_block) == 1
+                        and not self._full_hit_holds_back_last_token
+                        and mamba_cache_mode not in ("align", "all")
+                    )
+                )
                 and spec_config is None
             )
             self._pending_writebacks: dict[str, _PendingWriteback] = {}
@@ -1100,6 +1152,129 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         self.worker_adapter.restore_kv_caches()
 
+    def note_transfer_attempt(
+        self, request: "Request", transfer_generation: int
+    ) -> None:
+        """Bind delivery evidence to this engine-issued asynchronous attempt."""
+        if self._hybrid_coverage:
+            self._repair_generations[request.request_id] = transfer_generation
+
+    def get_load_failure_reports(self) -> list[Any]:
+        """Drain terminal, generation-bound attention failure descriptors."""
+        reports, self._repair_reports = self._repair_reports, []
+        return reports
+
+    def get_load_attestations(self) -> list[Any]:
+        """Drain positive delivery evidence for the engine publication gate."""
+        attestations, self._repair_attestations = self._repair_attestations, []
+        return attestations
+
+    def _collect_hybrid_load_evidence(self) -> None:
+        # This queue is populated only after MP's GPU completion event drains.
+        from vllm.v1.outputs import KVLoadAttestation, KVLoadFailureReport
+
+        for rid, coverage in self.worker_adapter.get_retrieve_completions():
+            meta = self._repair_attempts.pop(rid, None)
+            if meta is None or not self._repair_policy:
+                continue
+            coverage.validate()
+            if (
+                coverage.groups is None
+                or meta.transfer_generation is None
+                or meta.op.skip_first_n_tokens
+                or not coverage.attention_only_failure
+            ):
+                # Success still needs an attestation; unknown or recurrent
+                # failures stay on the normal request-level recompute channel.
+                if not bool(coverage):
+                    continue
+            if coverage.groups is None or meta.transfer_generation is None:
+                continue
+            seen = [gid for group in coverage.groups for gid in group.engine_group_ids]
+            expected_groups = set(self._hybrid_attention_groups) | set(
+                self._hybrid_recurrent_groups
+            )
+            if set(seen) != expected_groups or len(seen) != len(expected_groups):
+                continue
+            chunk = self.worker_adapter.lmcache_tokens_per_chunk
+            if (
+                meta.op.skip_first_n_tokens
+                or meta.op.start % chunk
+                or meta.op.end - meta.op.start != coverage.total_chunks * chunk
+                or any(
+                    (group.kind != "attention" or group.first_chunk != 0)
+                    if gid in self._hybrid_attention_groups
+                    else (
+                        group.kind != "recurrent"
+                        or bool(group.failed_chunks)
+                        or group.first_chunk != coverage.total_chunks - 1
+                    )
+                    for group in coverage.groups
+                    for gid in group.engine_group_ids
+                )
+            ):
+                continue
+            expected = failed = 0
+            failed_blocks: dict[int, list[int]] = {}
+            missing = set()
+            for group in coverage.groups:
+                for gid in group.engine_group_ids:
+                    if gid in self._hybrid_attention_groups:
+                        per_chunk = (
+                            self.worker_adapter.lmcache_tokens_per_chunk
+                            // self._group_tokens_per_block[gid]
+                        )
+                        layers = self._hybrid_attention_groups[gid]
+                        expected += coverage.total_chunks * per_chunk * layers
+                        failed += len(group.failed_chunks) * per_chunk * layers
+                        ids = meta.op.block_ids[gid]
+                        failed_blocks[gid] = [
+                            bid
+                            for index in group.failed_chunks
+                            for bid in ids[index * per_chunk : (index + 1) * per_chunk]
+                        ]
+                        missing.update(group.failed_chunks)
+                    else:
+                        expected += 1
+            loaded = expected - failed
+            self._repair_attestations.append(
+                KVLoadAttestation(
+                    request_id=rid,
+                    expected_objects=expected,
+                    loaded_objects=loaded,
+                    failed_objects=failed,
+                    certification="content",
+                    certified_objects=loaded,
+                    certification_failures=0,
+                    terminal=True,
+                    transfer_generation=meta.transfer_generation,
+                )
+            )
+            if missing and missing == set(range(min(missing), max(missing) + 1)):
+                chunk = self.worker_adapter.lmcache_tokens_per_chunk
+                start = meta.op.start + min(missing) * chunk
+                end = meta.op.start + (max(missing) + 1) * chunk
+                self._repair_reports.append(
+                    KVLoadFailureReport(
+                        request_id=rid,
+                        failed_block_ids=[
+                            bid for ids in failed_blocks.values() for bid in ids
+                        ],
+                        token_span=(start, end),
+                        rollback_boundary=meta.op.start,
+                        observed_failed_layers=self._hybrid_attention_layers[
+                            next(iter(self._hybrid_attention_groups))
+                        ],
+                        healthy_above_span=True,
+                        restored_extent=meta.op.end,
+                        transfer_generation=meta.transfer_generation,
+                        failed_blocks_by_group=failed_blocks,
+                        healthy_recurrent_group_ids=self._hybrid_recurrent_groups,
+                    )
+                )
+                self._repair_represented.add(rid)
+            continue
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
@@ -1127,6 +1302,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
+            if self._hybrid_coverage:
+                self._repair_attempts[meta.request_id] = meta
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
@@ -1280,6 +1457,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             finished_sending = set(finished_sending or ()) & self._delay_free_req_ids
             self._delay_free_req_ids -= finished_sending
             val = (finished_sending, finished_receiving)
+        if self._hybrid_coverage:
+            self._collect_hybrid_load_evidence()
+            for rid in val[1] or ():
+                self._repair_attempts.pop(rid, None)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
@@ -1299,14 +1480,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         assert KVConnectorTransferResults is not None
         sending, receiving = self.get_finished(finished_req_ids)
+        failures = (
+            self.worker_adapter.get_failed_request_ids()
+            if self._report_request_errors
+            else set()
+        )
+        failures -= self._repair_represented
+        self._repair_represented.clear()
         return KVConnectorTransferResults(
             finished_sending=set(sending or ()),
             finished_recving=set(receiving or ()),
-            failed_recving=(
-                self.worker_adapter.get_failed_request_ids()
-                if self._report_request_errors
-                else set()
-            ),
+            failed_recving=failures,
         )
 
     def build_connector_worker_meta(self) -> LMCacheMPWorkerMetadata | None:
@@ -1316,20 +1500,45 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Missing ranges and exact-range store outcomes, plus lazy-offload
             completion counts when enabled; None when no new results exist.
         """
-        loads, writebacks = self.worker_adapter.get_writeback_results()
+        raw_loads, writebacks = self.worker_adapter.get_writeback_results()
+        loads, grouped = {}, {}
+        for rid, spans in raw_loads.items():
+            for span in spans:
+                if len(span) == 3:
+                    if self._hybrid_coverage:
+                        start, end, generation = span
+                        grouped.setdefault(rid, []).extend(
+                            (gid, start, end, generation)
+                            for gid in self._hybrid_attention_groups
+                        )
+                    else:
+                        loads.setdefault(rid, []).append(span)
+                else:
+                    start, end, generation, gid = span
+                    grouped.setdefault(rid, []).append((gid, start, end, generation))
         if not self.lazy_offload:
             return (
                 LMCacheMPWorkerMetadata(
-                    {}, failed_load_ranges=loads, writeback_results=writebacks
+                    {},
+                    failed_load_ranges=loads,
+                    failed_group_load_ranges=grouped,
+                    writeback_results=writebacks,
                 )
-                if loads or writebacks
+                if loads or grouped or writebacks
                 else None
             )
         completed_store_requests = self.worker_adapter.get_completed_store_requests()
         failed_store_requests = self.worker_adapter.get_failed_store_requests()
-        if completed_store_requests or failed_store_requests or loads or writebacks:
+        if (
+            completed_store_requests
+            or failed_store_requests
+            or loads
+            or grouped
+            or writebacks
+        ):
             return LMCacheMPWorkerMetadata(
                 failed_load_ranges=loads,
+                failed_group_load_ranges=grouped,
                 writeback_results=writebacks,
                 completed_store_requests=completed_store_requests or {},
                 failed_store_requests=failed_store_requests or set(),
@@ -1442,6 +1651,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        if tracker.internal_replay:
+            return 0, False
 
         # A failed asynchronous load is bypassed until vLLM admits the request
         # for local computation via update_state_after_alloc().  The scheduler
@@ -1624,7 +1835,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
-        if not self._eager_prefetch or request.resumable:
+        if (
+            not self._eager_prefetch
+            or request.resumable
+            or getattr(request, "is_internal_kv_repair", False)
+        ):
             return
 
         tracker = self._get_or_create_request_tracker(request)
@@ -1667,6 +1882,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = blocks.get_block_ids() or ()
+
+        tracker.replace_block_ids(tuple(list(ids) for ids in block_ids))
 
         # Only append blocks beyond what's already tracked, per engine group.
         existing_counts = tracker.num_allocated_blocks()
@@ -1798,6 +2015,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                             self._writeback_backlog[
                                 self._writeback_content_key(tracker)
                             ] = tracker.writeback
+            for rid, spans in meta.failed_group_load_ranges.items():
+                tracker = self.request_trackers.get(rid)
+                if tracker is not None and self._writeback_supported:
+                    for gid, start, end, generation in spans:
+                        if generation == tracker.writeback_generation:
+                            tracker.writeback.observe(start, end, group_id=gid)
+                            self._writeback_backlog[
+                                self._writeback_content_key(tracker)
+                            ] = tracker.writeback
             self._complete_recomputed_writebacks(meta.writeback_results)
         if not self.lazy_offload:
             return
@@ -1830,6 +2056,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+
+        if getattr(request, "is_internal_kv_repair", False):
+            self._cleanup_request_tracker(request.request_id)
+            return False, None
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None
@@ -2047,6 +2277,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 group_tokens_per_block=self._group_tokens_per_block,
             )
             if r_metadata is not None:
+                if self._hybrid_coverage:
+                    r_metadata.transfer_generation = self._repair_generations.pop(
+                        r_metadata.request_id, None
+                    )
+                    r_metadata.request_configs = {
+                        **(r_metadata.request_configs or {}),
+                        "holemiss_coverage": True,
+                    }
                 metadata.add_request_metadata(r_metadata)
             request_tracker.state = LMCacheMPRequestState.READY
 
@@ -2059,6 +2297,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
+            request_tracker.replace_block_ids(new_request.block_ids)
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
@@ -2075,7 +2314,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if q_window is not None:
                     metadata.add_q_capture_window(q_window)
 
-            if not self._can_store:
+            if not self._can_store or request_tracker.internal_replay:
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -2133,7 +2372,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if q_window is not None:
                     metadata.add_q_capture_window(q_window)
 
-            if not self._can_store:
+            if not self._can_store or request_tracker.internal_replay:
                 continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -2392,26 +2631,38 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def _queue_recomputed_writebacks(self, tracker: LMCacheMPRequestTracker) -> None:
         """Pin and enqueue only failed ranges whose normal forward has committed.
 
-        This first implementation is restricted to full-attention, one-rank
-        connectors. The scheduler and model runner remain backend independent.
+        One-rank connectors can store full-attention ranges independently,
+        including those in supported hybrids with healthy recurrent state.
+        The scheduler and model runner remain backend independent.
         """
         pool = self._gpu_block_pool
         if (
             not self._writeback_supported
             or not self._can_store
             or pool is None
-            or self._boundary_state_groups
-            or len(self._group_tokens_per_block) != 1
+            or tracker.internal_replay
         ):
             return
         if self.scheduler_adapter.world_size != 1:
             return
-        for span in tracker.writeback.ready(tracker.committed_tokens):
+        for group_id in tracker.writeback.group_ids:
+            self._queue_group_writebacks(tracker, group_id)
+
+    def _queue_group_writebacks(
+        self, tracker: LMCacheMPRequestTracker, group_id: int
+    ) -> None:
+        pool = self._gpu_block_pool
+        assert pool is not None
+        for span in tracker.writeback.ready(
+            tracker.committed_tokens, group_id=group_id
+        ):
             store, ticket = LMCacheMPRequestMetadata.GetWritebackMetadata(
-                tracker, span, self._group_tokens_per_block
+                tracker, span, self._group_tokens_per_block, group_id=group_id
             )
             identity = store.request_configs["recomputed_writeback_id"]
-            pool.touch([pool.blocks[bid] for bid in store.op.flat_block_ids])
+            pool.touch(
+                [pool.blocks[bid] for bid in store.op.flat_block_ids if bid != 0]
+            )
             self._pending_writebacks[identity] = _PendingWriteback(
                 tracker.writeback, ticket, store
             )
@@ -2444,7 +2695,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 success,
             )
             if pool is not None:
-                pool.free_blocks([pool.blocks[bid] for bid in store.op.flat_block_ids])
+                pool.free_blocks(
+                    [pool.blocks[bid] for bid in store.op.flat_block_ids if bid != 0]
+                )
             if store.request_id not in self.request_trackers and not any(
                 other.metadata.request_id == store.request_id
                 for other in self._pending_writebacks.values()

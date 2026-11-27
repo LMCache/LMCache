@@ -264,6 +264,15 @@ class LMCacheMPRequestTracker:
                             break
                 block_ids.append(block_id)
 
+    def replace_block_ids(self, block_ids: tuple[list[int], ...]) -> None:
+        """Refresh the engine's authoritative mapping after private KV adoption."""
+        self.allocated_block_ids = {gid: list(ids) for gid, ids in enumerate(block_ids)}
+
+    @property
+    def internal_replay(self) -> bool:
+        """Whether this tracker belongs to private engine replay, never storage."""
+        return bool(getattr(self._request, "is_internal_kv_repair", False))
+
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
             engine_group_idx: len(blocks)
@@ -366,6 +375,8 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         span: tuple[int, int],
         group_tokens_per_block: list[int],
+        *,
+        group_id: int = 0,
     ) -> tuple["LMCacheMPRequestMetadata", WritebackTicket]:
         """Snapshot committed missing KV for ordinary STORE, preserving the cursor.
 
@@ -378,15 +389,19 @@ class LMCacheMPRequestMetadata:
             Normal STORE metadata and its revisioned bookkeeping ticket.
         """
         start, end = span
-        ticket = tracker.writeback.begin(start, end)
+        ticket = tracker.writeback.begin(start, end, group_id=group_id)
+        blocks = slice_block_ids_per_group(
+            tracker.allocated_block_ids, group_tokens_per_block, start, end
+        )
+        blocks = [
+            ids if gid == group_id else [0] * len(ids) for gid, ids in enumerate(blocks)
+        ]
         metadata = LMCacheMPRequestMetadata(
             request_id=tracker.request_id,
             direction="STORE",
             op=LoadStoreOp(
                 token_bytes=tracker.packed_token_ids(),
-                block_ids=slice_block_ids_per_group(
-                    tracker.allocated_block_ids, group_tokens_per_block, start, end
-                ),
+                block_ids=blocks,
                 start=start,
                 end=end,
             ),
@@ -788,6 +803,9 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         default_factory=dict
     )
     writeback_results: dict[str, bool] = field(default_factory=dict)
+    failed_group_load_ranges: dict[str, list[tuple[int, int, int, str]]] = field(
+        default_factory=dict
+    )
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -808,11 +826,17 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         loads = {rid: list(spans) for rid, spans in self.failed_load_ranges.items()}
         for rid, spans in other.failed_load_ranges.items():
             loads.setdefault(rid, []).extend(spans)
+        grouped = {
+            rid: list(spans) for rid, spans in self.failed_group_load_ranges.items()
+        }
+        for rid, spans in other.failed_group_load_ranges.items():
+            grouped.setdefault(rid, []).extend(spans)
         results = dict(self.writeback_results)
         for identity, success in other.writeback_results.items():
             results[identity] = results.get(identity, True) and success
         return LMCacheMPWorkerMetadata(
             failed_load_ranges=loads,
+            failed_group_load_ranges=grouped,
             writeback_results=results,
             completed_store_requests=merged,
             failed_store_requests=(
