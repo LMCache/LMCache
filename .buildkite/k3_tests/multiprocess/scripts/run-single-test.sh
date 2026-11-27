@@ -48,7 +48,7 @@ fi
 # Keep this aligned with wait-for-servers.sh. Large-model startup can exceed
 # five minutes on cold or contended CI nodes before the service is unhealthy.
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-600}"
-export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+export BUILD_ID="${BUILDKITE_BUILD_ID:-${BUILD_ID:-local_$$}}"
 export DEFAULT_MODEL="${DEFAULT_MODEL:-${ENGINE_DEFAULT_MODEL:-Qwen/Qwen3-14B}}"
 export LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
 export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
@@ -171,6 +171,13 @@ if declare -F engine_configure_workload > /dev/null; then
 fi
 
 mkdir -p "$RESULTS_DIR"
+
+if [[ "$TEST_NAME" == "fault_tolerance" ]]; then
+    mkdir -p "$RESULTS_DIR/fault_tolerance" || exit 1
+    LMCACHE_RETRIEVE_FAULT_DIR="$(mktemp -d "$RESULTS_DIR/fault_tolerance/run.XXXXXXXX")" || exit 1
+    export LMCACHE_RETRIEVE_FAULT_DIR
+    export VLLM_KV_LOAD_FAILURE_POLICY=recompute
+fi
 
 # Cleanup: always kill background processes on exit
 trap '"${SCRIPT_DIR}/cleanup.sh"' EXIT

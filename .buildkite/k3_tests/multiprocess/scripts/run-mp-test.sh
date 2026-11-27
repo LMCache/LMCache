@@ -106,15 +106,34 @@ if ! "${SCRIPT_DIR}/workloads/common/long-doc-qa-l2.sh"; then
 fi
 echo ""
 
-# Step 7: Fault tolerance test (kills LMCache server -- must be last)
+# Step 7: The shared fault test starts a fresh, instrumented MP server.
 echo "============================================"
 echo "=== Step 7: Running fault tolerance test ==="
 echo "============================================"
-if ! "${SCRIPT_DIR}/workloads/vllm/fault-tolerance.sh"; then
-    echo "fault tolerance test failed"
-    TEST_RESULT=1
+suite_pids=()
+while IFS= read -r pid; do
+    suite_pids+=("$pid")
+done < "/tmp/lmcache_mp_pids_${BUILD_ID}"
+if [[ ${#suite_pids[@]} -eq 0 ]]; then
+    echo "No suite processes were recorded for the fault tolerance handoff" >&2
     exit 1
 fi
+if ! python3 "${SCRIPT_DIR}/stop-processes.py" "${suite_pids[@]}" --ports \
+        "$LMCACHE_PORT" "${METRICS_HTTP_PORT:-8080}" \
+        "${ENGINE_PORT:-$VLLM_PORT}" "${ENGINE_BASELINE_PORT:-$VLLM_BASELINE_PORT}"; then
+    echo "Could not stop suite processes before the fault tolerance test" >&2
+    exit 1
+fi
+
+# Let the single-test runner handle cleanup on exit
+trap - EXIT
+INFERENCE_ENGINE=vllm LAUNCH_BASELINE=false \
+        "${SCRIPT_DIR}/run-single-test.sh" fault_tolerance || {
+    status=$?
+    echo "fault tolerance test failed" >&2
+    exit "$status"
+}
+
 echo ""
 
 echo "============================================"
