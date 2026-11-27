@@ -132,7 +132,9 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   and the other reservation returns with the discarded placeholder.
 - **A read must finish within the owner's TTL**: an ended lease makes the view
   `KEY_NOT_READABLE`. Only `LOCK` prefetches borrow. Views whose readers' TTL
-  lapsed are swept at the next `reserve_write`.
+  lapsed are swept at the next `reserve_write`, unless a transfer still pins
+  the view. Local transfer pins defer returning a borrowed view; they do not
+  extend the peer owner's TTL, and an ended lease refuses new transfer pins.
 - **Removal is the adapter's**: its `close` refuses while a lease is live, and
   `delete_l2_adapter` keeps a failed close for a retry as for any adapter. The
   storage manager knows no borrower; the prefetch controller excludes `SHADOW`

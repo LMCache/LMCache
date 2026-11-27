@@ -77,10 +77,7 @@ from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
 )
-from lmcache.v1.memory_management import (
-    MemoryObjMetadata,
-    TensorMemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObjMetadata, TensorMemoryObj
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
@@ -1113,6 +1110,44 @@ class TestAdmission:
 
 
 class TestNumKVReaders:
+    @pytest.mark.parametrize("loaded", [False, True])
+    def test_result_preserves_mixed_group_read_shares(
+        self, l1_manager: DramL1Manager, loaded: bool
+    ) -> None:
+        """The receipt keeps each group's reader count for later FREE/RETRIEVE."""
+        adapter = make_adapter()
+        keys = [make_object_key(0, gid=gid) for gid in (0, 1)]
+        if loaded:
+            store_keys_in_l2(adapter, keys, make_layout())
+        else:
+            write_keys_to_l1(l1_manager, keys, make_layout())
+        ctrl = make_controller(l1_manager, [adapter])
+        ctrl.start()
+        try:
+            req_id = ctrl.submit_prefetch_request(
+                make_spec(
+                    [
+                        make_group([keys[0]], gid=0, num_kv_readers=1),
+                        make_group([keys[1]], gid=1, num_kv_readers=3),
+                    ]
+                )
+            )
+            result = wait_for_result(ctrl, req_id)
+            assert result is not None
+            assert result.read_counts == dict(zip(keys, (1, 3), strict=True))
+            assert set(result.read_generations) == set(keys)
+            l1_manager.finish_read(keys)
+            assert_read_locked(l1_manager, keys[1:])
+            l1_manager.finish_read(keys[1:], read_locks=2)
+            for key in keys:
+                if loaded:
+                    assert l1_manager.get_object_state(key) is None
+                else:
+                    assert l1_manager.is_key_evictable(key)
+        finally:
+            ctrl.stop()
+            adapter.close()
+
     @pytest.mark.parametrize("num_kv_readers", [1, 2, 4])
     def test_loaded_keys_hold_one_lock_per_reader(self, l1_manager, num_kv_readers):
         """Keys stay readable until every reader has released its lock."""
