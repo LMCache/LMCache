@@ -24,7 +24,9 @@ reports metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads
 usage data reported by the engine (``stream_options: {include_usage: true}``).
 The output token count also uses the reported ``completion_tokens``, including
 zero. If that count is absent, the requested ``--max-tokens`` is used as an
-estimate.
+estimate. The cached-token count comes from
+``usage.prompt_tokens_details.cached_tokens``; engines that do not report
+prompt-token details show ``N/A`` next to the flag that enables them.
 
 .. code-block:: bash
 
@@ -38,6 +40,7 @@ estimate.
    ================= Query Engine =================
    Model:                         facebook/opt-125m
    Input tokens:                                618
+   Cached tokens:                               512
    --------------- Latency Metrics ----------------
    Output tokens:                                 9
    TTFT (ms):                                 26.88

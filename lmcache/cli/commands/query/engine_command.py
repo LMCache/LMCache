@@ -96,6 +96,14 @@ class EngineCommand(BaseCommand):
             metrics.add("prompt_tokens", prompt_name, int(prompt_value))
             output_name, output_value = engine_stats["output_tokens"]
             metrics.add("output_tokens", output_name, int(output_value))
+            cached = engine_stats.pop("cached_tokens", None)
+            if cached is not None:
+                cached_name, cached_value = cached
+                if cached_value is None:
+                    cached_name = (
+                        "Cached tokens (n/a; enable --enable-prompt-tokens-details)"
+                    )
+                metrics.add("cached_tokens", cached_name, cached_value)
 
             latency = metrics.add_section("latency", "Latency Metrics")
             for key, (name, value) in engine_stats.items():

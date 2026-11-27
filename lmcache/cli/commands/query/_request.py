@@ -15,6 +15,7 @@ MetricMap = dict[str, MetricValue]
 _METRIC_NAMES = {
     "prompt_tokens": "Input tokens",
     "output_tokens": "Output tokens",
+    "cached_tokens": "Cached tokens",
     "ttft_ms": "TTFT (ms)",
     "tpot_ms_per_token": "TPOT (ms/token)",
     "total_latency_ms": "Total latency (ms)",
@@ -278,6 +279,12 @@ def _stream(
 
     u = usage or {}
     prompt_tokens = int(u.get("prompt_tokens") or 0)
+    details = u.get("prompt_tokens_details")
+    cached_tokens: Optional[int] = None
+    if isinstance(details, dict):
+        reported = details.get("cached_tokens")
+        if reported is not None:
+            cached_tokens = int(reported)
     num_completion = u.get("completion_tokens")
     num_generated = int(num_completion) if num_completion is not None else max_tokens
     if first_token_t is None:
@@ -296,6 +303,7 @@ def _stream(
         "answer": joined,
         "prompt_tokens": prompt_tokens,
         "output_tokens": num_generated,
+        "cached_tokens": cached_tokens,
         "ttft_ms": ttft_s * 1000.0,
         "tpot_ms_per_token": tpot_s * 1000.0,
         "total_latency_ms": dt * 1000.0,
