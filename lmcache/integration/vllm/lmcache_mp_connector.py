@@ -49,6 +49,7 @@ except ImportError:
 
 
 # Third Party
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -1917,7 +1918,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 mechanism used by VMM allocations.
 
         Returns:
-            - ``LEGACY_IPC`` when ``use_vmm_api`` is explicitly false.
+            - ``LEGACY_IPC`` when ``use_vmm_api`` is explicitly false, or
+              unset on a platform that is not CUDA-like.
             - ``EXPORTS_FABRIC`` in automatic or explicit VMM mode with
               ``isolated_ipc``.
             - ``EXPORTS_FD`` in automatic or explicit VMM mode otherwise.
@@ -1931,6 +1933,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         ):
             # Legacy CUDA IPC handles cannot express driver-mapped memory, so
             # the KV cache must stay a plain allocation.
+            return KVCacheAccess.LEGACY_IPC
+        if (
+            _USE_VMM_API_KEY not in extra_config
+            and not current_platform.is_cuda_alike()
+        ):
+            # vLLM builds the extensible (VMM) KV cache only on CUDA and ROCm
+            # and rejects an fd or fabric export declaration elsewhere, so
+            # automatic mode must not request one there.
             return KVCacheAccess.LEGACY_IPC
         if resolve_extra_config_value(extra_config, ExtraConfigDefault.isolated_ipc):
             # Isolated IPC refuses POSIX fds, and an allocation that can

@@ -57,8 +57,6 @@ extra_config = {
     "lmcache.mp.autostart.wait_timeout": 120,
     "lmcache.mp.autostart.server_args": os.environ["SERVER_ARGS"],
 }
-if os.environ.get("VLLM_TARGET_DEVICE") == "xpu":
-    extra_config["lmcache.mp.use_vmm_api"] = False
 
 print(
     json.dumps(
