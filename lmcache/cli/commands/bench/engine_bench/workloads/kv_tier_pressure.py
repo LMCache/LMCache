@@ -591,7 +591,6 @@ class KVTierPressureWorkload(BaseWorkload):
         )
 
         self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
-        self._pending_tasks: set[asyncio.Task] = set()
         self._request_index = 0
         self._lmcache_url = lmcache_url
         self._lookup_at_boundary: dict[str, float | str] = {
@@ -856,22 +855,15 @@ class KVTierPressureWorkload(BaseWorkload):
             group = self._measured_groups[req_idx]
             self._request_index += 1
 
-            task = asyncio.create_task(self._dispatch(group, req_idx))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._on_task_done)
-            return 0.0
-
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
+            self._create_tracked_task(
+                self._dispatch(group, req_idx),
             )
             return 0.0
 
-        return -1.0
+        return await self._wait_for_pending_tasks()
 
     async def _dispatch(self, group: tuple[int, ...], req_idx: int) -> None:
-        """Send a single benchmark request, then release the semaphore.
+        """Send a single benchmark request.
 
         Args:
             group: Document indices carried by this request.
@@ -887,18 +879,6 @@ class KVTierPressureWorkload(BaseWorkload):
             )
         finally:
             self._semaphore.release()
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors.
-
-        Args:
-            task: The completed asyncio Task.
-        """
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op -- this workload is stateless.

@@ -132,7 +132,6 @@ class LongDocQAWorkload(BaseWorkload):
         self._schedule_index = 0
 
         self._semaphore = asyncio.Semaphore(config.num_inflight_requests)
-        self._pending_tasks: set[asyncio.Task] = set()
 
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
@@ -241,28 +240,19 @@ class LongDocQAWorkload(BaseWorkload):
             await self._semaphore.acquire()
             doc_idx, q_idx = self._schedule[self._schedule_index]
             self._schedule_index += 1
-
-            task = asyncio.create_task(self._dispatch(doc_idx, q_idx))
-            self._pending_tasks.add(task)
-            task.add_done_callback(self._on_task_done)
+            self._create_tracked_task(
+                self._dispatch(doc_idx, q_idx),
+            )
             return 0.0  # immediate re-call
 
-        # All dispatched — wait for pending tasks.
-        if self._pending_tasks:
-            await asyncio.wait(
-                self._pending_tasks,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return 0.0
-
-        return -1.0  # all done
+        return await self._wait_for_pending_tasks()
 
     async def _dispatch(
         self,
         doc_index: int,
         query_index: int,
     ) -> None:
-        """Send a single benchmark request, then release the semaphore."""
+        """Send a single benchmark request."""
         request_id = f"doc{doc_index}_q{query_index}"
         messages = self._build_messages(doc_index, query_index)
         self._progress_monitor.on_request_sent(request_id)
@@ -277,14 +267,6 @@ class LongDocQAWorkload(BaseWorkload):
             )
         finally:
             self._semaphore.release()
-
-    def _on_task_done(self, task: asyncio.Task) -> None:
-        """Clean up completed tasks and log unexpected errors."""
-        self._pending_tasks.discard(task)
-        if not task.cancelled():
-            exc = task.exception()
-            if exc is not None:
-                self._progress_monitor.log_message(f"Dispatch task failed: {exc}")
 
     def on_request_finished(self, request_id: str, output: str) -> None:
         """No-op — this workload is stateless."""
