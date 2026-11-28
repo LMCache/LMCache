@@ -112,6 +112,9 @@ Start the LMCache server:
    lmcache server --chunk-size 128 --l1-size-gb 50 \
        --eviction-policy LRU
 
+Wait for ``LMCache INFO: LMCache grpc cache server is running on
+localhost:5555`` before starting vLLM.
+
 The server defaults to ``--supported-transfer-mode lmcache_driven``, which
 is also the NPU worker default, so no transfer-mode flag is needed.
 ``--chunk-size`` is a minimum: the connector rounds it up to a multiple of
@@ -121,19 +124,39 @@ MLA/DSA layout is designed for 4096-token chunks. Size ``--l1-size-gb`` so
 that the whole working set fits; otherwise LRU eviction turns hits back into
 misses.
 
-Start vLLM-Ascend with ``LMCacheMPConnector``:
+Start vLLM-Ascend with ``LMCacheMPConnector``. Example: Qwen3-32B, TP8 on
+8 NPUs, with the Ascend environment the full guides also set:
 
 .. code-block:: bash
 
-   vllm serve <model> \
-       ... \
+   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+   export OMP_PROC_BIND=false
+   export OMP_NUM_THREADS=10
+   export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+   export HCCL_BUFFSIZE=1024
+   export TASK_QUEUE_ENABLE=1
+   export HCCL_OP_EXPANSION_MODE="AIV"
+
+   vllm serve /path/to/Qwen3-32B \
+       --served-model-name qwen3 \
+       --max-model-len 40960 \
+       --max-num-batched-tokens 8192 \
+       --gpu-memory-utilization 0.9 \
+       --max-num-seqs 32 \
+       --tensor-parallel-size 8 \
+       --no-enable-prefix-caching \
+       --port 8900 \
        --kv-transfer-config '{
          "kv_connector": "LMCacheMPConnector",
          "kv_role": "kv_both"
        }'
 
-Leave ``lmcache.mp.mp_transfer_mode`` unset (or set it to ``auto``): on NPU
-it resolves to ``lmcache_driven``. Each worker logs the resolved mode:
+``--no-enable-prefix-caching`` keeps external-cache hits attributable to
+LMCache (see the Tips in :doc:`lmcache_driven`). The connector reaches the
+server at ``localhost:5555`` by default. Leave
+``lmcache.mp.mp_transfer_mode`` unset (or set it to ``auto``): on NPU it
+resolves to ``lmcache_driven``. Each worker logs the resolved mode:
 
 .. code-block:: text
 
