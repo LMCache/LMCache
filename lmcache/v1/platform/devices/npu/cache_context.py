@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache import torch_dev
 from lmcache.lmcache_native import EngineKVFormat
+from lmcache.v1.common.buffer_registration import BufferRegistration
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.group_view import engine_group_layer_indices
 from lmcache.v1.common.kv_format.types import DiscoverableKVCache
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
     from lmcache.v1.platform.base.object_group_transfer import ObjectGroupTransfer
 
 logger = init_logger(__name__)
+
+# CANN hal_kernel_p2p_get_pages rejects a VA that does not start on a 2 MiB
+# boundary. GDS slices this buffer at 16 MiB, so each slice stays aligned.
+_NPU_P2P_ALIGN = 2 * 1024 * 1024
 
 
 class _NpuHostCallbackStream:
@@ -92,11 +97,14 @@ class _TempNpuBuffer:
         self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
 
-        self._temp_buffer = torch.empty(
-            self._get_size_for_single_batch() * max_batch_size,
+        total_bytes = self._get_size_for_single_batch() * max_batch_size
+        raw = torch.empty(
+            total_bytes + _NPU_P2P_ALIGN,
             dtype=torch.uint8,
             device=device,
         )
+        pad = (-raw.data_ptr()) % _NPU_P2P_ALIGN
+        self._temp_buffer = raw[pad : pad + total_bytes]
         self._offset_map_kernel_group_only: dict[tuple[int, int], tuple[int, int]] = {}
         self._offset_map_object_group_only: dict[tuple[int, int], tuple[int, int]] = {}
 
@@ -268,6 +276,7 @@ class NpuCacheContext(BaseCacheContext):
             ValueError: If reconstructed tensors are not NPU tensors.
         """
         self._ipc_wrappers: tuple[Any, ...] = tuple(kv_caches)
+        self._buffer_registration: BufferRegistration | None = None
         try:
             self._initialize(
                 kv_caches,
@@ -370,26 +379,61 @@ class NpuCacheContext(BaseCacheContext):
             self.kv_layer_groups_manager_.kernel_groups[0].dtype,
         )
 
+    def register_staging_buffer(self, registration: BufferRegistration) -> None:
+        """Register the full staging buffer on the context's transfer stream.
+
+        Args:
+            registration: External registration, retained after success until
+                ``close``. Call once after construction and before transfers.
+
+        Raises:
+            RuntimeError: If registration fails; the adapter must roll back.
+        """
+        with torch_dev.stream(self.stream_):
+            registration.register(self._temp_buffer.buffer)
+        self._buffer_registration = registration
+
     def close(self) -> None:
-        """Synchronize transfers and release receiver-side IPC owners."""
-        wrappers = self._ipc_wrappers
-        if not wrappers:
-            return
+        """Synchronize transfers and release receiver-side IPC owners.
 
+        Also releases any staging registration on the context's NPU stream
+        before releasing IPC wrappers.
+        """
         stream = getattr(self, "stream_", None)
-        synchronize = getattr(stream, "synchronize", None)
-        if callable(synchronize):
-            synchronize()
+        temp_buffer = getattr(self, "_temp_buffer", None)
+        wrappers = getattr(self, "_ipc_wrappers", ())
+        if not wrappers and self._buffer_registration is None:
+            return
+        try:
+            synchronize = getattr(stream, "synchronize", None)
+            if callable(synchronize):
+                synchronize()
 
-        kv_tensors = getattr(self, "kv_caches_", None)
-        if isinstance(kv_tensors, list):
-            kv_tensors.clear()
+            # Deregister only after a complete registration succeeded. A
+            # failed constructor may have created the staging buffer without
+            # owning a registration for it.
+            if (
+                self._buffer_registration is not None
+                and temp_buffer is not None
+                and stream is not None
+            ):
+                with torch_dev.stream(stream):
+                    self._buffer_registration.deregister(temp_buffer.buffer)
+                self._buffer_registration = None
 
-        for wrapper in wrappers:
-            close = getattr(wrapper, "close", None)
-            if callable(close):
-                close()
-        self._ipc_wrappers = ()
+            kv_tensors = getattr(self, "kv_caches_", None)
+            if isinstance(kv_tensors, list):
+                kv_tensors.clear()
+        finally:
+            # IPC owners are independent of staging registration and must be
+            # released even when synchronization or deregistration fails.
+            try:
+                for wrapper in wrappers:
+                    close = getattr(wrapper, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                self._ipc_wrappers = ()
 
     @property
     def stream(self) -> Any:

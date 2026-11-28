@@ -5,8 +5,8 @@ Most tests are pure (no GPU storage library): they exercise the public interface
 (singleton/no-op semantics, the <=16 MiB region split through the backend object,
 and the registered-region mapping driven through
 :meth:`GDSContext.transfer_async`). Round-trip tests cover cuFile on NVIDIA,
-hipFile on AMD ROCm, or an explicitly configured uGDS device, and are skipped
-unless the corresponding stack is available.
+hipFile on AMD ROCm, NDS on Ascend, or an explicitly configured uGDS device,
+and are skipped unless the corresponding stack is available.
 """
 
 # Standard
@@ -66,8 +66,27 @@ def _gds_available() -> bool:
     the GDS-capable driver/filesystem is absent hipFile still round-trips
     correctly via its host-bounce fallback, so library loadability is a
     sufficient gate for the correctness checks below.
+    Ascend NPU: ``/dev/p2p_device`` plus a loadable ``libnds.so``
+    (``NDS_LIBRARY_PATH``, else ``/usr/local/lib/libnds.so``, else the loader).
     """
-    if torch_device_type != "cuda" or not torch_dev.is_available():
+    if not torch_dev.is_available():
+        return False
+    if torch_device_type == "npu":
+        if not os.path.exists("/dev/p2p_device"):
+            return False
+        # Standard
+        import ctypes
+
+        library = os.environ.get("NDS_LIBRARY_PATH")
+        if not library:
+            default = "/usr/local/lib/libnds.so"
+            library = default if os.path.isfile(default) else "libnds.so"
+        try:
+            ctypes.CDLL(library)
+        except OSError:
+            return False
+        return True
+    if torch_device_type != "cuda":
         return False
     if torch.version.hip is not None:
         # Standard
@@ -106,7 +125,10 @@ def _ugds_device() -> str:
 
 requires_gds = pytest.mark.skipif(
     not _gds_available(),
-    reason="needs CUDA + nvidia-fs or ROCm + libhipfile.so (real GPUDirect Storage)",
+    reason=(
+        "needs CUDA + nvidia-fs, ROCm + libhipfile.so, "
+        "or Ascend NPU + /dev/p2p_device + libnds.so"
+    ),
 )
 requires_ugds = pytest.mark.skipif(
     not _ugds_device(),
@@ -126,7 +148,8 @@ def _skip_unless_gds_registrable(directory: Path) -> None:
     ``GDSContext`` opens its slab. Registration fails on filesystems the
     driver does not support; on NVIDIA, nvidia-fs rejects files on
     device-mapper volumes (LVM) with cuFile error 5008 whenever cuFile compat
-    mode is disabled.
+    mode is disabled; on Ascend, NDS rejects files not backed by a local block
+    device.
 
     Args:
         directory: The directory in which the roundtrip test would place the
@@ -142,8 +165,8 @@ def _skip_unless_gds_registrable(directory: Path) -> None:
                     pass
             finally:
                 backend.close_driver()
-    except (OSError, RuntimeError) as exc:
-        # OSError: open/fallocate; RuntimeError: cufile/hipfile registration.
+    except (OSError, RuntimeError, ValueError) as exc:
+        # OSError: open/fallocate/nds; RuntimeError: cufile/hipfile.
         pytest.skip(
             f"GDS driver cannot register files under {directory} ({exc}); "
             "point LMCACHE_GDS_TEST_DIR at a GDS-capable filesystem"
@@ -162,7 +185,9 @@ def gds_slab_dir(tmp_path: Path) -> Iterator[Path]:
     up for GDS, and OS disks commonly use LVM/device-mapper volumes that
     nvidia-fs cannot register, where cuFile either fails with error 5008 or,
     with compat mode enabled, silently falls back to POSIX IO, so a passing
-    test would not have exercised the DMA path it claims to.
+    test would not have exercised the DMA path it claims to. On Ascend NPU
+    the same variable is required: the slab must sit on a local NVMe
+    filesystem, so ``tmp_path`` on the OS disk is not a valid target.
 
     On AMD ROCm ``tmp_path`` is used when the variable is unset: per
     :func:`_gds_available`, library loadability is a sufficient gate for
@@ -178,7 +203,8 @@ def gds_slab_dir(tmp_path: Path) -> Iterator[Path]:
             pytest.skip(
                 "set LMCACHE_GDS_TEST_DIR to a directory on a GDS-capable "
                 "filesystem to run the real-DMA roundtrip tests (pytest's "
-                "tmp_path may silently use the POSIX compat fallback)"
+                "tmp_path may live on the OS disk or silently use the POSIX "
+                "compat fallback)"
             )
         _skip_unless_gds_registrable(tmp_path)
         yield tmp_path
@@ -403,6 +429,19 @@ def test_ugds_context_roundtrip():
         ctx.close()
 
 
+def _gds_staging_buffer(nbytes: int) -> torch.Tensor:
+    """Byte buffer the active backend can register.
+
+    NDS rejects a VA that is not 2 MiB aligned. cuFile and hipFile do not.
+    """
+    if torch_device_type != "npu":
+        return torch.empty(nbytes, dtype=torch.uint8, device=torch_device_type)
+    align = 2 * 1024 * 1024
+    raw = torch.empty(nbytes + align, dtype=torch.uint8, device=torch_device_type)
+    pad = (-raw.data_ptr()) % align
+    return raw[pad : pad + nbytes]
+
+
 @requires_gds
 def test_gds_two_stream_write_read(gds_slab_dir: Path):
     """Verify independent chunk writes and reads on two GPU streams."""
@@ -415,7 +454,7 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
     def register_and_write(stream, pattern):
         """Register a buffer on ``stream`` and write ``pattern`` to a chunk."""
         with torch_dev.stream(stream):
-            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+            buf = _gds_staging_buffer(chunk_bytes)
             ctx.register_gpu_buffer(buf)
             err, objs = mgr.allocate(
                 MemoryLayoutDesc(
@@ -460,13 +499,13 @@ def test_gds_two_stream_write_read(gds_slab_dir: Path):
 
 @requires_gds
 def test_gds_write_read_roundtrip(gds_slab_dir: Path):
-    """Cold write then read of a chunk through the real cuFile DMA path."""
+    """Cold write then read of a chunk through the real GDS DMA path."""
     cfg = GdsL1Config(file_location=str(gds_slab_dir), size_in_bytes=64 << 20)
     ctx = GDSContext()
     ctx.initialize(cfg)
     try:
         chunk_bytes = 8 << 20
-        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+        buf = _gds_staging_buffer(chunk_bytes)
         ctx.register_gpu_buffer(buf)
 
         mgr = GDSL1MemoryManager(cfg)
@@ -495,7 +534,7 @@ def test_gds_write_read_roundtrip(gds_slab_dir: Path):
 
 @requires_gds
 def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
-    """A chunk larger than the 16 MiB cuFile region cap round-trips correctly.
+    """A chunk larger than the 16 MiB GDS region cap round-trips correctly.
 
     Exercises the multi-region registration and the split (per-segment) DMA
     path: a 24 MiB chunk is registered/transferred as a 16 MiB + 8 MiB pair.
@@ -505,7 +544,7 @@ def test_gds_chunk_larger_than_region_roundtrip(gds_slab_dir: Path):
     ctx.initialize(cfg)
     try:
         chunk_bytes = 24 << 20  # > 16 MiB -> two registered regions / two DMAs
-        buf = torch.empty(chunk_bytes, dtype=torch.uint8, device=torch_device_type)
+        buf = _gds_staging_buffer(chunk_bytes)
         ctx.register_gpu_buffer(buf)
 
         mgr = GDSL1MemoryManager(cfg)

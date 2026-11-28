@@ -652,7 +652,24 @@ to load. Follow the
 to build ``libphoenix.so``, load the ``phoenixfs`` kernel module, and
 verify the installation.
 
+**NDS** (``libnds.so``) is the Ascend backend. Select it with
+``--gds-l1-backend nds``. ``auto`` selects it when ``torch.npu`` is available
+and no earlier backend is the default: a CUDA build claims cuFile, a ROCm
+build claims hipFile, and a MUSA build claims muFile. Like cuFile it uses a
+filesystem slab. ``--gds-l1-path`` names a directory on a local NVMe
+filesystem, ``--gds-l1-use-direct-io`` applies, and one slab per process
+lives at ``<path>/lmcache_gds_slab.bin``. LMCache reads and writes that file
+through openEuler ``libnds.so`` and the ``nds_p2p`` driver
+(``/dev/p2p_device``). Reads and writes stay ordered with the NPU stream.
+``libnds.so`` loads from ``/usr/local/lib/libnds.so``, or from
+``NDS_LIBRARY_PATH`` when that variable is set.
 
+.. note::
+
+   NDS requires the ``nds_p2p`` kernel driver, the ``/dev/p2p_device`` node,
+   and a slab file on a local block device. A path that is not on a local
+   block device is rejected at startup. ``libnds.so`` must be reachable
+   through the loader (``ldconfig`` or ``LD_LIBRARY_PATH``).
 
 .. note::
 
@@ -703,13 +720,14 @@ verify the installation.
      - Not set
      - NVMe directory for the GDS L1 slab, or the raw device path when
        ``--gds-l1-backend ugds`` is used. Setting this enables the GDS L1
-       tier; with cuFile, hipFile, or phx one shared slab per process lives
+       tier. cuFile, hipFile, phx, and NDS keep one shared slab per process
        at ``<path>/lmcache_gds_slab.bin``.
    * - ``--gds-l1-backend``
      - ``auto``
      - GDS implementation: ``auto``, ``cufile``, ``hipfile``, ``mufile``,
-       ``ugds``, or ``phx``. ``auto`` selects cuFile on CUDA, hipFile on
-       ROCm, and muFile on MUSA.
+       ``nds``, ``ugds``, or ``phx``. ``auto`` selects cuFile on CUDA,
+       hipFile on ROCm, muFile on MUSA, and NDS on Ascend when none of
+       those builds is the default.
    * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
