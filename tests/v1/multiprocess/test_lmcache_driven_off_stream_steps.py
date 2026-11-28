@@ -66,7 +66,16 @@ def harness(monkeypatch: pytest.MonkeyPatch):
     module: Any = transfer.LMCacheDrivenTransferModule(cast(Any, ctx))
     backend = _FakeEventBackend()
     record = backend.record_event
-    backend.record_event = lambda e, s: order.append("record") or record(e, s)  # type: ignore[method-assign]
+
+    def record_event(event: object, stream: object) -> None:
+        order.append("record")
+        record(event, stream)
+
+    def transfer_object_group(*args: Any, **kwargs: Any) -> None:
+        for step in handed_off:
+            hand_off_step(state.engine, step)
+
+    backend.record_event = record_event  # type: ignore[method-assign]
     cache_context = SimpleNamespace(
         device=torch.device("cpu"),
         stream="stream",
@@ -81,9 +90,7 @@ def harness(monkeypatch: pytest.MonkeyPatch):
             ),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
-        transfer_object_group=lambda *a, **k: [
-            hand_off_step(state.engine, step) for step in handed_off
-        ],
+        transfer_object_group=transfer_object_group,
     )
     entry = transfer.ContextEntry(
         cast(Any, cache_context),
