@@ -227,6 +227,7 @@ MP mode documentation
 * :doc:`lmcache_driven` -- full LMCache-driven deployment guide.
 * :doc:`engine_driven` -- full engine-driven deployment guide.
 * :doc:`hybrid_mamba` -- hybrid Mamba models (Qwen3.5 / Qwen3.6 / Qwen3.8).
+* :doc:`p2p` -- HIXL and Mooncake TE configuration, benchmarks, and remote KV sharing.
 
 .. toctree::
    :hidden:
@@ -236,3 +237,4 @@ MP mode documentation
    lmcache_driven
    engine_driven
    hybrid_mamba
+   p2p

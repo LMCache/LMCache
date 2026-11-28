@@ -83,6 +83,8 @@ def _create_l1_manager(cfg: BenchmarkConfig, size_bytes: int) -> L1MemoryManager
         init_size_in_bytes=min(_LARGE_LAZY_INIT, size_bytes),
         align_bytes=cfg.page_size,
     )
+    if cfg.shm_name is not None:
+        manager_config.shm_name = cfg.shm_name
     return L1MemoryManager(manager_config)
 
 

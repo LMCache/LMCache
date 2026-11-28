@@ -134,6 +134,9 @@ selected per server with ``--p2p-transfer-engine``.
    * - ``mooncake_te``
      - Uses Mooncake Transfer Engine for P2P transfers. It uses TCP by default
        and can use RDMA when configured through environment variables.
+   * - ``hixl``
+     - Host-to-host transfers over Ascend device RoCE using the native HIXL
+       bindings and ACL runtime helpers provided by LMCache-Ascend.
 
 Mooncake Transfer Engine
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -153,6 +156,42 @@ when starting each server. For example:
 
 Replace ``mlx5_0`` with the RDMA device available on the node. Both variables
 must be set for RDMA; when they are omitted, Mooncake Transfer Engine uses TCP.
+
+For Ascend device RoCE, use ``MC_TE_PROTOCOL=ascend`` and the configuration in
+:doc:`/platform/devices/npu/p2p` instead of this host-RDMA example.
+
+HIXL on Ascend
+~~~~~~~~~~~~~~
+
+Enable P2P with ``--p2p-advertise-url`` and select
+``--p2p-transfer-engine hixl`` with a compatible, HIXL-enabled
+LMCache-Ascend installation. This backend provides READ and WRITE transfers
+through native HIXL.
+
+Each MP server using this backend selects one logical NPU and registers
+its single local DRAM L1 buffer. Set ``LMCACHE_HIXL_ENGINE_ID`` to a unique,
+reachable ``IP:port`` for the native HIXL listener, separate from
+``--p2p-advertise-url``. ``LMCACHE_HIXL_DEVICE_ID`` selects the logical device
+within the process's visible devices and defaults to ``0``.
+
+The current Ascend HIXL integration requires ordinary non-lazy DRAM L1
+backed by ACL Host memory. Use a compatible LMCache-Ascend version that
+provides this allocation through its native pinned allocator; no additional
+allocator environment variable is required.
+
+Explicitly pass ``--no-l1-use-lazy``, leave ``--shm-name`` empty (the default),
+and keep hugepages disabled. When using ``--l1-manager`` JSON, set
+``"use_lazy": false`` on the local DRAM entry, with an empty ``shm_name``
+and ``use_hugepages`` disabled. Selecting ``hixl`` does not automatically
+change these allocation settings.
+
+The L1 allocation must remain alive until the transfer channel has closed.
+Stop local transfers and remote access before shutdown. Extra registered
+regions and direct NPU device memory transfers are not supported by this
+backend.
+
+See :doc:`/platform/devices/npu/p2p` for Ascend prerequisites, HIXL and
+Mooncake TE startup commands, transfer benchmarks, and remote-hit checks.
 
 Running a multi-node deployment
 -------------------------------

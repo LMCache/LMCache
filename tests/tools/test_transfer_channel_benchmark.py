@@ -3,8 +3,8 @@
 write-verification side-channel.
 
 Written against the documented behavior of
-``lmcache/tools/transfer_channel_benchmark``: the ``--op`` option, the write
-pattern the client stores, and the server's answer to a verify request.
+``lmcache/tools/transfer_channel_benchmark``: the ``--op`` and ``--shm-name``
+options, the write pattern, and the server's answer to a verify request.
 """
 
 # Standard
@@ -58,6 +58,20 @@ def test_parser_rejects_unknown_op():
     add_benchmark_arguments(parser)
     with pytest.raises(SystemExit):
         parser.parse_args(["--role", "client", "--op", "copy"])
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ([], None),
+        (["--shm-name", ""], ""),
+        (["--shm-name", "benchmark_pool"], "benchmark_pool"),
+    ],
+)
+def test_shm_name_is_parsed(args: list[str], expected: str | None) -> None:
+    """Distinguish omitted, empty and named SHM configuration."""
+    cfg = _parse(["--role", "client", *args])
+    assert cfg.shm_name == expected
 
 
 # =========================================================

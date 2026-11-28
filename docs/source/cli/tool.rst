@@ -94,6 +94,11 @@ subset of those objects and reports throughput:
        from (default: ``127.0.0.1:7600``).
    * - ``--buffer-size``
      - Server: total registered L1 source buffer, e.g. ``8GB``.
+   * - ``--shm-name``
+     - Non-lazy L1 shared-memory name. Omit to retain the default
+       ``lmcache_l1_pool_<pid>``; pass ``""`` to disable SHM or a nonempty
+       name to select a segment. Use distinct names for processes on the
+       same host. This option does not affect the lazy allocator.
    * - ``--object-size`` / ``--page-size``
      - Size of each transferred object and the alignment; must match on
        both sides.

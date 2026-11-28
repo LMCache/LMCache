@@ -72,6 +72,8 @@ Further reading
   environment preparation, container startup, source installation,
   server/vLLM startup, and verification (DeepSeek-V4 example).
 * :doc:`engine_driven` -- deploy and run ``engine_driven`` (Qwen3 example).
+* :doc:`p2p` -- share KV caches between Ascend MP servers using HIXL or
+  Mooncake TE; includes allocation requirements and transfer benchmarks.
 * :doc:`hybrid_mamba` -- hybrid Mamba models on Ascend: the flags that match
   the :doc:`../../../recipes/qwen3_5` recipe, plus the Ascend differences.
 
