@@ -285,19 +285,34 @@ bool resolve_block_addressing(EngineKVFormat format,
                          : tight;
   const size_t kv = static_cast<size_t>(sd.kv_size);
   using B = BlockAddressing::Base;
+  // An HND block [nh, bs, hs] with nh == 1 holds the same bytes as the NHD
+  // block [bs, nh, hs], so a single-head HND format falls through to the NHD
+  // format it matches.
   switch (format) {
+    case EngineKVFormat::NB_NL_TWO_NH_BS_HS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NB_NL_TWO_BS_NH_HS:
       // Cross-layer: single tensor [NB, NL, 2, BS, NH, HS]
       out = {B::kSingleTensor, blk, kv * blk, kv * blk * sd.nl, tight};
       return true;
+    case EngineKVFormat::NL_X_TWO_NB_NH_BS_HS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NL_X_TWO_NB_BS_NH_HS:
       // L tensors [2, NB, BS, NH, HS]
       out = {B::kPerLayer, static_cast<size_t>(sd.nb) * blk, 0, blk, tight};
       return true;
+    case EngineKVFormat::NL_X_NB_TWO_NH_BS_HS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NL_X_NB_TWO_BS_NH_HS:
       // L tensors [NB, 2, BS, NH, HS]
       out = {B::kPerLayer, blk, 0, kv * blk, tight};
       return true;
+    case EngineKVFormat::NL_X_NB_NH_BS_CS:
+      if (sd.nh != 1) return false;
+      [[fallthrough]];
     case EngineKVFormat::NL_X_NB_BS_HS:         // MLA [NB, BS, HS]
     case EngineKVFormat::NL_X_NBBS_ONE_HS:      // SGLang MLA [NBBS, 1, HS]
     case EngineKVFormat::NL_X_NB_BS_NH_TWO_HS:  // fused NHD [NB, BS, NH, 2HS]
@@ -310,8 +325,8 @@ bool resolve_block_addressing(EngineKVFormat format,
       out = {B::kPerPlaneLayer, 0, 0, blk, tight};
       return true;
     default:
-      // HND (heads before tokens), blocked-scale and (K, V)-tuple layouts:
-      // a paged block is not one contiguous [bs, nh*hs] run.
+      // Multi-head HND (heads before tokens), blocked-scale and (K, V)-tuple
+      // layouts: a paged block is not one contiguous [bs, nh*hs] run.
       return false;
   }
 }
@@ -528,18 +543,10 @@ bool batch_memcpy_supported() {
 #endif
 }
 
-bool direct_copy_format_supported(EngineKVFormat engine_kv_format) {
+bool direct_copy_format_supported(EngineKVFormat engine_kv_format,
+                                  const PageBufferShapeDesc& shape_desc) {
   BlockAddressing unused;
-  PageBufferShapeDesc probe{};
-  probe.kv_size = 1;
-  probe.nl = 1;
-  probe.nb = 1;
-  probe.bs = 1;
-  probe.nh = 1;
-  probe.hs = 1;
-  probe.element_size = 1;
-  probe.block_stride_elems = 0;
-  return resolve_block_addressing(engine_kv_format, probe, unused);
+  return resolve_block_addressing(engine_kv_format, shape_desc, unused);
 }
 
 size_t execute_direct_copy_transfer(

@@ -61,8 +61,6 @@ PYBIND11_MODULE(cuda_ops, m) {
       py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
       py::arg("slot_mapping"), py::arg("direction"),
       py::arg("engine_kv_format"), py::arg("token_major") = false);
-  m.def("load_and_reshape_flash", &load_and_reshape_flash);
-  m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def(
       "lmcache_memcpy_async",
       [](uintptr_t dest, uintptr_t src, size_t nbytes, int direction,
@@ -213,11 +211,11 @@ PYBIND11_MODULE(cuda_ops, m) {
   m.def("batch_memcpy_supported", &batch_memcpy_supported);
   m.def(
       "direct_copy_format_supported",
-      [](int engine_kv_format) {
+      [](int engine_kv_format, const PageBufferShapeDesc& shape_desc) {
         return direct_copy_format_supported(
-            static_cast<EngineKVFormat>(engine_kv_format));
+            static_cast<EngineKVFormat>(engine_kv_format), shape_desc);
       },
-      py::arg("engine_kv_format"));
+      py::arg("engine_kv_format"), py::arg("shape_desc"));
   m.def(
       "execute_direct_copy_transfer",
       [](int direction, const torch::Device& device,
@@ -278,7 +276,7 @@ PYBIND11_MODULE(cuda_ops, m) {
   // The whole plan arrives as four int64 numpy tables and is unpacked into
   // CBRetrieveStep vectors in C++ (microseconds), replacing ~5 pybind object
   // constructions per chunk on the Python side. Tables:
-  //   staging  [n_staging, 4]: dest, src, nbytes, host_offset
+  //   staging  [n_staging, 4]: dest, src, nbytes, host_offset (-1 = D2D)
   //   ropes    [n_ropes,  4]: group_idx, slot_idx, old_st, cur_st
   //   scatters [n_scatter,4]: group_idx, slot_idx, slot_mapping_offset, n_tok
   //   step_offsets [n_steps, 3]: end index into each table (exclusive,

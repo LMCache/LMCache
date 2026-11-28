@@ -33,9 +33,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             :sync: mp
 
             Start the LMCache server. ``--host`` / ``--port`` set the request
-            address vLLM connects to; ``--transport`` selects ZMQ (the default)
-            or gRPC. The defaults are spelled out here so the two commands
-            line up:
+            address vLLM connects to; ``--transport`` selects gRPC (the default)
+            or the deprecated ZMQ. The defaults are spelled out here so the two
+            commands line up:
 
             .. code-block:: bash
 
@@ -56,9 +56,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
             ``lmcache.mp.port`` in ``kv_connector_extra_config``. The host may
             include a transport prefix: ``tcp://`` for ZMQ or ``grpc://`` for
             gRPC. A bare ``host``/``host:port`` is also accepted and is
-            normalized to ``tcp://`` automatically. See
-            :doc:`/mp/request_transport` for supported endpoint schemes and
-            transport-selection behavior:
+            normalized to ``grpc://`` automatically. ZMQ endpoints still work
+            but are deprecated. See :doc:`/mp/request_transport` for supported
+            endpoint schemes and transport-selection behavior:
 
             .. code-block:: bash
 
@@ -89,6 +89,9 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                  The LMCache-shipped connector tracks the latest LMCache server
                  protocol and ships fixes/features ahead of the version vendored
                  into vLLM, so prefer it whenever you are on vLLM 0.20.0 or newer.
+
+            To set a client minimum in ``kv_connector_extra_config``, see the
+            vLLM example in :doc:`/mp/chunk_size_negotiation`.
 
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
@@ -178,7 +181,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
          EOF
 
       ``mp_host`` and ``mp_port`` identify the standalone LMCache request
-      server. A bare host uses the default ZMQ transport.
+      server. A bare host uses the default gRPC transport.
+
+      To set a client minimum under ``extra_config``, see the SGLang example
+      in :doc:`/mp/chunk_size_negotiation`.
 
       Engine-driven transfer can be selected under ``extra_config`` with the
       same name as the vLLM connector:
@@ -205,8 +211,14 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
       server transfer modes must be compatible; a server dedicated to one mode
       can instead use ``lmcache_driven`` or ``engine_driven``.
 
-      To use gRPC instead of ZMQ, include the ``grpc://`` scheme in the
-      connector configuration:
+      If workers use the engine-driven path, also pass
+      ``--shm-name lmcache_pool --no-l1-use-lazy`` so KV chunks move through a
+      shared-memory pool.  Without these flags the server falls back to the
+      typed inline transport, which serialises every chunk through the request
+      channel and is much slower; see :ref:`mp-transfer-mode`.
+
+      gRPC is the default; the ``grpc://`` scheme is explicit for clarity and
+      for the case where a deployment still names ZMQ elsewhere:
 
       .. code-block:: bash
 
@@ -340,6 +352,10 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                lmcache server \
                    --l1-size-gb 10 --eviction-policy LRU --chunk-size 256
 
+            The TensorRT-LLM adapter rounds the server minimum up to a multiple
+            of ``KvCacheConfig.tokens_per_block``. See
+            :doc:`/mp/chunk_size_negotiation`.
+
             In a separate terminal, point TRT-LLM at the server via
             ``server_url``:
 
@@ -363,7 +379,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                    kv_cache_config=KvCacheConfig(enable_block_reuse=True),
                    kv_connector_config=KvCacheConnectorConfig(
                        connector="lmcache-mp",
-                       server_url="tcp://localhost:5555",
+                       server_url="grpc://localhost:5555",
                    ),
                )
 
@@ -378,18 +394,18 @@ More MP server options
 The vLLM MP example above runs ``lmcache server`` locally on the default
 ports. Common variations:
 
-**Custom port, remote host, or gRPC** -- by default the connector talks to
-``localhost:5555`` over ZMQ. To use a different port, a server on another
-host, or gRPC, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
-``kv_connector_extra_config`` and select the matching server transport:
+**Custom port or remote host** -- by default the connector talks to
+``localhost:5555`` over gRPC. To use a different port or a server on another
+host, pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
+``kv_connector_extra_config``:
 
 .. code-block:: bash
 
    vllm serve Qwen/Qwen3-8B --kv-transfer-config \
-     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://10.0.0.1", "lmcache.mp.port": 6555}}'
+     '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "grpc://10.0.0.1", "lmcache.mp.port": 6555}}'
 
-For gRPC, start the server with ``--transport grpc`` and use a
-``grpc://10.0.0.1`` connector host.
+A server started with the deprecated ``--transport zmq`` needs a
+``tcp://10.0.0.1`` connector host instead.
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
@@ -397,7 +413,10 @@ normally, then set ``lmcache.mp.mp_transfer_mode=lmcache_driven`` on the vLLM
 side to enable the zero-copy SHM handle path (the default ``auto`` routing
 maps non-CUDA devices to ``engine_driven``, a worker-side gather/scatter
 copy path that the server only loads when started with
-``--supported-transfer-mode engine_driven`` or ``auto``).
+``--supported-transfer-mode engine_driven`` or ``auto``).  If you keep the
+engine-driven path, start the server with ``--shm-name lmcache_pool
+--no-l1-use-lazy``; otherwise it falls back to the slow typed inline
+transport (see :ref:`mp-transfer-mode`).
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

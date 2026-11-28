@@ -16,6 +16,7 @@ Select an adapter with `INFERENCE_ENGINE` (default: `vllm`). An adapter named
 - `engine_configure_defaults`
 - `engine_configure_workload <test-name>` (optional)
 - `engine_prepare_launch <device-index>`
+- `engine_prepare_additional_instance <instance-name>` (optional)
 - `engine_add_lmcache_server_environment <array-name>`
 - `engine_launch <lmcache|baseline> <port> <device-index> <log-file>`
 - `engine_launch_profile <profile> <lmcache|baseline> <port> <device-index> <log-file>` (optional)
@@ -28,6 +29,10 @@ Select an adapter with `INFERENCE_ENGINE` (default: `vllm`). An adapter named
 `engine_launch` stores the background process ID in `ENGINE_PID`. Workloads
 receive only `ENGINE_PORT`, `ENGINE_BASELINE_PORT`, `MODEL`, and OpenAI-compatible
 HTTP endpoints, so they can be reused by another serving engine.
+
+The harness calls `engine_prepare_additional_instance` before launching another
+LMCache-connected engine. Adapters can use it to select a distinct per-process
+configuration file; adapters whose configuration is passed inline can omit it.
 
 Tests use named launch profiles when their topology differs from the default.
 The test owns engine-neutral scenario parameters and assertions; each adapter

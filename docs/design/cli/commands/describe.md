@@ -238,12 +238,59 @@ normalizes it (adds `http://` if missing) and appends `/status`.
 | HTTP endpoint | `http_endpoint` | `http_endpoint` **(new — see Server-Side Changes)** |
 | Engine type | `engine_type` | `engine_type` |
 | Chunk size | `chunk_size` | `chunk_size` |
-| L1 capacity (GB) | `l1_capacity_gb` | `storage_manager.l1_manager.memory_total_bytes` / 1024^3 |
-| L1 used (GB) | `l1_used_gb` | `storage_manager.l1_manager.memory_used_bytes` / 1024^3, with `memory_usage_ratio` × 100 for % |
-| Eviction policy | `eviction_policy` | `storage_manager.eviction_controller.eviction_policy` |
-| Cached objects | `cached_objects` | `storage_manager.l1_manager.total_object_count` |
+| L1 capacity (GB) | `l1_capacity_gb` | Sum of `storage_manager.l1_managers.<tag>.memory_total_bytes` / 1024^3 |
+| L1 used (GB) | `l1_used_gb` | Sum of `storage_manager.l1_managers.<tag>.memory_used_bytes` / 1024^3, with used / total × 100 for % |
+| Eviction policy | `eviction_policy` | Distinct `storage_manager.l1_eviction_controllers.<tag>.eviction_policy` values, comma-separated |
+| Cached objects | `cached_objects` | Sum of `storage_manager.l1_managers.<tag>.total_object_count` |
+| Per-L1 sections (only with more than one L1) | `l1_managers` (list) | One entry per tag: `tag`, `backend`, `capacity_gb`, `used_gb`, `cached_objects`, `eviction_policy` |
+
+The per-tag maps are read because `/status` sends them for any number of L1s,
+while the single-L1 keys (`l1_manager`, `l1_eviction_controller`) are omitted
+when several L1s are configured.
 | Active sessions | `active_sessions` | `active_sessions` |
 | Uptime | `uptime` | `uptime_seconds` **(new — see Server-Side Changes)**, formatted as `Xh Ym Zs` |
+
+#### Cache hits from `/metrics`
+
+`/status` has no hit counts, but the server's lookup metrics subscriber
+(`lmcache/v1/mp_observability/subscribers/metrics/lookup.py`) already exports
+them as Prometheus counters on `GET /metrics`, on the same HTTP port. The CLI
+reads that page and adds a `cache_hits` section, so answering "is LMCache
+hitting?" needs no new server field and no second source of truth
+([#6871](https://github.com/LMCache/LMCache/issues/6871)).
+
+```text
+-------- Cache hits (since server start) ---------
+Lookup requested (tokens):                    1024
+Lookup hits (tokens):                          768
+Lookup hit rate (%):                         75.00
+L1 hits (tokens):                              512
+L2 hits (tokens):                              256
+Request hit rate (%):                        77.70
+```
+
+| Display label | Machine key (`cache_hits.*`) | Source counter on `/metrics` |
+|---|---|---|
+| Lookup requested (tokens) | `lookup_requested_tokens` | `lmcache_mp_lookup_requested_tokens_total` |
+| Lookup hits (tokens) | `lookup_hit_tokens` | `lmcache_mp_lookup_hit_tokens_total` |
+| Lookup hit rate (%) | `lookup_hit_rate` | hits / requested × 100, one decimal |
+| L1 hits (tokens) | `l1_hit_tokens` | `lmcache_mp_lookup_hit_l1_tokens_total` |
+| L2 hits (tokens) | `l2_hit_tokens` | `lmcache_mp_lookup_hit_l2_tokens_total` |
+| Request hit rate (%) | `request_hit_rate` | `lmcache_mp_lookup_request_hit_tokens_total` / `lmcache_mp_lookup_prompt_tokens_total` × 100 |
+
+- **Aggregation.** Each counter is summed across its `model_name` and
+  `cache_salt` series, so the section describes the whole server.
+- **Two rates.** The lookup rate counts only chunk-aligned tokens, which is what
+  LMCache can serve. The request rate divides by the whole prompt and includes
+  the engine's own prefix-cache hits, so it is the closer match to the prefill
+  work the user actually skipped.
+- **"Since server start".** The counters are cumulative OpenTelemetry
+  instruments and `POST /metrics/reset` is a no-op, so the section label states
+  the window rather than implying a recent rate.
+- **Degradation.** Hit data is informational. If `/metrics` is unreachable or
+  unparsable, or a counter is absent (metrics disabled, older server), the
+  affected rows are `N/A` and `describe` still succeeds. A rate is `N/A` when
+  its denominator is 0, i.e. before the first lookup.
 
 ### 4. HTTP client: stdlib `urllib`
 
@@ -257,6 +304,7 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 | Connection refused / timeout | Print error to stderr, exit 1 |
 | HTTP 503 (engine not initialized) | Print "Server unhealthy: engine not initialized", exit 1 |
 | Missing fields in response | Display as `N/A` (Metrics default for `None` values) |
+| `/metrics` unreachable, truncated, unparsable, missing a hit counter, or reporting `NaN`/`Inf` | Affected `cache_hits` rows are `N/A`; exit code unchanged |
 
 ---
 

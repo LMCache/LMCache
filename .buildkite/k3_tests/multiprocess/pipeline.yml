@@ -2,7 +2,8 @@
 # Each step gets its own K8s pod with the exact GPU count it needs.
 # Tests are grouped by GPU requirement; the 2-GPU group is listed first so
 # these heavier jobs get scheduled before 1-GPU jobs.
-#   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
+#   2-GPU: LMCache+engine on GPU 0 and a baseline or second engine on GPU 1
+#          (or TP=2 across both).
 #   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
 # Retry policy for known-flaky long-running multiprocess steps.
@@ -30,20 +31,11 @@ x-common-inference-engines: &common-inference-engines
   - "vllm"
   - "sglang"
 
-# Most scenarios exercise transport-independent behavior, so keep their PR
-# coverage on the default ZMQ transport.
+# Every workload runs on gRPC; ZMQ is deprecated and no longer tested here.
 x-common-matrix: &common-matrix
   setup:
     inference_engine: *common-inference-engines
     request_transport:
-      - "zmq"
-
-# Retain gRPC only for the representative GPU E2E and restart-recovery smokes.
-x-common-smoke-matrix: &common-smoke-matrix
-  setup:
-    inference_engine: *common-inference-engines
-    request_transport:
-      - "zmq"
       - "grpc"
 
 # vLLM-only workloads stay isolated from the common engine list.
@@ -52,22 +44,13 @@ x-vllm-matrix: &vllm-matrix
     inference_engine:
       - "vllm"
     request_transport:
-      - "zmq"
-
-x-vllm-smoke-matrix: &vllm-smoke-matrix
-  setup:
-    inference_engine:
-      - "vllm"
-    request_transport:
-      - "zmq"
       - "grpc"
 
-x-sglang-smoke-matrix: &sglang-smoke-matrix
+x-sglang-matrix: &sglang-matrix
   setup:
     inference_engine:
       - "sglang"
     request_transport:
-      - "zmq"
       - "grpc"
 
 # Keep the regular 1-GPU pod anchor available after the two lm_eval steps are
@@ -89,16 +72,62 @@ x-pod-1gpu: &pod-1gpu
     - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
 
 steps:
+  # Weekly full build only (CI_WEEKLY_FULL=1, see .github/workflows/
+  # weekly_full_build.yml). L1 KV correctness for the full-size
+  # DeepSeek-V4-Flash (sparse-MLA + fp8, TP=4) on real weights: each engine
+  # serves one greedy request, clears only its local prefix cache, and must
+  # return byte-identical output from LMCache's L1 pool. The 6-layer
+  # hma_dsv4_correctness steps below keep per-PR coverage of the KV layouts;
+  # this group keeps the real model's kernels and TP sharding covered once a
+  # week. Listed first so the 4-GPU pods get scheduled before smaller ones.
+  - group: ":compression: DSV4 full-size (4-GPU, weekly)"
+    if: build.env("CI_WEEKLY_FULL") == "1"
+    steps:
+      - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+          # Test the pinned vLLM as is. The script's fallback to an older vLLM
+          # would turn a real DSV4 regression into a pass.
+          DSV4_FALLBACK_VLLM_VERSION: ""
+        # The 160GB fp8 TP-shard load, plus the weight download on a cold
+        # hf-cache node, needs the long timeout.
+        timeout_in_minutes: 120
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "4" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  # TP=4 NCCL + inference-engine shared memory; the 1Gi used
+                  # by the smaller pods is too tight for four ranks.
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 8Gi } }
+        artifact_paths: ["*.log", "ci_results_*/dsv4_flash_tp/**/*"]
+
   - group: ":compression: DSV4 (1-GPU)"
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       # Retain uncompressed, 4x, and 128x KV paths without loading the full model.
-      - label: ":compression: vllm / hma_dsv4_correctness / zmq"
+      - label: ":compression: vllm / hma_dsv4_correctness / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
           INFERENCE_ENGINE: "vllm"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
           TENSOR_PARALLEL_SIZE: "1"
           VLLM_LOAD_FORMAT: "dummy"
@@ -141,12 +170,12 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log", "ci_results_*/hma_dsv4_correctness/**/*"]
-      - label: ":compression: sglang / hma_dsv4_correctness / zmq"
+      - label: ":compression: sglang / hma_dsv4_correctness / grpc"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
           INFERENCE_ENGINE: "sglang"
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
           TENSOR_PARALLEL_SIZE: "1"
           SGLANG_JSON_MODEL_OVERRIDE_ARGS: '{"num_hidden_layers":6,"num_nextn_predict_layers":0,"compress_ratios":[0,0,4,128,4,128]}'
@@ -189,7 +218,7 @@ steps:
     steps:
       - label: ":compression: {{matrix.inference_engine}} / vllm_bench / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        matrix: *vllm-smoke-matrix
+        matrix: *vllm-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -223,6 +252,20 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log", "ci_results_*/long_doc_qa/**/*"]
+
+      - label: ":compression: {{matrix.inference_engine}} / multi_chunk_size / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh multi_chunk_size
+        matrix: *common-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+          CHUNK_SIZE: "256"
+          CLIENT_CHUNK_SIZE: "512"
+          SECOND_CLIENT_CHUNK_SIZE: "768"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/multi_chunk_size/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa_l2 / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
@@ -264,11 +307,20 @@ steps:
       # Two LMCache MP instances + two vLLM instances + one coordinator on a
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
-      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.request_transport}}"
+      - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.p2p_rpc_port_mode}} / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh p2p
-        matrix: *vllm-matrix
+        matrix:
+          setup:
+            inference_engine:
+              - "vllm"
+            p2p_rpc_port_mode:
+              - "default"
+              - "explicit"
+            request_transport:
+              - "grpc"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          P2P_RPC_PORT_MODE: "{{matrix.p2p_rpc_port_mode}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -317,7 +369,7 @@ steps:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
-              - "zmq"
+              - "grpc"
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -362,7 +414,7 @@ steps:
               - "lmcache_driven"
               - "engine_driven"
             request_transport:
-              - "zmq"
+              - "grpc"
         timeout_in_minutes: 30
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
@@ -392,7 +444,7 @@ steps:
         # Two rungs (~15 min of client time) plus two model loads.
         timeout_in_minutes: 45
         env:
-          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          LMCACHE_REQUEST_TRANSPORT: "grpc"
           ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
           NUM_GPU_BLOCKS_OVERRIDE: "1024"
           MAX_MODEL_LEN: "8192"
@@ -422,7 +474,7 @@ steps:
 
       - label: ":compression: {{matrix.inference_engine}} / restart_recovery / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
-        matrix: *common-smoke-matrix
+        matrix: *common-matrix
         env:
           INFERENCE_ENGINE: "{{matrix.inference_engine}}"
           LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -442,6 +494,22 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      # One vLLM, a main LMCache server with --enable-p2p-write and a headless
+      # peer LMCache server (no engine) on one GPU over localhost. Prompts fill
+      # the main server's small L1 past the usage threshold: the first ones
+      # must stay local, later ones must land on the peer, and every prompt
+      # must be served from LMCache on replay.
+      - label: ":compression: {{matrix.inference_engine}} / p2p_write / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh p2p_write
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/p2p_write/*.json"]
+
       # Real GPU MP integration: vLLM is launched with FIFO lazy offload
       # (threshold=2, select_count=1). Three requests verify that the first
       # two remain pending and the third drains the first request.
@@ -455,6 +523,32 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
+
+      # Real GPU MP integration: vLLM is launched with EVICTION_AWARE lazy
+      # offload over a pinned 32768-token KV pool (512 blocks of 64 tokens).
+      # An idle engine must hold every store; a workload twice the pool must
+      # drain them.
+      - label: ":compression: {{matrix.inference_engine}} / eviction_aware_lazy_offload / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh eviction_aware_lazy_offload
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: {{matrix.inference_engine}} / sleep_mode / {{matrix.request_transport}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh sleep_mode
+        matrix: *vllm-matrix
+        env:
+          INFERENCE_ENGINE: "{{matrix.inference_engine}}"
+          LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log", "ci_results_*/sleep_mode/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / http_api / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
@@ -519,7 +613,7 @@ steps:
               - "inline"
               - "server_copy"
             request_transport:
-              - "zmq"
+              - "grpc"
         env: { LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}" }
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
@@ -546,16 +640,21 @@ steps:
 
   # Canary path for VERIFY_AND_PIN_VLLM=true: skips every real test group
   # above (each group's `if` evaluates to false) and instead runs vllm_bench
-  # across both request transports. The pin is published only after both
-  # matrix jobs pass, preventing one successful transport from pinning a
-  # nightly that failed the other transport.
+  # on gRPC. The pin is published only after it passes.
   - label: ":test_tube: Verify {{matrix.inference_engine}} nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
+      bash -euo pipefail <<'BASH'
+      unset PINNED_VLLM_VERSION PINNED_VLLM_FULL_SHA PINNED_VLLM_ARCHIVE_INDEX_URL
+      export USE_PINNED_VLLM=false
+      source .buildkite/k3_harness/resolve-pinned-vllm.sh
       .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-      python3 -c 'import vllm; print(vllm.__version__)' \
-        > "verified_vllm_{{matrix.request_transport}}.txt"
-    matrix: *vllm-smoke-matrix
+      {
+        python3 -c 'import vllm; print(vllm.__version__)'
+        printf 'cuda_variant=%s\n' "$${VLLM_CUDA_VARIANT}"
+      } > "verified_vllm_{{matrix.request_transport}}.txt"
+      BASH
+    matrix: *vllm-matrix
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
       LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -579,8 +678,8 @@ steps:
     artifact_paths: ["*.log", "verified_vllm_*.txt"]
 
   # The SGLang canary discovers the newest official nightly, installs its
-  # exact source revision, and verifies LMCache retrieval through both request
-  # transports. The pin job below runs only after both matrix jobs pass.
+  # exact source revision, and verifies LMCache retrieval over gRPC. The pin
+  # job below runs only after it passes.
   - label: ":test_tube: Verify SGLang nightly / {{matrix.request_transport}}"
     if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
     command: |
@@ -596,7 +695,7 @@ steps:
         printf 'index_url=%s\n' "$${PINNED_SGLANG_INDEX_URL}"
       } > "verified_sglang_{{matrix.request_transport}}.txt"
       BASH
-    matrix: *sglang-smoke-matrix
+    matrix: *sglang-matrix
     env:
       INFERENCE_ENGINE: "{{matrix.inference_engine}}"
       LMCACHE_REQUEST_TRANSPORT: "{{matrix.request_transport}}"
@@ -614,8 +713,8 @@ steps:
     if: build.env("VERIFY_AND_PIN_VLLM") =~ /true/
     command: |
       buildkite-agent artifact download "verified_vllm_*.txt" .
-      diff -u verified_vllm_zmq.txt verified_vllm_grpc.txt
-      VLLM_VERSION="$(cat verified_vllm_grpc.txt)" \
+      VLLM_VERSION="$(head -n1 verified_vllm_grpc.txt)" \
+        VLLM_CUDA_VARIANT="$(sed -n 's/^cuda_variant=//p' verified_vllm_grpc.txt)" \
         bash .github/scripts/pin-tested-vllm.sh
     timeout_in_minutes: 10
     agents: { queue: "k8s" }
@@ -637,7 +736,6 @@ steps:
     if: build.env("VERIFY_AND_PIN_SGLANG") =~ /true/
     command: |
       buildkite-agent artifact download "verified_sglang_*.txt" .
-      diff -u verified_sglang_zmq.txt verified_sglang_grpc.txt
       SGLANG_VERSION="$(sed -n '1p' verified_sglang_grpc.txt)" \
       SGLANG_SHORT_SHA="$(sed -n 's/^short_sha=//p' verified_sglang_grpc.txt)" \
       SGLANG_INDEX_URL="$(sed -n 's/^index_url=//p' verified_sglang_grpc.txt)" \

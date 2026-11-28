@@ -28,6 +28,13 @@ KV Cache Service (``kvcache``)
    Eviction policy:                               LRU
    Cached objects:                               1024
    Active sessions:                                 3
+   -------- Cache hits (since server start) ---------
+   Lookup requested (tokens):                    1024
+   Lookup hits (tokens):                          768
+   Lookup hit rate (%):                         75.00
+   L1 hits (tokens):                              512
+   L2 hits (tokens):                              256
+   Request hit rate (%):                        77.70
    ---- Model: meta-llama/Llama-3.1-70B-Instruct ----
    Model:           meta-llama/Llama-3.1-70B-Instruct
    World size:                                      4
@@ -58,6 +65,40 @@ The output shows:
 
 - **Overview** — health status, engine type, chunk size.
 - **L1 storage** — capacity, usage, eviction policy, cached object count.
+  On a server with several L1s (repeated ``--l1-manager``), these lines are
+  totals across all L1s, the eviction line lists each distinct policy, and
+  each L1 gets its own section:
+
+  .. code-block:: text
+
+     L1 capacity (GB):                             3.00
+     L1 used (GB):                          0.00 (0.0%)
+     Eviction policy:                          LRU, ARC
+     Cached objects:                                  0
+     Active sessions:                                 0
+     -------------------- L1: hot ---------------------
+     Tag:                                           hot
+     Backend:                                      dram
+     Capacity (GB):                                1.00
+     Used (GB):                             0.00 (0.0%)
+     Cached objects:                                  0
+     Eviction policy:                               LRU
+     -------------------- L1: warm --------------------
+     Tag:                                          warm
+     Backend:                                      dram
+     Capacity (GB):                                2.00
+     Used (GB):                             0.00 (0.0%)
+     Cached objects:                                  0
+     Eviction policy:                               ARC
+
+  In ``--format json`` output, these sections form the ``l1_managers`` list.
+- **Cache hits** — lookup hit counts and rates since the server started, read
+  from the server's ``/metrics`` and summed over all models and cache salts.
+  *Lookup hit rate* counts the chunk-aligned tokens LMCache can serve, and
+  *L1 hits* + *L2 hits* = *Lookup hits*. *Request hit rate* divides by the
+  whole prompt and includes the engine's own prefix-cache hits. Rows show
+  ``N/A`` if ``/metrics`` is unavailable, and a rate shows ``N/A`` before the
+  first lookup. In ``--format json`` output, this is the ``cache_hits`` object.
 - **Registered models** — per-model KV cache layout: a context-wide summary
   followed by one kernel group section per kernel group, each with the engine
   KV tensor shape (symbolic and concrete), attention backend, and group geometry.
@@ -156,6 +197,14 @@ L2 adapters are collected into lists for easy programmatic access:
        "eviction_policy": "LRU",
        "cached_objects": 1024,
        "active_sessions": 3,
+       "cache_hits": {
+         "lookup_requested_tokens": 1024,
+         "lookup_hit_tokens": 768,
+         "lookup_hit_rate": 75.0,
+         "l1_hit_tokens": 512,
+         "l2_hit_tokens": 256,
+         "request_hit_rate": 77.7
+       },
        "models": [
          {
            "model": "meta-llama/Llama-3.1-70B-Instruct",

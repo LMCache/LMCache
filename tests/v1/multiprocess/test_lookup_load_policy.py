@@ -55,7 +55,7 @@ class _ConfiguredPolicy(KVLoadPolicy):
 
 def _ctx() -> MagicMock:
     ctx = MagicMock()
-    ctx.chunk_size = CHUNK_SIZE
+    ctx.default_chunk_size = CHUNK_SIZE
     ctx.event_bus.has_subscribers.return_value = False
     ctx.layout_desc_registry.find_attn_desc.return_value = AttnWindowDesc(
         num_chunks_in_sw=[-1], world_size=1
@@ -64,7 +64,10 @@ def _ctx() -> MagicMock:
         DEFAULT_SHARD_REPLICATION_DESC
     )
     ctx.layout_desc_registry.find_group_layout_descs.return_value = {0: MagicMock()}
-    ctx.token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    token_hasher = MagicMock()
+    token_hasher.compute_packed_chunk_hashes.return_value = CHUNK_HASHES
+    ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
+    ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-1",

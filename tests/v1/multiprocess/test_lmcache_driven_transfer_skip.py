@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 # First Party
-from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
@@ -153,7 +153,10 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
 
     event_backend = MagicMock()
     entry = SimpleNamespace(
-        cache_context=cache_context, model_name="m", event_backend=event_backend
+        cache_context=cache_context,
+        model_name="m",
+        event_backend=event_backend,
+        chunk_size=256,
     )
     module.get_and_touch_context_entry = MagicMock(return_value=entry)
 
@@ -163,9 +166,10 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ]
     ctx = MagicMock()
     ctx.get_read_owners.return_value = None
-    ctx.chunk_size = 256
+    ctx.default_chunk_size = 128
     ctx.null_block_id = 0
     ctx.resolve_obj_keys.return_value = obj_keys
+    ctx.layout_desc_registry.get_chunk_size.return_value = 256
 
     read_calls: list[list[str]] = []
 
@@ -215,7 +219,9 @@ def _make_checkpoint_module(
     # Keep recording the copies made through the replacement context.
     context.transfer_object_group = entry.cache_context.transfer_object_group
     entry.cache_context = context
-    module.context.chunk_size = 2
+    entry.chunk_size = 2
+    module.context.default_chunk_size = 1
+    module.context.layout_desc_registry.get_chunk_size.return_value = 2
     module.context.null_block_id = -1
     module.context.session_manager.get.return_value = None
     module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
@@ -251,6 +257,11 @@ def test_store_reserves_real_page_zero_and_only_present_state_objects(
         [-1, -1, 0, 1],
         [-1, -1, 2, 3],
     ]
+    assert context.calculate_num_blocks.call_args_list[:3] == [
+        call(2, 0),
+        call(2, 1),
+        call(2, 2),
+    ]
 
 
 def test_store_skip_chunks_drops_caller_masked_chunks(
@@ -279,6 +290,34 @@ def test_store_skip_chunks_drops_caller_masked_chunks(
     assert all("g0c1" not in keys and "g1c1" not in keys for keys in reserved)
     assert ["g0c0"] in reserved
     assert mask[1] is False
+
+
+@pytest.mark.parametrize(
+    ("mask_object_groups", "expected"),
+    [(None, [False, True]), ([0], [True, True]), ([1], [False, True])],
+)
+def test_store_mask_checks_only_the_requested_object_groups(
+    monkeypatch: pytest.MonkeyPatch,
+    mask_object_groups: list[int] | None,
+    expected: list[bool],
+) -> None:
+    """Chunk 0's recurrent-state blocks are all null (align-mode Mamba keeps
+    state for the checkpoint chunk only), so that group skips it. Checking
+    every group reports chunk 0 unstored; checking only the attention group
+    reports it stored."""
+    module, _context, _reads, _transfers = _make_checkpoint_module(monkeypatch)
+    key: Any = SimpleNamespace(
+        request_id="req", worker_id=1, has_unfull_chunk=_no_unfull
+    )
+    _handle, ok, mask = module.store_with_chunk_mask(
+        key,
+        1,
+        [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+        b"producer",
+        mask_object_groups=mask_object_groups,
+    )
+    assert ok
+    assert mask == expected
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
@@ -332,6 +371,10 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
     assert read_calls == [["g0c0", "g0c1", "g0c2"]]
     _grp, mem = transfer_calls[0]
     assert len(mem) == 3 and all(o is not None for o in mem)
+    entry = module.get_and_touch_context_entry(1)
+    assert entry is not None
+    cache_context = entry.cache_context
+    assert cache_context.calculate_num_blocks.call_args_list[0] == call(256, 0)
 
 
 def test_retrieve_never_reads_aux_groups(monkeypatch):
@@ -424,7 +467,6 @@ def _dsv4_swa_cache_context(chunk_tokens: int, sw_tokens: int, tpb: int):
     return ctx
 
 
-@pytest.mark.no_shared_allocator
 def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
     """DSv4 SWA: chunk 4096, window 128, tpb 32 → keep last 4 block ids / chunk."""
     chunk, sw, tpb, n_chunks = 4096, 128, 32, 19
@@ -443,7 +485,6 @@ def test_downsample_keeps_last_window_of_each_chunk_dsv4_swa():
     assert out[0][start:] == original[-keep:]
 
 
-@pytest.mark.no_shared_allocator
 def test_downsample_full_attention_keeps_every_block():
     chunk, tpb, n_chunks = 4096, 128, 19
     ctx = _dsv4_swa_cache_context(chunk, sw_tokens=chunk, tpb=tpb)
@@ -461,6 +502,8 @@ def test_downsample_full_attention_keeps_every_block():
 def _unfull_key(**kwargs):
     return SimpleNamespace(
         request_id="req",
+        model_name="m",
+        world_size=1,
         worker_id=1,
         cache_salt="salt",
         end=3,

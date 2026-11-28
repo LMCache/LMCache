@@ -28,7 +28,7 @@ read_pid_from_file() {
     fi
 
     # PID order from launch-processes.sh:
-    # 1) LMCache, 2) engine with LMCache, 3) baseline (optional)
+    # 1) LMCache, 2) engine with LMCache, 3) second engine or baseline
     sed -n "${index}p" "$PID_FILE" 2>/dev/null || true
 }
 
@@ -183,11 +183,19 @@ wait_for_engine_server() {
 
 # Wait for both engine servers (they start simultaneously).
 ENGINE_LMCACHE_PID="$(read_pid_from_file 2 || true)"
-ENGINE_BASELINE_PID="$(read_pid_from_file 3 || true)"
+THIRD_PROCESS_PID="$(read_pid_from_file 3 || true)"
 
 if ! wait_for_engine_server "$ENGINE_PORT" "${ENGINE_NAME} with LMCache" \
     "$ENGINE_LOG_FILE" "$ENGINE_LMCACHE_PID"; then
     exit 1
+fi
+
+if [[ "${LAUNCH_SECOND_ENGINE:-false}" == "true" ]]; then
+    if ! wait_for_engine_server "$SECOND_ENGINE_PORT" \
+            "second ${ENGINE_NAME} with LMCache" \
+            "$SECOND_ENGINE_LOG_FILE" "$THIRD_PROCESS_PID"; then
+        exit 1
+    fi
 fi
 
 # The baseline server only exists for 2-GPU tests; 1-GPU tests set
@@ -195,7 +203,7 @@ fi
 if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     if ! wait_for_engine_server "$ENGINE_BASELINE_PORT" \
             "${ENGINE_NAME} baseline (without LMCache)" \
-            "$ENGINE_BASELINE_LOG_FILE" "$ENGINE_BASELINE_PID"; then
+            "$ENGINE_BASELINE_LOG_FILE" "$THIRD_PROCESS_PID"; then
         exit 1
     fi
 fi

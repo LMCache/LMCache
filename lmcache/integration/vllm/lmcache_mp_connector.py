@@ -58,18 +58,21 @@ import torch
 import zmq
 
 # First Party
-from lmcache.banner import print_banner_once
-from lmcache.integration.vllm.experimental import dispatch
+from lmcache.integration.vllm.experimental import LMCacheMPQRequestMetadata, dispatch
 from lmcache.integration.vllm.kv_cache_group_edits import (
     apply_kv_cache_group_edits,
     validate_kv_cache_groups,
 )
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
-    get_tokens_per_block,
-    is_align_mode_mamba_spec,
-    is_per_request_state_spec,
-    is_scratch_spec,
+    group_prefix_replay_tokens,
+    group_specs,
+    is_align_mode_mamba_group,
+    is_per_request_state_group,
+    is_scratch_group,
+    is_windowed_group,
+    tokens_per_group_block,
+    vllm_mamba_cache_mode,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -89,9 +92,10 @@ from lmcache.integration.vllm.mp_server_launcher import (
 from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
-from lmcache.utils import CacheRemoveEvent
-from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
+from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.logging import init_logger as lmcache_init_logger
+from lmcache.v1.common.utils import CacheRemoveEvent
 
 try:
     # First Party
@@ -229,12 +233,7 @@ def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[An
     if kv_cache_config is None:
         return
     for group in kv_cache_config.kv_cache_groups:
-        group_spec = group.kv_cache_spec
-        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
-        if isinstance(per_layer_specs, dict):
-            yield from per_layer_specs.values()
-        else:
-            yield group_spec
+        yield from group_specs(group)
 
 
 def get_group_tokens_per_block(
@@ -263,9 +262,9 @@ def get_group_tokens_per_block(
         if kv_cache_config is not None
         else ()
     )
-    return [
-        get_tokens_per_block(group.kv_cache_spec, dcp_size) for group in groups
-    ] or [vllm_config.cache_config.block_size * dcp_size]
+    return [tokens_per_group_block(group, dcp_size) for group in groups] or [
+        vllm_config.cache_config.block_size * dcp_size
+    ]
 
 
 def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
@@ -281,10 +280,7 @@ def get_prefix_replay_tokens(kv_cache_config: "KVCacheConfig | None") -> int:
         else ()
     )
     return max(
-        (
-            int(getattr(group.kv_cache_spec, "prefix_replay_tokens", 0) or 0)
-            for group in groups
-        ),
+        (group_prefix_replay_tokens(group) for group in groups),
         default=0,
     )
 
@@ -415,11 +411,13 @@ def get_resolved_attention_block_sizes(
         The resolved attention block sizes. Falls back to vLLM's cache block
         size when group metadata is unavailable.
     """
+    groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else ()
     block_sizes = {
         spec.block_size
-        for spec in _iter_kv_cache_specs(kv_cache_config)
+        for group in groups
+        if not is_scratch_group(group)
+        for spec in group_specs(group)
         if any(cls.__name__ == "AttentionSpec" for cls in type(spec).__mro__)
-        and not is_scratch_spec(spec)
     }
     if block_sizes:
         return block_sizes
@@ -457,7 +455,7 @@ def validate_mamba_step_alignment(
         ValueError: If Mamba groups have inconsistent block sizes or
             ``max_num_batched_tokens < block_size``.
     """
-    if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
+    if vllm_mamba_cache_mode(vllm_config, kv_cache_config) != "align":
         return
     mamba_block_sizes = {
         spec.block_size
@@ -578,17 +576,17 @@ def _ensure_transport_scheme(server_url: str) -> str:
     """Ensure a multiprocess server URL carries a transport scheme.
 
     Preserve explicit schemes so the request client factory can select the
-    transport. Bare endpoints retain the legacy ZMQ TCP behavior.
+    transport. Bare endpoints default to gRPC.
 
     Args:
         server_url: A server URL, with or without a ``<scheme>://`` prefix.
 
     Returns:
-        The URL with a transport scheme, defaulting to ``tcp://``.
+        The URL with a transport scheme, defaulting to ``grpc://``.
     """
     if "://" in server_url:
         return server_url
-    return f"tcp://{server_url}"
+    return f"grpc://{server_url}"
 
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
@@ -599,16 +597,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
-      e.g. "tcp://host1:6667,tcp://host2:6667".
+      e.g. "grpc://host1:6667,grpc://host2:6667".
 
     Single-server deployment:
     - lmcache.mp.host: the host of the LMCache server, e.g. "127.0.0.1" or
-      "tcp://127.0.0.1" (default "tcp://localhost"). The final URL is
-      "{host}:{port}". If no transport scheme is provided, "tcp://" is
-      automatically prepended.
+      "grpc://127.0.0.1" (default "grpc://localhost"). The final URL is
+      "{host}:{port}". If no transport scheme is provided, "grpc://" is
+      automatically prepended. "tcp://" selects the deprecated ZMQ transport.
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
+    - lmcache.mp.chunk_size: optional client-side minimum chunk size.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
@@ -668,7 +667,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, kv_cache_config
         )
         self._prefix_replay_tokens = get_prefix_replay_tokens(kv_cache_config)
-        mamba_cache_mode = getattr(vllm_config.cache_config, "mamba_cache_mode", "none")
+        # Windowed groups need a full-prompt hit reported as P - 1.
+        self._full_hit_holds_back_last_token = kv_cache_config is not None and any(
+            is_windowed_group(group) for group in kv_cache_config.kv_cache_groups
+        )
+        mamba_cache_mode = vllm_mamba_cache_mode(vllm_config, kv_cache_config)
         self._reserve_last_token_for_lookup = mamba_cache_mode in ("align", "all")
         scheduler_block_size = get_vllm_scheduler_block_size(
             vllm_config, kv_cache_config
@@ -705,7 +708,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             self._save_unfull_chunk
             and kv_cache_config is not None
             and any(
-                is_per_request_state_spec(group.kv_cache_spec)
+                is_per_request_state_group(group)
                 for group in kv_cache_config.kv_cache_groups
             )
         ):
@@ -742,15 +745,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             # Legacy single-server fallback.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.host", "tcp://localhost"
+                "lmcache.mp.host", "grpc://localhost"
             )
             server_port = vllm_config.kv_transfer_config.get_from_extra_config(
                 "lmcache.mp.port", 5555
             )
             server_urls = [f"{server_host}:{server_port}"]
 
-        # Preserve explicit transport schemes and default bare host:port
-        # endpoints to the legacy ZMQ TCP transport.
         server_urls = [_ensure_transport_scheme(u) for u in server_urls]
 
         # The server count is derived from lmcache.mp.server_urls.
@@ -930,7 +931,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 for engine_group_idx, group in enumerate(
                     kv_cache_config.kv_cache_groups
                 )
-                if is_align_mode_mamba_spec(group.kv_cache_spec)
+                if is_align_mode_mamba_group(group)
             ]
             if kv_cache_config is not None
             else []
@@ -1556,22 +1557,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 need_to_load,
             )
 
-        # In full-prompt-hit case, we need to recompute the last token.
-        # Without this, num_computed_tokens would equal request.num_tokens,
-        # causing num_new_tokens to be 0 and triggering the
-        # `assert num_new_tokens > 0` in the scheduler.
+        # A full-prompt hit reports every token, unless vLLM would then not
+        # allocate or not keep a block the hit needs.
         if ret == len(request.all_token_ids):
             if self._prefix_replay_tokens > 0:
-                # SWA bounded replay floors the hit to a block boundary before
-                # allocating, so give back a whole chunk instead of one token.
+                # SWA bounded replay floors the hit to a block, so give back a chunk.
                 chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
                 aligned = max(0, (ret - 1) // chunk * chunk)
                 if aligned < ret:
                     tracker.pending_free_ranges.append((aligned, ret))
                     tracker.num_lmcache_hit_tokens = aligned
                 need_to_load = max(0, aligned - num_computed_tokens)
-            else:
-                need_to_load = max(0, need_to_load - 1)
+            elif self._full_hit_holds_back_last_token:
+                # Report P - 1, or only the full chunks when P - 1 would leave
+                # the last token's block unallocated.
+                if ret != full_chunk_tokens and self._starts_a_block(ret - 1):
+                    tracker.pending_free_ranges.append((full_chunk_tokens, ret))
+                    tracker.num_lmcache_hit_tokens = full_chunk_tokens
+                    need_to_load = max(0, full_chunk_tokens - num_computed_tokens)
+                else:
+                    need_to_load = max(0, need_to_load - 1)
+            elif need_to_load == 1:
+                # vLLM already holds P - 1 tokens and recomputes the last one.
+                need_to_load = 0
 
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
@@ -2013,6 +2021,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 new_request.num_computed_tokens, num_new_tokens
             )
 
+            if self.transfer_intermediate_tensors:
+                q_window = LMCacheMPQRequestMetadata.BuildQCaptureWindow(
+                    request_tracker,
+                    num_new_tokens,
+                    self._group_tokens_per_block,
+                )
+                if q_window is not None:
+                    metadata.add_q_capture_window(q_window)
+
             if not self._can_store:
                 continue
 
@@ -2062,6 +2079,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 cached_reqs.num_computed_tokens[idx], num_new_tokens
             )
 
+            if self.transfer_intermediate_tensors:
+                q_window = LMCacheMPQRequestMetadata.BuildQCaptureWindow(
+                    request_tracker,
+                    num_new_tokens,
+                    self._group_tokens_per_block,
+                )
+                if q_window is not None:
+                    metadata.add_q_capture_window(q_window)
+
             if not self._can_store:
                 continue
 
@@ -2110,7 +2136,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
                     new_block_ids=list(primary_block_ids),
-                    new_token_ids=tracker.get_token_ids_slice(0, total_tokens),
+                    new_token_ids=tracker.get_token_ids(0, total_tokens),
                 )
             )
 
@@ -2135,7 +2161,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tokens_per_block = self._group_tokens_per_block[0]
             start_token = (total_blocks - num_new_blocks) * tokens_per_block
             end_token = total_blocks * tokens_per_block
-            new_token_ids = tracker.get_token_ids_slice(start_token, end_token)
+            new_token_ids = tracker.get_token_ids(start_token, end_token)
             records.append(
                 RequestAllocationRecord(
                     req_id=request_id,
@@ -2247,6 +2273,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # only it.
             request_configs["lmcache.hint.unfull_chunk_grid"] = self._unfull_chunk_grid
         return request_configs
+
+    def _starts_a_block(self, token_idx: int) -> bool:
+        """Return whether ``token_idx`` is the first token of a block in any group."""
+        return any(
+            tokens_per_block > 0 and token_idx % tokens_per_block == 0
+            for tokens_per_block in self._group_tokens_per_block
+        )
 
     def _add_unfull_chunk_stores(
         self,

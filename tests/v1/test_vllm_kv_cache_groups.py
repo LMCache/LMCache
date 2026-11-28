@@ -12,6 +12,8 @@ from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
     is_scratch_spec,
+    is_windowed_group,
+    vllm_mamba_cache_mode,
 )
 from lmcache.v1.common.group_view import (
     EXCLUDED_ENGINE_GROUP,
@@ -47,6 +49,11 @@ class SlidingWindowSpec(AttentionSpec):
 @dataclass
 class SlidingWindowMLASpec(SlidingWindowSpec):
     pass
+
+
+@dataclass
+class ChunkedLocalAttentionSpec(AttentionSpec):
+    attention_chunk_size: int
 
 
 @dataclass
@@ -110,9 +117,9 @@ def test_conversion_defaults_to_single_group_without_config():
 
 def test_connector_and_server_agree_on_mixed_stride_groups() -> None:
     # First Party
-    from lmcache.utils import EngineType
+    from lmcache.v1.common.custom_types import EngineType
+    from lmcache.v1.common.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.common.utils import normalize_and_discover_per_layer_formats
-    from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 
     caches = {
         f"layer.{idx}": torch.empty_strided(
@@ -382,7 +389,7 @@ def test_group_layers_by_identity_uses_per_layer_format():
     layer kv_size=1, splitting them into separate identities -- the per-group
     distinction the single global format cannot express."""
     # First Party
-    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+    from lmcache.v1.common.kv_layer_groups import group_layers_by_identity
 
     kv_caches = [
         torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16),  # K+V (rank-5)
@@ -412,7 +419,7 @@ def test_group_layers_by_identity_uses_per_layer_format():
 def test_group_layers_by_identity_rejects_group_idx_length_mismatch():
     """per_layer_engine_group_idx must hold one entry per layer."""
     # First Party
-    from lmcache.v1.kv_layer_groups import group_layers_by_identity
+    from lmcache.v1.common.kv_layer_groups import group_layers_by_identity
 
     kv_caches = [torch.randn(2, 32, 16, 8, 64, dtype=torch.bfloat16)]
     # One layer (one format) but two engine-group ids.
@@ -500,6 +507,178 @@ def test_conversion_tokens_per_block_unscaled_without_dcp():
 
     assert [g.tokens_per_block for g in default] == [16, 16]
     assert [g.tokens_per_block for g in explicit] == [16, 16]
+
+
+class FullAttentionManager:
+    pass
+
+
+class SlidingWindowManager:
+    pass
+
+
+class MambaManager:
+    pass
+
+
+class ChunkedLocalAttentionManager:
+    pass
+
+
+class CircularBufferManager:
+    pass
+
+
+@dataclass
+class KVCacheGroup:
+    """Double of vLLM's ``KVCacheGroup`` after vllm-project/vllm#61452: layers
+    keep their own specs, and the policy lives on ``manager_config``."""
+
+    kv_cache_specs: "dict[str, object]"
+    manager_cls: type
+    block_size: int
+    params: object = field(default_factory=SimpleNamespace)
+    dcp_sharded: bool = True
+    prefix_cacheable: bool = True
+
+    @property
+    def manager_config(self) -> SimpleNamespace:
+        return SimpleNamespace(manager_cls=self.manager_cls, params=self.params)
+
+    @property
+    def layer_names(self) -> list[str]:
+        return list(self.kv_cache_specs)
+
+    @property
+    def distinct_specs(self) -> tuple[object, ...]:
+        return tuple(self.kv_cache_specs.values())
+
+
+def test_conversion_reads_kv_cache_group_manager_config() -> None:
+    """The window, the Mamba mode and scratch groups come from the manager
+    config; the spec's own Mamba mode is ignored."""
+    groups = [
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16),
+        KVCacheGroup(
+            {"layer.1": AttentionSpec(16)},
+            SlidingWindowManager,
+            16,
+            SimpleNamespace(sliding_window=64),
+        ),
+        KVCacheGroup(
+            {"layer.2": MambaSpec(16, mamba_cache_mode="none")},
+            MambaManager,
+            16,
+            SimpleNamespace(mamba_cache_mode="align"),
+            dcp_sharded=False,
+        ),
+        KVCacheGroup(
+            {"layer.3": AttentionSpec(16)},
+            CircularBufferManager,
+            16,
+            prefix_cacheable=False,
+        ),
+    ]
+    names = ["layer.0", "layer.1", "layer.2", "layer.3"]
+
+    spec = create_engine_group_infos_from_vllm(
+        SimpleNamespace(kv_cache_groups=groups),
+        _same_shape_caches(names),
+        dcp_size=2,
+    )
+
+    assert [g.engine_group_id for g in spec] == [0, 1, 2]
+    assert [g.sw_size_tokens for g in spec] == [-1, 64, 16]
+    assert [g.tokens_per_block for g in spec] == [32, 32, 16]
+    assert [g.recurrent_state for g in spec] == [False, False, True]
+
+
+@pytest.mark.parametrize("prefix_caching", [True, False], ids=["on", "off"])
+def test_conversion_reads_mamba_prefix_caching_without_cache_mode(
+    prefix_caching: bool,
+) -> None:
+    """vLLM after vllm-project/vllm#63830 has no ``mamba_cache_mode``; a Mamba
+    group snapshots its state exactly when prefix caching is on."""
+    groups = [
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16),
+        KVCacheGroup(
+            {"layer.1": MambaSpec(16, mamba_cache_mode="none")},
+            MambaManager,
+            16,
+            SimpleNamespace(enable_prefix_caching=prefix_caching),
+            dcp_sharded=False,
+        ),
+    ]
+
+    spec = create_engine_group_infos_from_vllm(
+        SimpleNamespace(kv_cache_groups=groups),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [g.recurrent_state for g in spec] == [False, prefix_caching]
+    assert spec[1].sw_size_tokens == (16 if prefix_caching else -1)
+
+
+_ATTENTION_ONLY = SimpleNamespace(
+    kv_cache_groups=[
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16)
+    ]
+)
+_WITH_MAMBA = SimpleNamespace(
+    kv_cache_groups=[
+        KVCacheGroup({"layer.0": AttentionSpec(16)}, FullAttentionManager, 16),
+        KVCacheGroup({"layer.1": MambaSpec(16)}, MambaManager, 16),
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "cache_config,kv_cache_config,expected",
+    [
+        pytest.param(
+            SimpleNamespace(mamba_cache_mode="align", enable_prefix_caching=False),
+            _WITH_MAMBA,
+            "align",
+            id="legacy-field-wins",
+        ),
+        pytest.param(
+            SimpleNamespace(mamba_cache_mode="none", enable_prefix_caching=True),
+            _WITH_MAMBA,
+            "none",
+            id="legacy-none",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=True),
+            _WITH_MAMBA,
+            "align",
+            id="mamba-on",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=False),
+            _WITH_MAMBA,
+            "none",
+            id="mamba-off",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=True),
+            _ATTENTION_ONLY,
+            "none",
+            id="attention-only-on",
+        ),
+        pytest.param(
+            SimpleNamespace(enable_prefix_caching=True), None, "none", id="no-groups"
+        ),
+    ],
+)
+def test_vllm_mamba_cache_mode(
+    cache_config: SimpleNamespace, kv_cache_config: object, expected: str
+) -> None:
+    """Older vLLM reports the mode; newer vLLM implies align from prefix
+    caching when a KV cache group holds Mamba layers, and ``"none"``
+    otherwise."""
+    vllm_config = SimpleNamespace(cache_config=cache_config)
+
+    assert vllm_mamba_cache_mode(vllm_config, kv_cache_config) == expected
 
 
 @dataclass
@@ -726,3 +905,57 @@ def test_conversion_pure_mla_model_replicates_every_group():
     )
 
     assert [(group.tp_replicas, group.dcp_shards) for group in infos] == [(8, 2)]
+
+
+@dataclass
+class BoundedReplaySlidingWindowSpec(SlidingWindowSpec):
+    """DeepSeek-V4.1 bounded-replay SWA: vLLM does not prefix-cache it."""
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    "group,expected",
+    [
+        (MockKVCacheGroup(["l"], FullAttentionSpec(16)), False),
+        (MockKVCacheGroup(["l"], SlidingWindowSpec(16, 64)), True),
+        (MockKVCacheGroup(["l"], SlidingWindowMLASpec(16, 64)), True),
+        (MockKVCacheGroup(["l"], ChunkedLocalAttentionSpec(16, 64)), True),
+        (MockKVCacheGroup(["l"], MambaSpec(16)), True),
+        (
+            MockKVCacheGroup(
+                ["l"], UniformTypeKVCacheSpecs(16, {"l": SlidingWindowSpec(16, 64)})
+            ),
+            True,
+        ),
+        (MockKVCacheGroup(["l"], BoundedReplaySlidingWindowSpec(16, 64)), False),
+        (KVCacheGroup({"l": AttentionSpec(16)}, FullAttentionManager, 16), False),
+        (KVCacheGroup({"l": AttentionSpec(16)}, SlidingWindowManager, 16), True),
+        (
+            KVCacheGroup(
+                {"l": ChunkedLocalAttentionSpec(16, 64)},
+                ChunkedLocalAttentionManager,
+                16,
+            ),
+            True,
+        ),
+        (KVCacheGroup({"l": MambaSpec(16)}, MambaManager, 16), True),
+        (
+            KVCacheGroup(
+                {"l": AttentionSpec(16)},
+                SlidingWindowManager,
+                16,
+                prefix_cacheable=False,
+            ),
+            False,
+        ),
+    ],
+)
+def test_windowed_group_matches_vllm_offloading_sliding_window_groups(
+    group: object, expected: bool
+) -> None:
+    """Prefix-cacheable sliding-window, chunked-local and Mamba groups are
+    windowed, in both vLLM group forms; full attention and scratch are not."""
+    assert is_windowed_group(group) is expected

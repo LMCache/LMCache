@@ -26,26 +26,18 @@ from lmcache.integration.vllm.mp_server_launcher import (
     wait_for_mp_server_from_url,
 )
 from lmcache.integration.vllm.utils import vllm_layout_hints
-from lmcache.utils import (
-    CacheEvent,
-    CacheRemoveEvent,
-    CacheStoreEvent,
-    EngineType,
-    _lmcache_nvtx_annotate,
-    init_logger,
-)
 from lmcache.v1.client.heartbeat import HeartbeatThread
 from lmcache.v1.client.kv_event_subscriber import (
     KVEventStreamClosed,
     MPKVEventSubscriber,
 )
-from lmcache.v1.client.transport.errors import REQUEST_FAILURES
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.client.worker_transfer import TransferContext, create_transfer_context
 from lmcache.v1.common.custom_types import (
     KV_EVENT_KIND_REMOVED,
     KV_EVENT_KIND_STORED,
     BlockAllocationRecord,
+    EngineType,
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
@@ -55,12 +47,20 @@ from lmcache.v1.common.group_view import (
     expand_engine_block_ids,
     is_kv_writer,
 )
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.token_codec import num_packed_tokens
-from lmcache.v1.common.utils import LayoutHints
-from lmcache.v1.multiprocess.transport.base import RequestClient
+from lmcache.v1.common.utils import (
+    CacheEvent,
+    CacheRemoveEvent,
+    CacheStoreEvent,
+    LayoutHints,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.platform.fd_channel import fd_channel_path_for_url
 from lmcache.v1.platform.ipc_policy import set_ipc_policy
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
+from lmcache.v1.transport.request_client import RequestClient
 
 if TYPE_CHECKING:
     # First Party
@@ -260,26 +260,41 @@ def get_lmcache_chunk_size(
     req_client: RequestClient,
     timeout: float = DEFAULT_MQ_TIMEOUT,
     required_chunk_alignment: int | None = None,
+    client_minimum_chunk_size: int | None = None,
 ) -> int:
-    """
-    Helper function to get or negotiate the LMCache chunk size from the server
+    """Resolve the client effective chunk size from server and model minima.
 
     Args:
         req_client: The LMCache multiprocess request client.
         timeout: Timeout in seconds for the blocking request.
-        required_chunk_alignment: Optional model-derived chunk alignment. When
-            provided, the server rounds its configured minimum chunk size up
-            to a compatible multiple if needed.
+        required_chunk_alignment: Optional model-derived chunk alignment.
+        client_minimum_chunk_size: Optional client-configured minimum.
 
     Returns:
-        An integer representing the LMCache chunk size
+        The larger minimum rounded up to ``required_chunk_alignment``.
+
+    Raises:
+        ValueError: If a minimum or alignment is not positive.
     """
-    if required_chunk_alignment is None:
-        future = req_client.get_chunk_size()
-    else:
-        future = req_client.negotiate_chunk_size(required_chunk_alignment)
-    lmcache_tokens_per_chunk = future.result(timeout=timeout)
-    return lmcache_tokens_per_chunk
+    server_minimum = req_client.get_chunk_size().result(timeout=timeout)
+    if server_minimum <= 0:
+        raise ValueError(
+            f"LMCache server minimum chunk size must be positive, got {server_minimum}"
+        )
+    if client_minimum_chunk_size is not None and client_minimum_chunk_size <= 0:
+        raise ValueError(
+            "LMCache client minimum chunk size must be positive, got "
+            f"{client_minimum_chunk_size}"
+        )
+    alignment = 1 if required_chunk_alignment is None else required_chunk_alignment
+    if alignment <= 0:
+        raise ValueError(f"required_chunk_alignment must be positive, got {alignment}")
+    base = (
+        server_minimum
+        if client_minimum_chunk_size is None
+        else max(server_minimum, client_minimum_chunk_size)
+    )
+    return ((base + alignment - 1) // alignment) * alignment
 
 
 def _verify_recovered_chunk_size(
@@ -287,14 +302,16 @@ def _verify_recovered_chunk_size(
     expected_chunk_size: int,
     timeout: float,
     required_chunk_alignment: int | None,
+    client_minimum_chunk_size: int | None,
     server_url: str,
 ) -> bool:
-    """Re-negotiate after recovery and verify the adapter's cached size."""
+    """Re-resolve after recovery and verify the adapter's cached size."""
     try:
         recovered_chunk_size = get_lmcache_chunk_size(
             req_client,
             timeout=timeout,
             required_chunk_alignment=required_chunk_alignment,
+            client_minimum_chunk_size=client_minimum_chunk_size,
         )
     except Exception:
         logger.exception(
@@ -363,7 +380,7 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
         '    --kv-transfer-config \'{"kv_connector":'
         '"LMCacheMPConnector","kv_role":"kv_both",'
         '"kv_connector_extra_config":{"lmcache.mp.host":'
-        '"tcp://localhost","lmcache.mp.port":5555}}\'\n'
+        '"grpc://localhost","lmcache.mp.port":5555}}\'\n'
         "See https://docs.lmcache.ai/mp/quickstart.html for details."
     )
     logger.warning(hint)
@@ -528,6 +545,50 @@ RetrieveResult = bool
 LookupResult = int
 
 
+# Connector extra-config key naming the file that holds the LMCache server's
+# request API key, as opposed to the key this engine accepts inbound.
+_API_KEY_FILE_KEY = "lmcache.mp.api_key_file"
+
+
+def _connector_request_api_key(extra_config: dict[str, Any] | None) -> str | None:
+    """Load the credential this connector sends to the LMCache server.
+
+    The setting exists because the inbound key and the key an engine uses to
+    call the server are different trust domains: with one shared key, every
+    engine can also authenticate to every other service. An engine that only
+    needs to read and write cache entries can therefore be given the server's
+    key alone.
+
+    Args:
+        extra_config: Connector ``kv_connector_extra_config`` mapping.
+
+    Returns:
+        The configured key, or ``None`` when the setting is absent, in which
+        case the request clients keep their environment fallback.
+
+    Raises:
+        ValueError: If the setting is not a string path, or the file does not
+            hold exactly one non-empty key.
+    """
+    if not extra_config:
+        return None
+    path = extra_config.get(_API_KEY_FILE_KEY)
+    if path is None:
+        return None
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{_API_KEY_FILE_KEY} must be a non-empty path string")
+
+    # First Party
+    from lmcache.v1.common.security.api_key import load_api_keys_from_files
+
+    keys = load_api_keys_from_files([path])
+    if len(keys) != 1:
+        raise ValueError(
+            f"{_API_KEY_FILE_KEY} must name exactly one key file, got {len(keys)}"
+        )
+    return keys[0]
+
+
 class LMCacheMPSchedulerAdapter:
     def __init__(
         self,
@@ -564,7 +625,7 @@ class LMCacheMPSchedulerAdapter:
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
             required_chunk_alignment: Optional model-derived chunk alignment
-                used to bind or validate the LMCache server chunk size.
+                used to resolve the client effective chunk size.
             enable_kv_events: Subscribe to CPU events on every backing server.
         """
         (
@@ -580,13 +641,17 @@ class LMCacheMPSchedulerAdapter:
         )
         assert len(server_urls) >= 1, "At least one server url required"
         self._server_urls: list[str] = list(server_urls)
+        request_api_key = _connector_request_api_key(extra_config)
         self.req_clients: dict[str, RequestClient] = {
-            url: RequestClientFactory.create(url, context=context)
+            url: RequestClientFactory.create(
+                url, context=context, api_key=request_api_key
+            )
             for url in self._server_urls
         }
         self._nonblocking_lookup_status = (
             ExtraConfigDefault.nonblocking_lookup_status.default
         )
+        client_minimum_chunk_size: int | None = None
         if extra_config is not None:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
@@ -594,8 +659,10 @@ class LMCacheMPSchedulerAdapter:
             self._nonblocking_lookup_status = cfg[
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
+            client_minimum_chunk_size = extra_config.get("lmcache.mp.chunk_size")
         self._mq_timeout = mq_timeout
         self._required_chunk_alignment = required_chunk_alignment
+        self._client_minimum_chunk_size = client_minimum_chunk_size
 
         # Submitted lookups until cleanup_lookup_result. Each keeps its result
         # once resolved, so repeated checks return the same value after the
@@ -613,6 +680,7 @@ class LMCacheMPSchedulerAdapter:
                     client,
                     timeout=self._mq_timeout,
                     required_chunk_alignment=required_chunk_alignment,
+                    client_minimum_chunk_size=client_minimum_chunk_size,
                 )
             except TimeoutError:
                 for c in self.req_clients.values():
@@ -745,6 +813,7 @@ class LMCacheMPSchedulerAdapter:
             self.lmcache_tokens_per_chunk,
             self._mq_timeout,
             self._required_chunk_alignment,
+            self._client_minimum_chunk_size,
             server_url,
         )
 
@@ -1262,7 +1331,7 @@ class LMCacheMPWorkerAdapter:
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
             required_chunk_alignment: Optional model-derived chunk alignment
-                used to bind or validate the LMCache server chunk size.
+                used to resolve the client effective chunk size.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -1281,6 +1350,7 @@ class LMCacheMPWorkerAdapter:
             mq_timeout,
         )
         self._mp_server_launcher = None
+        client_minimum_chunk_size: int | None = None
         if extra_config is not None:
             # Only connectors that pass the actual vLLM worker rank can elect a
             # unique local server owner.
@@ -1291,16 +1361,19 @@ class LMCacheMPWorkerAdapter:
                     extra_config=extra_config,
                     server_url=server_url,
                     zmq_context=context,
+                    api_key=_connector_request_api_key(extra_config),
                 )
             elif supports_autostart:
                 wait_for_mp_server_from_url(
                     extra_config=extra_config,
                     server_url=server_url,
                     zmq_context=context,
+                    api_key=_connector_request_api_key(extra_config),
                 )
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            client_minimum_chunk_size = extra_config.get("lmcache.mp.chunk_size")
             # Only treat ``mp_transfer_mode`` as an explicit override when
             # the user actually set it in extra_config; otherwise leave it
             # as ``None`` so ``create_transfer_context`` can still consult
@@ -1318,10 +1391,15 @@ class LMCacheMPWorkerAdapter:
             )
         else:
             self._mp_transfer_mode = None
-        self.req_client = RequestClientFactory.create(server_url, context=context)
+        self.req_client = RequestClientFactory.create(
+            server_url,
+            context=context,
+            api_key=_connector_request_api_key(extra_config),
+        )
         self._mq_timeout = mq_timeout
         self._server_url = server_url
         self._required_chunk_alignment = required_chunk_alignment
+        self._client_minimum_chunk_size = client_minimum_chunk_size
 
         # Instance id for GPU worker. uuid4-derived (OS entropy) rather
         # than os.getpid() to avoid collision in containerized deployments.
@@ -1390,6 +1468,7 @@ class LMCacheMPWorkerAdapter:
                 self.req_client,
                 timeout=self._mq_timeout,
                 required_chunk_alignment=required_chunk_alignment,
+                client_minimum_chunk_size=client_minimum_chunk_size,
             )
         except TimeoutError:
             self.req_client.close()
@@ -1746,6 +1825,7 @@ class LMCacheMPWorkerAdapter:
             self.lmcache_tokens_per_chunk,
             self._mq_timeout,
             self._required_chunk_alignment,
+            self._client_minimum_chunk_size,
             self._server_url,
         ):
             return False
@@ -2083,7 +2163,11 @@ class LMCacheMPWorkerAdapter:
             IDs that have not been returned before.
         """
         if self.dispatcher is not None:
-            dispatch(self.dispatcher, "reclaim")
+            dispatch(
+                self.dispatcher,
+                "reclaim",
+                finished_req_ids=finished_req_ids_from_engine,
+            )
 
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
@@ -2382,6 +2466,9 @@ class LMCacheMPWorkerAdapter:
         """
         if not need_flush_before_forward:
             return
+        # Preempted requests restart from scratch, so drop their query tables.
+        if self.dispatcher is not None:
+            dispatch(self.dispatcher, "handle_preemptions")
         transfer_ctx = self.transfer_ctx
         if not self.is_healthy or transfer_ctx is None:
             return

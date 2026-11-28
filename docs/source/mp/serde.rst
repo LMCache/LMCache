@@ -71,6 +71,18 @@ serde factory.
        for ``hkdf``), ``aes_bits`` (``128`` default, or ``256``),
        ``max_workers`` (thread pool size, default 1)
 
+.. warning::
+
+   **Upgrading fp8 serde with a 1-byte KV cache.** Earlier versions of the
+   ``fp8`` serde cast a KV cache that is already 1 byte per element (e.g.
+   vLLM's fp8 KV cache, held as ``uint8`` codes) numerically to fp8, which
+   changed its bytes; the current version stores it byte for byte. The
+   stored payload has no dtype or version header, so the two encodings
+   cannot be told apart: invalidate L2 entries written for such caches by
+   the earlier serde before upgrading, and do not let old and new LMCache
+   servers read and write the same L2 store. fp16 / bf16 / fp32 KV caches
+   are not affected.
+
 
 TurboQuant serde
 ----------------
@@ -147,6 +159,12 @@ The ``hkdf`` provider reads it once at startup and derives a per-``cache_salt``
 key via HKDF-SHA256; the master key is never written to L2. ``aes_bits``
 defaults to ``128`` (already unbreakable and slightly faster); set ``256`` if a
 compliance mandate requires it.
+
+Each encrypted object is bound to the key it was stored under: an object that
+was modified, or that is found under another key, fails to load and is
+recomputed instead of being served. Objects encrypted by earlier LMCache
+versions use an older format, so after an upgrade they fail to load once and
+are recomputed.
 
 .. warning::
 

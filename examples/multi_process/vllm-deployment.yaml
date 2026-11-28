@@ -36,7 +36,7 @@ spec:
                 --max-model-len 32768 \
                 --gpu-memory-utilization 0.85 \
                 --tensor-parallel-size 4 \
-                --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"tcp://127.0.0.1\", \"lmcache.mp.port\": 6555}}"
+                --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_connector_extra_config\": {\"lmcache.mp.host\": \"grpc://127.0.0.1\", \"lmcache.mp.port\": 6555}}"
           env:
             # The LMCache server runs as a per-node DaemonSet and binds only to
             # 127.0.0.1, so the vLLM pod connects over the node's loopback.

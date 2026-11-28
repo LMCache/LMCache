@@ -26,7 +26,7 @@ This directory contains Dockerfiles for building different LMCache images. Each 
 ```bash
 # Build with nightly vLLM
 docker build \
-  --build-arg CUDA_VERSION=13.0 \
+  --build-arg CUDA_VERSION=13.2 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-build \
   --tag lmcache/vllm-openai:latest \
@@ -35,11 +35,17 @@ docker build \
 # Build with stable releases
 docker build \
   --build-arg CUDA_VERSION=13.0 \
+  --build-arg NGC_VERSION=25.09 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target image-release \
   --tag lmcache/vllm-openai:latest \
   --file docker/Dockerfile .
 ```
+
+The stable vLLM release is currently built for CUDA 13.0, so `image-release`
+needs `CUDA_VERSION=13.0` and `NGC_VERSION=25.09` as shown. With the default
+CUDA 13.2 the build stops at its `import torchaudio` check, because vLLM's
+pinned torchaudio has no CUDA 13.2 wheel.
 
 Run the image with a separate ``lmcache server`` and
 ``LMCacheMPConnector`` as described in the
@@ -82,7 +88,7 @@ default, so Hugging Face caches under the user's home directory
 
 ```bash
 docker build \
-  --build-arg CUDA_VERSION=13.0 \
+  --build-arg CUDA_VERSION=13.2 \
   --build-arg UBUNTU_VERSION=24.04 \
   --target lmcache-final \
   --tag lmcache/standalone:latest \
@@ -139,25 +145,26 @@ server and configure ``LMCacheMPConnector`` as shown in the
 
 **Image**: `lmcache/sglang:latest`
 
-**Description**: The official SGLang release image (`lmsysorg/sglang`) with the matching LMCache wheel from PyPI installed. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
+**Description**: The official SGLang release image (`lmsysorg/sglang`) with LMCache compiled from source against the torch in that image. SGLang supports only LMCache MP mode, so this image runs SGLang with `--enable-lmcache` and connects to a separate LMCache server (for example `lmcache/standalone`).
 
-Release builds use the newest SGLang release that ships LMCache's torch: the workflow starts from the `vX.Y.Z` tag that `lmsysorg/sglang:latest` points to, walks back to the newest release pinning the same torch, and passes it as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache's compiled extensions only load against the torch they were built with, so that SGLang release must ship the torch pinned in `pyproject.toml`. The build fails if the two disagree, if installing LMCache would change SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
+Release builds use the SGLang release that `lmsysorg/sglang:latest` points to and pass its exact tag as `SGLANG_VERSION`, so the image label names the SGLang it contains. LMCache is installed from the checked-out release source with `--no-build-isolation`; this compiles its native extensions against SGLang's torch instead of the torch pin used by the general vLLM wheel. The build fails if the resolved torch differs from the image, if installing dependencies changes SGLang's torch/CUDA stack, or if LMCache's native extension or SGLang connector does not load.
 
 **Build Arguments**:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `LMCACHE_VERSION` | (required) | LMCache release on PyPI, e.g. `v0.5.6` |
-| `SGLANG_VERSION` | `latest` | `lmsysorg/sglang` tag, e.g. `v0.5.21` |
-| `EXPECTED_TORCH` | (empty, check skipped) | torch version from `pyproject.toml`; the release workflow always sets it |
+| `LMCACHE_VERSION` | (required) | Version expected from the LMCache source in the build context, e.g. `v0.5.8` |
+| `SGLANG_VERSION` | `latest` | `lmsysorg/sglang` tag, e.g. `v0.5.23` |
+| `EXPECTED_TORCH` | (empty, check skipped) | torch version shipped by the selected SGLang image; the release workflow always sets it |
+| `torch_cuda_arch_list` | `7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX` | CUDA architectures compiled into the LMCache native extension |
 
 **Usage**:
 
 ```bash
 docker build \
-  --build-arg LMCACHE_VERSION=v0.5.6 \
-  --build-arg EXPECTED_TORCH=2.13.0 \
-  --tag lmcache/sglang:v0.5.6 \
+  --build-arg LMCACHE_VERSION=v0.5.8 \
+  --build-arg EXPECTED_TORCH=2.14.1 \
+  --tag lmcache/sglang:v0.5.8 \
   --file docker/Dockerfile.sglang .
 ```
 
@@ -174,7 +181,7 @@ docker run -d --name lmcache --runtime nvidia --gpus all \
 # SGLang, connected through the environment variables
 docker run --runtime nvidia --gpus all \
   --network host --ipc host \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  -v ~/.cache/huggingface:/home/lmcache/.cache/huggingface \
   --env "HF_TOKEN=$HF_TOKEN" \
   --env LMCACHE_MP_HOST=127.0.0.1 --env LMCACHE_MP_PORT=5555 \
   lmcache/sglang:latest \
@@ -183,6 +190,8 @@ docker run --runtime nvidia --gpus all \
 ```
 
 Both containers share the host IPC namespace (`--ipc host`) so the LMCache server can open the CUDA IPC handles SGLang registers.
+
+**Note**: Like the other LMCache images, the image runs as the non-root user `lmcache` (uid 1000), with Hugging Face caches under `/home/lmcache/.cache/huggingface`. SGLang and the LMCache server must run as the same user: the server can't open the CUDA IPC events of a process running as another user (`Failed to open/create interprocess memory file`). The host cache mount rules in the note above apply here too.
 
 ---
 
@@ -214,7 +223,8 @@ Both containers share the host IPC namespace (`--ipc host`) so the LMCache serve
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `CUDA_VERSION` | `13.0` | CUDA version to use |
+| `CUDA_VERSION` | `13.2` | CUDA version to use |
+| `NGC_VERSION` | `26.05` | NGC `cuda-dl-base` release; must be one that ships `CUDA_VERSION` |
 | `UBUNTU_VERSION` | `24.04` | Ubuntu base version |
 | `PYTHON_VERSION` | `3.12` | Python version |
 | `max_jobs` | `2` | Max parallel jobs for build |

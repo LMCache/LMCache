@@ -23,16 +23,13 @@ import torch
 
 # First Party
 from lmcache import device_ops, torch_dev
-from lmcache.logging import init_logger
-from lmcache.utils import (
-    EngineType,
-    _lmcache_nvtx_annotate,
-)
-from lmcache.v1.common.custom_types import TRANSFER_QUERY, IPCCacheServerKey
+from lmcache.v1.common.custom_types import TRANSFER_QUERY, EngineType, IPCCacheServerKey
 from lmcache.v1.common.group_view import EngineGroupInfo
-from lmcache.v1.common.utils import LayoutHints
+from lmcache.v1.common.logging import init_logger
+from lmcache.v1.common.utils import LayoutHints, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.storage_manager import l1_owners_of
+from lmcache.v1.gpu_connector.gds_context import GDSBufferRegistration
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -466,6 +463,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        chunk_size: int | None = None,
     ) -> None:
         """Register the paged Q ring tensors for a given worker instance ID.
 
@@ -480,7 +478,16 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            chunk_size: Effective logical tokens per LMCache chunk, or
+                ``None`` to use the server default.
+
+        Raises:
+            ValueError: If the chunk size is invalid, conflicts with an
+                existing model layout, or the instance is already registered
+                with different metadata.
         """
+        chunk_size = self._ctx.default_chunk_size if chunk_size is None else chunk_size
+        self._ctx.validate_chunk_size(chunk_size)
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
         # worker re-registering on its first ping) refreshes its last-seen
@@ -490,6 +497,17 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         with self._lock:
             existing = self._q_contexts.get(instance_id)
             if existing is not None:
+                if (
+                    existing.model_name != model_name
+                    or existing.world_size != world_size
+                    or existing.chunk_size != chunk_size
+                ):
+                    raise ValueError(
+                        f"Instance {instance_id} Q ring is already registered "
+                        f"with model={existing.model_name!r}, "
+                        f"world_size={existing.world_size}, "
+                        f"chunk_size={existing.chunk_size}"
+                    )
                 existing.last_seen = now
                 logger.info(
                     "Q ring for instance %d already registered; refreshing liveness",
@@ -500,29 +518,39 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         # Build the context and layout descriptor outside the lock.
         cache_context = create_cache_context(
             q_caches,
-            self._ctx.chunk_size,
+            chunk_size,
             layout_hints=layout_hints or None,
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
             separate_object_groups=self._ctx.separate_object_groups,
             full_sw_kv=self._ctx.full_sw_kv,
+            object_group_transfer=transfer_kv_per_object_group,
+            buffer_registration=GDSBufferRegistration(),
         )
-        layout_desc = get_layout_desc(
-            cache_context, self._ctx.chunk_size, object_group_id=0
-        )
+        layout_desc = get_layout_desc(cache_context, chunk_size, object_group_id=0)
         event_backend = get_event_ipc_backend(cache_context.device)
         event_backend.check_event_support(cache_context.device)
         kv_groups_manager = cache_context.kv_layer_groups_manager
         attn_desc = kv_groups_manager.get_attn_desc()
-        self._ctx.layout_desc_registry.register(
-            model_name, world_size, layout_desc, attn_desc
-        )
+        try:
+            self._ctx.layout_desc_registry.register(
+                model_name,
+                world_size,
+                layout_desc,
+                chunk_size,
+                self._ctx.hash_algorithm_name,
+                attn_desc=attn_desc,
+            )
+        except ValueError:
+            cache_context.close()
+            raise
 
         with self._lock:
             self._q_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
                 model_name=model_name,
                 world_size=world_size,
+                chunk_size=chunk_size,
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
@@ -608,6 +636,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             raise ValueError(f"No Q ring registered for instance ID {instance_id}")
         cache_context = entry.cache_context
         model_name = entry.model_name
+        chunk_size = entry.chunk_size
         event_backend = entry.event_backend
         if event_backend is None:
             raise RuntimeError(
@@ -624,7 +653,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
         # group ``i``.
         blocks_per_chunk = [
-            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
+            cache_context.calculate_num_blocks(chunk_size, group_idx)
             for group_idx in range(
                 cache_context.kv_layer_groups_manager.num_kernel_groups
             )
@@ -704,7 +733,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                     obj_keys = obj_keys_per_obj_group[obj_group_id]
                     layout_desc = get_layout_desc(
                         cache_context,
-                        self._ctx.chunk_size,
+                        chunk_size,
                         object_group_id=obj_group_id,
                     )
                     reserved_dict = self._ctx.storage_manager.reserve_write(
@@ -723,8 +752,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
+                    cache_context.transfer_object_group(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
@@ -764,6 +792,9 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                             "engine_id": instance_id,
                             "model_name": model_name,
                             "total_bytes": total_bytes,
+                            "num_tokens": (
+                                num_chunks * chunk_size if stored_count else 0
+                            ),
                         },
                     ),
                 )
@@ -772,7 +803,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         if stored_count:
             logger.info(
                 "Stored %d Q tokens in %.3f seconds",
-                num_chunks * self._ctx.chunk_size,
+                num_chunks * chunk_size,
                 ed - st,
             )
         return event_backend.export_event(event, cache_context.device), store_succeeded
@@ -938,6 +969,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
     def _sdk_plan(
         self,
         kv_context: Any,
+        chunk_size: int,
         key: IPCCacheServerKey,
         object_group_ids: list[int],
         piece_bytes: int,
@@ -949,6 +981,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
 
         Args:
             kv_context: The KV registration's cache context.
+            chunk_size: Effective logical tokens per LMCache chunk.
             key: The KV model's key.
             object_group_ids: The object groups to move.
             piece_bytes: Bytes per ring piece.
@@ -974,9 +1007,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             ):
                 raise ValueError(f"object group {group_id} cannot be transferred")
             keys = list(keys_per_group[group_id])
-            layout = get_layout_desc(
-                kv_context, self._ctx.chunk_size, object_group_id=group_id
-            )
+            layout = get_layout_desc(kv_context, chunk_size, object_group_id=group_id)
             num_bytes = sum(
                 shape.numel() * dtype.itemsize
                 for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
@@ -1006,7 +1037,11 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         ring, kv, pieces = targets
         try:
             plan = self._sdk_plan(
-                kv.cache_context, key, object_group_ids, pieces[0].shape[1]
+                kv.cache_context,
+                kv.chunk_size,
+                key,
+                object_group_ids,
+                pieces[0].shape[1],
             )
         except ValueError:
             logger.exception("Rejecting %s for request_id=%s", op, key.request_id)
@@ -1244,7 +1279,7 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
                 for group in plan:
                     layout_desc = get_layout_desc(
                         kv.cache_context,
-                        self._ctx.chunk_size,
+                        kv.chunk_size,
                         object_group_id=group.object_group_id,
                     )
                     reserved = storage_manager.reserve_write(group.keys, layout_desc)

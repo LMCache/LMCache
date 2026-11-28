@@ -28,7 +28,16 @@ if [[ "${ENGINE_USE_ALL_DEVICES:-false}" == "true" ]]; then
 else
     echo "Using device $GPU_FOR_ENGINE for ${ENGINE_NAME} with LMCache"
 fi
-echo "Using device $GPU_FOR_BASELINE for ${ENGINE_NAME} baseline"
+if [[ "${LAUNCH_SECOND_ENGINE:-false}" == "true" ]]; then
+    echo "Using device $GPU_FOR_SECOND_ENGINE for the second ${ENGINE_NAME}"
+elif [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
+    echo "Using device $GPU_FOR_BASELINE for ${ENGINE_NAME} baseline"
+fi
+if [[ "${LAUNCH_SECOND_ENGINE:-false}" == "true" \
+        && "${LAUNCH_BASELINE:-true}" == "true" ]]; then
+    echo "A second LMCache engine and a baseline cannot share the third PID slot" >&2
+    exit 1
+fi
 if [[ "$ENGINE_LAUNCH_PROFILE" == "default" ]]; then
     engine_prepare_launch "$GPU_FOR_ENGINE"
 elif ! declare -F engine_launch_profile >/dev/null; then
@@ -101,6 +110,25 @@ echo "$ENGINE_PID" >> "$PID_FILE"
 echo "${ENGINE_NAME} with LMCache started (PID=$ENGINE_PID)"
 LMCACHE_ENGINE_PID="$ENGINE_PID"
 
+if [[ "${LAUNCH_SECOND_ENGINE:-false}" == "true" ]]; then
+    echo "=== Launching second ${ENGINE_NAME} with LMCache ==="
+    echo "Model: $SECOND_ENGINE_MODEL"
+    echo "Port: $SECOND_ENGINE_PORT"
+    echo "Client chunk size: $SECOND_CLIENT_CHUNK_SIZE"
+
+    MODEL="$SECOND_ENGINE_MODEL"
+    CLIENT_CHUNK_SIZE="$SECOND_CLIENT_CHUNK_SIZE"
+    engine_prepare_launch "$GPU_FOR_SECOND_ENGINE"
+    if declare -F engine_prepare_additional_instance >/dev/null; then
+        engine_prepare_additional_instance second
+    fi
+    engine_launch lmcache "$SECOND_ENGINE_PORT" "$GPU_FOR_SECOND_ENGINE" \
+        "$SECOND_ENGINE_LOG_FILE"
+    echo "$ENGINE_PID" >> "$PID_FILE"
+    SECOND_ENGINE_PID="$ENGINE_PID"
+    echo "Second ${ENGINE_NAME} with LMCache started (PID=$SECOND_ENGINE_PID)"
+fi
+
 if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     echo "=== Launching ${ENGINE_NAME} baseline ==="
     echo "Port: $ENGINE_BASELINE_PORT"
@@ -114,4 +142,5 @@ else
 fi
 
 echo "=== All processes launched ==="
-echo "PIDs: LMCache=$LMCACHE_PID, ${ENGINE_NAME}=$LMCACHE_ENGINE_PID, Baseline=${BASELINE_ENGINE_PID:-skipped}"
+echo "PIDs: LMCache=$LMCACHE_PID, ${ENGINE_NAME}=$LMCACHE_ENGINE_PID," \
+    "Second=${SECOND_ENGINE_PID:-skipped}, Baseline=${BASELINE_ENGINE_PID:-skipped}"

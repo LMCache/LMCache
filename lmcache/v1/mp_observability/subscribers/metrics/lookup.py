@@ -61,12 +61,14 @@ class LookupMetricsSubscriber(EventSubscriber):
 
     Metrics (all labeled by ``model_name`` and ``cache_salt``):
     - ``lmcache_mp.lookup_requested`` — tokens submitted for lookup
-      (denominator).  Counts only the chunk-aligned portion; sub-chunk
-      trailing tokens are excluded because they cannot hit by design.
+      (denominator).  Counts the full chunks, plus the sub-chunk tail
+      when the lookup probes an unfull chunk.
     - ``lmcache_mp.lookup_hit`` — tokens found in L1+L2 during the
-      lookup (numerator).  Counts the contiguous prefix hit only.
+      lookup (numerator).  Counts the contiguous prefix hit only,
+      including an unfull-chunk (tail) hit.
     - ``lmcache_mp.lookup_hit_l1`` — of lookup_hit, tokens L1 could serve
-      on its own under each object group's attention-window rule.
+      on its own under each object group's attention-window rule; an
+      unfull-chunk hit is always L1.
     - ``lmcache_mp.lookup_hit_l2`` — of lookup_hit, tokens L2 added beyond
       the L1-servable prefix.  ``l1 + l2 == lookup_hit`` per event.
     - ``lmcache_mp.lookup_hit_l1_keys`` — hit keys (one per object group,
@@ -90,8 +92,8 @@ class LookupMetricsSubscriber(EventSubscriber):
             "lmcache_mp.lookup_requested",
             description=(
                 "Total tokens submitted for lookup (denominator of the "
-                "L1+L2 token-level hit rate). Only chunk-aligned tokens "
-                "are counted."
+                "L1+L2 token-level hit rate). Counts the full chunks, plus "
+                "the sub-chunk tail when the lookup probes an unfull chunk."
             ),
             unit="tokens",
         )
@@ -100,7 +102,7 @@ class LookupMetricsSubscriber(EventSubscriber):
             description=(
                 "Total tokens found in L1+L2 during lookup (numerator of "
                 "the L1+L2 token-level hit rate). Counts the contiguous "
-                "prefix hit only."
+                "prefix hit only, including an unfull-chunk (tail) hit."
             ),
             unit="tokens",
         )
