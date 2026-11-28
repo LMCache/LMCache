@@ -43,9 +43,9 @@ class MemoryCommand(BaseCommand):
             from lmcache.v1.memory_orchestrator.server import add_orchestrator_args
         except ImportError as e:
             advice = missing_grpc_bindings_hint(e) or (
-                "install the full lmcache package to use 'memory'"
+                "install the full lmcache package to use 'memory'."
             )
-            logger.warning("Cannot load the memory orchestrator (%s); %s.", e, advice)
+            logger.warning("Cannot load the memory orchestrator (%s); %s", e, advice)
             return
         add_orchestrator_args(parser)
 

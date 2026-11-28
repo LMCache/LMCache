@@ -38,8 +38,8 @@ def test_memory_command_reports_ungenerated_bindings_at_registration(
     ):
         MemoryCommand().add_arguments(argparse.ArgumentParser())
 
-    logged = " ".join(map(str, mock_warning.call_args.args))
-    assert "_generate.py" in logged
+    template, *values = mock_warning.call_args.args
+    assert (template % tuple(values)).endswith("_generate.py")
 
 
 def test_memory_command_explains_ungenerated_bindings(

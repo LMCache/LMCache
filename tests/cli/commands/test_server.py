@@ -238,9 +238,10 @@ class TestServerCommandArguments:
         ):
             ServerCommand().add_arguments(argparse.ArgumentParser())
 
-        logged = " ".join(map(str, mock_warning.call_args.args))
-        assert "_generate.py" in logged
-        assert "lightweight" not in logged
+        template, *values = mock_warning.call_args.args
+        rendered = template % tuple(values)
+        assert rendered.endswith("_generate.py")
+        assert "lightweight" not in rendered
 
 
 class TestServerCommandExecute:

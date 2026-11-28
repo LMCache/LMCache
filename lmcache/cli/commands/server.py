@@ -62,9 +62,9 @@ class ServerCommand(BaseCommand):
             add_coordinator_args(parser)
         except ImportError as e:
             advice = missing_grpc_bindings_hint(e) or (
-                "install the full lmcache package to use 'server' and 'bench'"
+                "install the full lmcache package to use 'server' and 'bench'."
             )
-            logger.warning("Cannot load the 'server' runtime (%s); %s.", e, advice)
+            logger.warning("Cannot load the 'server' runtime (%s); %s", e, advice)
             return
 
     def execute(self, args: argparse.Namespace) -> None:
