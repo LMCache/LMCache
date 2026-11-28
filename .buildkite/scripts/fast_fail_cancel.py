@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-#!/usr/bin/env python3
 """Fast-Fail & Cancel: stop sibling CI runs on first required-check failure.
 
 Supports bidirectional cancellation using only the Python standard library:
@@ -12,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -46,10 +46,27 @@ def _normalize_pr_number(raw: Optional[str]) -> Optional[str]:
 
 
 def _emit_warning(msg: str) -> None:
-    """Print warning and emit GitHub Actions ::warning:: annotation when in GHA."""
+    """Print warning and emit GHA/Buildkite annotations when running in CI."""
     print(f"  [WARN] {msg}")
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::warning::{msg}")
+    if os.environ.get("BUILDKITE") == "true":
+        try:
+            subprocess.run(
+                [
+                    "buildkite-agent",
+                    "annotate",
+                    "--style",
+                    "warning",
+                    "--context",
+                    "fast-fail-cancel",
+                    msg,
+                ],
+                check=False,
+                timeout=5,
+            )
+        except Exception:
+            pass
 
 
 def _http_request(

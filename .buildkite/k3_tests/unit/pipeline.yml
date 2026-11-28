@@ -6,6 +6,10 @@ steps:
     key: "unit_tests"
     command: .buildkite/k3_tests/unit/run.sh
     timeout_in_minutes: 60
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 1
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:
