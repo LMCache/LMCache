@@ -70,7 +70,7 @@ Available Commands
        quality with a reference (``quality``), or analyze a recorded
        request trace offline (``trace-analyze``).
    * - :doc:`kvcache`
-     - Manage KV cache state (e.g. clear L1 cache) on a running server.
+     - List L2 cache objects with pagination or clear L1 cache on a running server.
    * - :doc:`quota`
      - Manage per-salt cache quotas (set, get, list, delete).
    * - :doc:`trace`
