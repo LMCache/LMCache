@@ -43,6 +43,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
+    retrieve_transfer,
     split_unfull_chunk_block_ids,
     transfer_kv_per_object_group,
     transfer_unfull_chunk,
@@ -1227,6 +1228,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         with (
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
+            retrieve_transfer() as device_work,
         ):
             event = event_backend.create_event(cache_context.device)
 
@@ -1307,7 +1309,44 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 retained_keys, read_owners
             )
             total_bytes = 0
+            num_tokens = 0
             retrieve_succeeded = True
+
+            def finish(succeeded: bool) -> None:
+                """Complete the retrieve, once its device work is queued."""
+                nonlocal num_tokens, retrieve_succeeded
+                retrieve_succeeded = succeeded
+                event_backend.record_event(event, cache_context.stream)
+                if retained_keys:
+                    submit_callback_to_stream(
+                        cache_context.cupy_stream,
+                        "finish_read_by_owner",
+                        read_completion,
+                    )
+                num_tokens = (
+                    num_chunks * chunk_size
+                    + (key.end % chunk_size if unfull_obj_keys else 0)
+                    if succeeded and len(prefetched_keys) == expected_retained
+                    else 0
+                )
+                self._ctx.event_bus.publish_on_stream(
+                    cache_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_RETRIEVE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "retrieved_count": len(prefetched_keys),
+                            "device": str(cache_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "cache_salt": key.cache_salt,
+                            "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
+                        },
+                    ),
+                )
+
             try:
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
@@ -1358,36 +1397,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
-                num_tokens = (
-                    num_chunks * chunk_size
-                    + (key.end % chunk_size if unfull_obj_keys else 0)
-                    if len(prefetched_keys) == expected_retained
-                    else 0
-                )
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": len(prefetched_keys),
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "cache_salt": key.cache_salt,
-                            "total_bytes": total_bytes,
-                            "num_tokens": num_tokens,
-                            "transfer_key": transfer_key,
-                        },
-                    ),
-                )
+                device_work.when_queued(cache_context, retrieve_succeeded, finish)
         if retrieve_succeeded:
             ed = time.perf_counter()
             logger.info(

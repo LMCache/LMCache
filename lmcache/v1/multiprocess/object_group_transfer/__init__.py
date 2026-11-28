@@ -18,6 +18,12 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
     batched_iteration_with_skip,
     downsample_and_stage_block_ids,
 )
+from lmcache.v1.multiprocess.object_group_transfer.transfer_step import (
+    OffStreamEngine,
+    RetrieveTransfer,
+    TransferStep,
+    retrieve_transfer,
+)
 from lmcache.v1.multiprocess.object_group_transfer.unfull_chunk import (
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
@@ -28,12 +34,16 @@ from lmcache.v1.multiprocess.object_group_transfer.unfull_chunk import (
 )
 
 __all__ = [
+    "OffStreamEngine",
+    "RetrieveTransfer",
+    "TransferStep",
     "batched_iteration_with_skip",
     "direct_transfer_supported",
     "downsample_and_stage_block_ids",
     "get_unfull_chunk_layout_desc",
     "get_unfull_chunk_staging_buffer",
     "has_unfull_chunk_lead_block",
+    "retrieve_transfer",
     "run_direct_transfer",
     "split_unfull_chunk_block_ids",
     "transfer_kv_per_object_group",

@@ -21,6 +21,12 @@ from lmcache.v1.memory_management import (
 from lmcache.v1.multiprocess.object_group_transfer.gpu_dma import GpuDmaEngine
 from lmcache.v1.multiprocess.object_group_transfer.nic_dma import NicDmaEngine
 from lmcache.v1.multiprocess.object_group_transfer.nvme_dma import NvmeDmaEngine
+from lmcache.v1.multiprocess.object_group_transfer.transfer_step import (
+    OffStreamEngine,
+    TransferStep,
+    hand_off_step,
+)
+from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 
@@ -32,8 +38,7 @@ class TransferEngine(enum.Enum):
     NVME_DMA = "nvme_dma"
     """Storage-backed object: a file read or write against GPU memory."""
     NIC_DMA = "nic_dma"
-    """Object a peer owns: a transfer-channel read into GPU memory. Not
-    implemented yet."""
+    """Object a peer owns: a transfer-channel read into GPU memory."""
 
 
 def select_engine(memory_obj: MemoryObj) -> TransferEngine:
@@ -104,6 +109,42 @@ def stage(
         NotImplementedError: If an object is owned by a peer.
     """
     _ENGINES[engine].stage(memory_objs, buffers, direction)
+
+
+OFF_STREAM_ENGINES: dict[TransferEngine, OffStreamEngine | None] = {
+    TransferEngine.NIC_DMA: None,
+}
+"""Off-stream engine kinds and the engine that runs each one's retrieve
+steps; None if it is not implemented yet."""
+
+
+def run_step(
+    engine: TransferEngine, cache_context: BaseCacheContext, step: TransferStep
+) -> None:
+    """Run one retrieve step with ``engine``.
+
+    On-stream: stage into the context's buffer and queue the kernels now.
+    Off-stream: hand the step to the current retrieve; nothing is queued yet.
+
+    Args:
+        engine: The engine of every object of the step.
+        cache_context: The retrieve's context.
+        step: The step.
+
+    Raises:
+        ValueError: If a host-memory object and its region differ in size.
+        NotImplementedError: Off-stream outside ``retrieve_transfer``.
+    """
+    if engine in OFF_STREAM_ENGINES:
+        hand_off_step(OFF_STREAM_ENGINES[engine], step)
+        return
+    stage(
+        engine,
+        step.memory_objs,
+        step.targets(cache_context),
+        lmcache_native.TransferDirection.H2D,
+    )
+    step.launch(cache_context, step.block_ids)
 
 
 def split_into_runs(

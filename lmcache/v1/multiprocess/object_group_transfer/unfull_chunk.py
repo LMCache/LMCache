@@ -13,8 +13,13 @@ from lmcache import device_ops
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
+    run_step,
     select_engine,
     stage,
+)
+from lmcache.v1.multiprocess.object_group_transfer.transfer_step import (
+    Staging,
+    TransferStep,
 )
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
@@ -167,13 +172,16 @@ def trim_and_stage_unfull_chunk_block_ids(
 
 
 def get_unfull_chunk_staging_buffer(
-    cache_context: BaseCacheContext, object_group_id: int
+    cache_context: BaseCacheContext,
+    object_group_id: int,
+    staging: Staging | None = None,
 ) -> torch.Tensor | None:
     """Return the staging region an object group's unfull-chunk object uses.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
         object_group_id: Index of the object group being copied.
+        staging: Where the object is staged; the context's own buffer if None.
 
     Returns:
         The object group's first (batch, object-group) slot when no kernel
@@ -188,6 +196,7 @@ def get_unfull_chunk_staging_buffer(
         else uses them meanwhile. The buffer is registered for GPUDirect
         Storage, so a GDS-backed L1 can hold the object.
     """
+    staging = cache_context if staging is None else staging
     kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
         object_group_id
     ].kernel_group_indices
@@ -195,9 +204,9 @@ def get_unfull_chunk_staging_buffer(
         has_unfull_chunk_lead_block(cache_context, kernel_group_id)
         for kernel_group_id in kernel_group_ids
     ):
-        return cache_context.get_temp_object_group_buffer(0, object_group_id)
+        return staging.get_temp_object_group_buffer(0, object_group_id)
     layout = get_unfull_chunk_layout_desc(cache_context, object_group_id)
-    return cache_context.get_temp_staging_buffer(
+    return staging.get_temp_staging_buffer(
         sum(
             shape.numel() * dtype.itemsize
             for shape, dtype in zip(layout.shapes, layout.dtypes, strict=True)
@@ -229,16 +238,66 @@ def transfer_unfull_chunk(
         direction: H2D (retrieve) or D2H (store).
 
     Raises:
-        NotImplementedError: If an object is owned by a peer.
+        NotImplementedError: For a peer-owned object on a store, or on a
+            retrieve outside ``retrieve_transfer``.
 
     Notes:
-        Always staged, by the engine ``memory_obj`` selects.
+        Always staged, by the engine ``memory_obj`` selects. A retrieve is
+        one :class:`TransferStep`.
     """
+    is_h2d = direction == lmcache_native.TransferDirection.H2D
+    engine = select_engine(memory_obj)
+
+    def targets(staging: Staging) -> list[torch.Tensor]:
+        # The caller resolved the context's own region already.
+        if staging is cache_context:
+            return [object_buffer]
+        region = get_unfull_chunk_staging_buffer(
+            cache_context, object_group_id, staging
+        )
+        if region is None:
+            raise ValueError("The unfull chunk does not fit its staging slots")
+        return [region]
+
+    def launch(staging: Staging, block_ids: list[torch.Tensor]) -> None:
+        _launch_unfull_chunk_kernels(
+            cache_context,
+            block_ids,
+            skip_blocks,
+            lead_blocks,
+            object_group_id,
+            targets(staging)[0],
+            direction,
+            staging,
+        )
+
+    if is_h2d:
+        run_step(
+            engine,
+            cache_context,
+            TransferStep(
+                [memory_obj], block_ids_gpu, targets, launch, spans_slots=True
+            ),
+        )
+        return
+    launch(cache_context, block_ids_gpu)
+    stage(engine, [memory_obj], [object_buffer], direction)
+
+
+def _launch_unfull_chunk_kernels(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    skip_blocks: list[int],
+    lead_blocks: list[int],
+    object_group_id: int,
+    object_buffer: torch.Tensor,
+    direction: "lmcache_native.TransferDirection",
+    staging: Staging,
+) -> None:
+    """Launch the unfull chunk's kernels for an object in ``staging``."""
     kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
         object_group_id
     ].kernel_group_indices
-    is_h2d = direction == lmcache_native.TransferDirection.H2D
-    engine = select_engine(memory_obj)
     lead_group_ids = [
         kernel_group_id
         for kernel_group_id in kernel_group_ids
@@ -267,13 +326,11 @@ def transfer_unfull_chunk(
         }
     else:
         regular_ptrs = [
-            cache_context.get_temp_kernel_group_buffer(0, kernel_group_id).data_ptr()
+            staging.get_temp_kernel_group_buffer(0, kernel_group_id).data_ptr()
             for kernel_group_id in kernel_group_ids
         ]
         lead_ptrs = {}
 
-    if is_h2d:
-        stage(engine, [memory_obj], [object_buffer], direction)
     for kernel_group_id, regular_ptr in zip(
         kernel_group_ids, regular_ptrs, strict=True
     ):
@@ -304,8 +361,6 @@ def transfer_unfull_chunk(
             cache_context.get_engine_kv_format(kernel_group_id),
             skip_blocks[kernel_group_id],
         )
-    if not is_h2d:
-        stage(engine, [memory_obj], [object_buffer], direction)
 
 
 def split_unfull_chunk_block_ids(

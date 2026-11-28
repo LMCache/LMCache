@@ -64,7 +64,8 @@ def transfer_kv_per_object_group(
 
     Raises:
         ValueError: If a None entry is found on retrieve.
-        NotImplementedError: If an object is owned by a peer.
+        NotImplementedError: For a peer-owned object on a store, or on a
+            retrieve outside ``retrieve_transfer``.
     """
     for engine, start, end in split_into_runs(memory_objs):
         chunk_range = (start, end)
