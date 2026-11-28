@@ -15,6 +15,7 @@ from prometheus_client import Counter, Gauge, Histogram  # noqa: E402
 
 # First Party
 from lmcache.integration.vllm.lmcache_mp_metrics import (  # noqa: E402
+    LOOKUP_DURATION_BUCKETS,
     LMCacheMPConnectorStats,
     LMCacheMPPromMetrics,
 )
@@ -73,4 +74,39 @@ def test_prometheus_observes_lookup_duration() -> None:
     assert _Histogram.instance.kwargs["name"] == (
         "vllm:lmcache_mp_lookup_duration_seconds"
     )
+    assert _Histogram.instance.kwargs["buckets"] == LOOKUP_DURATION_BUCKETS
     assert _Histogram.instance.children[("model", "0")].observations == [0.01, 0.02]
+
+
+class _RayHistogramWrapperStub:
+    # Emulate vLLM RayHistogramWrapper which requires boundaries/buckets.
+
+    def __init__(self, **kwargs: Any) -> None:
+        buckets = kwargs.get("buckets")
+        boundaries = list(buckets) if buckets else []
+        if not boundaries:
+            raise ValueError(
+                "boundaries argument should be provided when using the Histogram class."
+            )
+        self.kwargs = kwargs
+        self.boundaries = boundaries
+        self.children: dict[tuple[object, ...], _BoundHistogram] = {}
+
+    def labels(self, *values: object) -> _BoundHistogram:
+        return self.children.setdefault(values, _BoundHistogram())
+
+
+def test_prometheus_ray_serve_wrapper_succeeds_with_buckets() -> None:
+    metric_types: dict[Any, Any] = {
+        Counter: _RayHistogramWrapperStub,
+        Gauge: _RayHistogramWrapperStub,
+        Histogram: _RayHistogramWrapperStub,
+    }
+    metrics = LMCacheMPPromMetrics(
+        SimpleNamespace(kv_transfer_config=object()),
+        metric_types,
+        ["model_name", "engine"],
+        {0: ["model", "0"]},
+    )
+    metrics.observe({"lookup_duration_seconds": [0.005]})
+    assert metrics is not None
