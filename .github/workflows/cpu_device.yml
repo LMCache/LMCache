@@ -282,6 +282,18 @@ jobs:
         if: matrix.request_transport == 'grpc-native'
         run: pip install pygrpc-native==0.7.0
 
+      # Guard against a triton-cpu wheel that builds its LLVM TargetMachine
+      # from the CPU model name with an empty feature string: codegen then
+      # ignores the CPUID/XCR0-sanitised llvm.get_cpu_features(), and a host
+      # whose model implies AVX512 while the OS never enabled that state dies
+      # with SIGILL on the first kernel call (the failure in #6851). The pin
+      # now carries triton-lang/triton-cpu#314 (see LMCache/vllm-cpu); this
+      # check compiles the same masked load/store path in ~2 s and fails with
+      # the offending instructions if any future pin regresses.
+      - name: Verify Triton CPU codegen matches the host ISA (Linux)
+        if: runner.os == 'Linux'
+        run: python .github/scripts/check_cpu_isa_alignment.py
+
       # server_bench is model-agnostic (cpu_server_bench_test.sh never
       # touches any model — it only exercises the lmcache server's KV
       # transfer path via `lmcache bench server`). Gate it on the
