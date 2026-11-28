@@ -24,19 +24,25 @@ _registration_scope = threading.local()
 _MIN_TORCH_RBLN = Version("0.12.1a0")
 
 
-def _require_host_registration() -> None:
-    """Fail with an upgrade message when torch-rbln predates host registration.
+def _has_host_registration() -> bool:
+    """Report whether torch-rbln provides host registration, warning if not.
 
-    Raises:
-        RuntimeError: If the installed torch-rbln is older than 0.12.1a0.
+    Registration only speeds up copies, so an older torch-rbln leaves the SHM
+    mapping unregistered instead of failing the transfer context.
+
+    Returns:
+        True if the installed torch-rbln is 0.12.1a0 or later.
     """
     installed = importlib.metadata.version("torch-rbln")
-    if Version(installed) < _MIN_TORCH_RBLN:
-        raise RuntimeError(
-            f"Registering the SHM pool on RBLN requires torch-rbln "
-            f"{_MIN_TORCH_RBLN} or later, but {installed} is installed; "
-            "upgrade torch-rbln."
-        )
+    if Version(installed) >= _MIN_TORCH_RBLN:
+        return True
+    logger.warning(
+        "torch-rbln %s cannot register host memory; the SHM pool stays "
+        "unregistered. Upgrade to torch-rbln %s or later for direct copies.",
+        installed,
+        _MIN_TORCH_RBLN,
+    )
+    return False
 
 
 @contextmanager
@@ -76,19 +82,18 @@ class RblnPinMemoryBackend(PinMemoryBackend):
 
         Returns:
             True after registration succeeds. False for an empty range, inside
-            ``skip_host_registration()``, or when the runtime refuses the range
+            ``skip_host_registration()``, on a torch-rbln older than 0.12.1a0
+            (with a warning to upgrade), or when the runtime refuses the range
             (for example, one already registered on this device) or cannot
             register host memory.
-
-        Raises:
-            RuntimeError: If the installed torch-rbln is older than 0.12.1a0.
         """
         del flags
         if getattr(_registration_scope, "skip", False):
             return False
         if ptr <= 0 or size <= 0:
             return False
-        _require_host_registration()
+        if not _has_host_registration():
+            return False
         device = torch.rbln.current_device()
         try:
             registered = torch.rbln.host_register(ptr, size, device=device)

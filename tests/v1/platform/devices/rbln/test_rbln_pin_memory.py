@@ -2,7 +2,7 @@
 """RBLN SHM registration policy without an NPU.
 
 The server never registers host memory, and a worker on a torch-rbln release
-without host registration fails with an upgrade message. The worker's
+without host registration leaves its SHM mapping unregistered. The worker's
 registration round trip runs on an NPU in ``test_rbln_host_registration.py``.
 These tests remove ``torch.rbln``, so any registration attempt fails them.
 """
@@ -63,14 +63,13 @@ def test_l1_config_preserves_shm_and_disables_lazy(
     assert cfg.shm_name == "rbln-test-l1"
 
 
-def test_worker_registration_requires_torch_rbln_release(
+def test_worker_skips_registration_on_old_torch_rbln(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An older torch-rbln is refused by version before ``torch.rbln`` is used."""
+    """An older torch-rbln declines registration before ``torch.rbln`` is used."""
     # torch-rbln 0.12.0 has no host_register; an empty module makes any
     # attribute lookup fail, so reaching torch.rbln would raise AttributeError.
     monkeypatch.setattr(torch, "rbln", SimpleNamespace(), raising=False)
     versions = {"torch-rbln": "0.12.0"}
     monkeypatch.setattr(importlib.metadata, "version", versions.__getitem__)
-    with pytest.raises(RuntimeError, match=r"torch-rbln 0\.12\.1a0.*0\.12\.0"):
-        RblnPinMemoryBackend().pin_memory(4096, 4096)
+    assert not RblnPinMemoryBackend().pin_memory(4096, 4096)
