@@ -42,10 +42,6 @@ on:
             - '.github/scripts/build_rbln_wheel.sh'
             - 'setup_extensions/build_profiles/rbln.py'
 
-concurrency:
-    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
     LC_ALL: en_US.UTF-8
     # The ABI target: torch-rbln pins the torch the wheel is compiled against

@@ -15,14 +15,10 @@ on:
   push:
     branches: [ "dev" ]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [ "dev" ]
   schedule:
     - cron: '29 4 * * 0'
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' && !startsWith(github.ref, 'refs/heads/release-') }}
 
 jobs:
   analyze:

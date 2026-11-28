@@ -16,10 +16,6 @@ on:
       - '.github/workflows/*.ya?ml'
       - '.github/workflows/actionlint.*' # This workflow
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' && !startsWith(github.ref, 'refs/heads/release-') }}
-
 env:
   LC_ALL: en_US.UTF-8
 
