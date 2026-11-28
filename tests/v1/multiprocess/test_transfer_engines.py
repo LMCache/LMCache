@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.memory_management import (
@@ -17,6 +18,7 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     dispatch,
+    nvme_dma,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.object_group_transfer.engines import (
@@ -65,6 +67,25 @@ def test_staging_an_object_a_peer_owns_is_not_implemented():
             [MagicMock()],
             lmcache_native.TransferDirection.H2D,
         )
+
+
+@pytest.mark.parametrize(
+    "direction",
+    [lmcache_native.TransferDirection.H2D, lmcache_native.TransferDirection.D2H],
+)
+def test_storage_staging_raises_when_a_transfer_fails(
+    monkeypatch: pytest.MonkeyPatch, direction: lmcache_native.TransferDirection
+) -> None:
+    """GDS reports transfer failures only after completion, so staging must
+    check them before the caller uses or commits the bytes."""
+    context = MagicMock()
+    context.synchronize_and_check.side_effect = RuntimeError("GDS I/O failed")
+    monkeypatch.setattr(nvme_dma, "get_l1_gds_context", lambda manager: context)
+    monkeypatch.setattr(
+        nvme_dma.platform_stream, "current_stream", lambda device: MagicMock()
+    )
+    with pytest.raises(RuntimeError, match="GDS I/O failed"):
+        stage(NVME, [_storage()], [torch.empty(4)], direction)
 
 
 @pytest.mark.parametrize(
