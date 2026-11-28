@@ -243,6 +243,8 @@ Node Management uses **Is Proxy Node** to register a proxy. To add a child,
 leave that box unchecked and enter its parent proxy's name in **Proxy ID**.
 The table labels the proxy flag and parent ID separately. **Edit** retains
 the original node identity, so changing **Node Name** renames that entry.
+The management table lists proxies followed by their child nodes. A child's
+**Proxy ID** identifies its parent, and **Edit** fills the child's details.
 
 The **Config** tab reads MP server configuration from ``GET /config``.
 A configuration key selects a top-level MP configuration section; an unknown
