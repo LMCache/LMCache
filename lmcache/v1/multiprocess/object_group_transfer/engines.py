@@ -112,13 +112,11 @@ def stage(
     _ENGINES[engine].stage(memory_objs, buffers, direction)
 
 
-# Engines whose bytes land by a path the stream does not order: their
-# retrieve steps are handed off instead of staged (see ``transfer_step.py``).
-_OFF_STREAM = frozenset({TransferEngine.NIC_DMA})
-
-OFF_STREAM_ENGINES: dict[TransferEngine, OffStreamEngine] = {}
-"""The engine that runs the retrieve steps of each off-stream kind. None is
-implemented yet, so a retrieve with such a step fails."""
+OFF_STREAM_ENGINES: dict[TransferEngine, OffStreamEngine | None] = {
+    TransferEngine.NIC_DMA: None,
+}
+"""Off-stream engine kinds and the engine that runs each one's retrieve
+steps; None if it is not implemented yet."""
 
 
 def run_step(
@@ -141,8 +139,8 @@ def run_step(
         NotImplementedError: If the engine is off-stream and the transfer
             does not run inside ``retrieve_transfer``.
     """
-    if engine in _OFF_STREAM:
-        hand_off_step(OFF_STREAM_ENGINES.get(engine), step)
+    if engine in OFF_STREAM_ENGINES:
+        hand_off_step(OFF_STREAM_ENGINES[engine], step)
         return
     stage(
         engine,

@@ -85,8 +85,9 @@ with retrieve_transfer() as device_work:
 | an off-stream step without an engine | calls `on_done(False)` now |
 | a failed transfer (`succeeded` False) | drops the off-stream steps and calls `on_done(False)` now |
 
-An off-stream engine implements the `OffStreamEngine` protocol and is listed
-in `engines.OFF_STREAM_ENGINES` under its `TransferEngine` kind:
+`engines.OFF_STREAM_ENGINES` lists the off-stream `TransferEngine` kinds
+and the engine that runs each one's steps (None until it is implemented).
+An engine implements the `OffStreamEngine` protocol:
 
 ```python
 engine.submit(cache_context, steps, on_done)  # returns at once
@@ -114,7 +115,7 @@ that completes a retrieve (record the completion event, queue the read-lock
 release, publish `MP_RETRIEVE_END`) is one function, `finish(succeeded)`,
 which it passes to `when_queued`.
 
-**Status.** `OFF_STREAM_ENGINES` is empty, so a retrieve of a peer-owned
+**Status.** NIC DMA has no engine yet, so a retrieve of a peer-owned
 object fails (`finish(False)`: no tokens reported, read locks released, the
 handler returns False). It failed before too, with `NotImplementedError`.
 Every `on_done` therefore runs before `when_queued` returns today; a handler
