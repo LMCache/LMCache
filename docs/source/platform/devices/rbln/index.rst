@@ -48,8 +48,9 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
 
 .. code-block:: bash
 
-   lmcache server --port 6555 --l1-size-gb 32 --eviction-policy LRU \
-       --chunk-size N --supported-transfer-mode engine_driven
+   lmcache server --port 6555 --l1-size-gb 8 --eviction-policy LRU \
+       --chunk-size N --supported-transfer-mode engine_driven \
+       --shm-name lmcache-rbln
 
    vllm serve <model> \
        --model-impl vllm \
@@ -63,6 +64,15 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
                "lmcache.mp.port": 6555
            }
        }'
+
+With ``--shm-name``, the worker registers its mapping of the server's pool
+with its NPU. Today only MLA models use the registration: their chunks copy
+directly between the NPU and the pool. HND models still copy through a host
+staging buffer, so their transfers stay the same with ``--shm-name``.
+Registration needs torch-rbln 0.12.1a0 or later; on an older release the
+worker logs a warning to upgrade and keeps using the pool unregistered. The
+pool must fit the device's host registration budget (16 GiB for a pool on
+ordinary 4 KiB pages).
 
 Three settings are specific to RBLN:
 

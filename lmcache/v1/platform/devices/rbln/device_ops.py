@@ -63,6 +63,7 @@ from lmcache.v1.platform.devices.rbln.kv_ops import (
     scatter_chunk_to_blocks_hnd_kv_first,
     scatter_chunk_to_blocks_mla,
 )
+from lmcache.v1.platform.devices.rbln.pin_memory import skip_host_registration
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -70,6 +71,11 @@ logger = init_logger(__name__)
 
 class RblnDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "rbln"
+
+    def alloc_shm_pinned_ptr(self, size: int, shm_name: str = "") -> int:
+        """Create the server's SHM pool without registering it on an NPU."""
+        with skip_host_registration():
+            return super().alloc_shm_pinned_ptr(size, shm_name)
 
     def multi_layer_block_kv_transfer(
         self,

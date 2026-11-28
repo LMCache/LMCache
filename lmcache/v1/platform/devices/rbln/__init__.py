@@ -31,6 +31,7 @@ from lmcache.v1.platform.base.device_spec import DeviceSpec
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.platform.base.device_ops import DeviceOps
+    from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 # ---------------------------------------------------------------------------
 # Device detection registry entry
@@ -54,6 +55,24 @@ class RblnDeviceSpec(DeviceSpec):
         from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
 
         return RblnDeviceOps
+
+    @property
+    def is_pin_supported(self) -> bool:
+        """Decline LMCache allocator-side pinning on RBLN.
+
+        RBLN uses engine-driven MP. The worker performs the copies and
+        registers its own SHM mapping through pin_memory. The server keeps
+        an eager SHM L1 pool and leaves Device-DAX arenas unregistered.
+        """
+        return False
+
+    @property
+    def pin_memory_backend(self) -> type[PinMemoryBackend]:
+        """Return the torch-rbln host registration backend."""
+        # First Party
+        from lmcache.v1.platform.devices.rbln.pin_memory import RblnPinMemoryBackend
+
+        return RblnPinMemoryBackend
 
     def is_available(self) -> bool:
         """Check RBLN availability without importing ``lmcache.__init__``.
