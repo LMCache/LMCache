@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""RETRIEVE with off-stream steps: no engine runs them yet, so the retrieve
-fails, and it is still completed (event, read-lock release, end event)."""
+"""RETRIEVE completes (event, read-lock release, end event) once all its
+device work is queued, whether its steps ran on or off the stream."""
 
 # Standard
 from contextlib import nullcontext
@@ -36,11 +36,12 @@ class _Storage(_FakeStorageManager):
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch):
     """A transfer module with one registered context whose transfer hands
-    off the steps in ``handed_off``; ``order`` logs the completion calls and
-    ``ended`` the end events' metadata."""
+    the steps in ``handed_off`` to ``engine``; ``order`` logs the completion
+    calls and ``ended`` the end events' metadata."""
     order: list[Any] = []
     ended: list[dict] = []
     handed_off: list[TransferStep] = []
+    state = SimpleNamespace(engine=None)
     monkeypatch.setattr(transfer, "DeviceHostFuncDispatcher", _NoopDispatcher)
     monkeypatch.setattr(transfer, "downsample_and_stage_block_ids", lambda c, b: b)
     monkeypatch.setattr(transfer.torch_dev, "device", lambda d: nullcontext())
@@ -82,7 +83,7 @@ def harness(monkeypatch: pytest.MonkeyPatch):
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
         transfer_object_group=lambda *a, **k: [
-            hand_off_step(step) for step in handed_off
+            hand_off_step(state.engine, step) for step in handed_off
         ],
     )
     entry = transfer.ContextEntry(
@@ -101,20 +102,42 @@ def harness(monkeypatch: pytest.MonkeyPatch):
         order=order,
         ended=ended,
         handed_off=handed_off,
+        state=state,
     )
 
 
-@pytest.mark.parametrize("off_stream", [False, True])
-def test_a_retrieve_with_off_stream_steps_fails_and_is_still_completed(
-    harness, off_stream
+class _Engine:
+    """An off-stream engine that is done at once, with ``result``."""
+
+    def __init__(self, result: bool) -> None:
+        self._result = result
+
+    def submit(self, cache_context, steps, on_done) -> None:
+        on_done(self._result)
+
+
+@pytest.mark.parametrize(
+    "off_stream, engine, succeeded",
+    [
+        (False, None, True),
+        (True, _Engine(True), True),
+        # Its steps could not be staged.
+        (True, _Engine(False), False),
+        # No engine runs the step: its bytes would never land.
+        (True, None, False),
+    ],
+)
+def test_a_retrieve_completes_once_whichever_way_its_steps_ran(
+    harness, off_stream, engine, succeeded
 ) -> None:
-    """Their bytes would never land, so the engine must recompute the blocks;
-    the read locks are released and the end event reports no tokens."""
+    """A failed retrieve makes the inference engine recompute the blocks; its
+    read locks are released and the end event reports no tokens."""
+    harness.state.engine = engine
     if off_stream:
         harness.handed_off.append(
             TransferStep([], [], lambda staging: [], lambda staging, ids: None)
         )
-    assert harness.retrieve() == (b"completion-handle", not off_stream)
+    assert harness.retrieve() == (b"completion-handle", succeeded)
     assert harness.order[-3:] == _COMPLETION
     assert harness.order.count("finish_read_by_owner") == 1
-    assert harness.ended[-1]["num_tokens"] == (0 if off_stream else 2 * _CHUNK_SIZE)
+    assert harness.ended[-1]["num_tokens"] == (2 * _CHUNK_SIZE if succeeded else 0)

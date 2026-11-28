@@ -11,11 +11,13 @@ into the paged KV cache.
   the kernels after the copy.
 - An **off-stream** engine's bytes arrive by a path the stream does not wait
   for (a NIC writing into GPU memory), so the kernels cannot be queued yet.
-  The step is handed to the caller's :func:`collect_off_stream_steps` block,
-  and the caller gives the collected steps to an :class:`OffStreamEngine`,
-  which stages them and queues their kernels once the bytes landed.
+  The step is handed to the retrieve's :class:`RetrieveTransfer`, which
+  gives it to the :class:`OffStreamEngine` that stages it and queues its
+  kernels once the bytes landed.
 
-``engines.run_step`` picks between the two.
+``engines.run_step`` picks between the two, and a caller treats both alike:
+it runs its transfers inside :func:`retrieve_transfer` and asks the
+:class:`RetrieveTransfer` to call it back once everything is queued.
 """
 
 # Standard
@@ -29,8 +31,11 @@ from typing import Callable, Protocol, Sequence
 import torch
 
 # First Party
+from lmcache.v1.common.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+
+logger = init_logger(__name__)
 
 
 class Staging(Protocol):
@@ -82,66 +87,128 @@ class TransferStep:
     spans_slots: bool = False
 
 
-_step_sink: ContextVar[list[TransferStep] | None] = ContextVar(
-    "lmcache_off_stream_step_sink", default=None
-)
+class RetrieveTransfer:
+    """The device work of one retrieve, whichever engines move its objects.
+
+    The transfers of the retrieve run inside :func:`retrieve_transfer`. Steps
+    of on-stream engines are queued as they run; steps of off-stream engines
+    are kept here. :meth:`when_queued` then reports, once, when all of it is
+    queued on the stream.
+    """
+
+    def __init__(self) -> None:
+        self._off_stream: list[tuple[OffStreamEngine | None, TransferStep]] = []
+        # The block ids last handed off and the copy made of them. Holding
+        # the staged list keeps its identity from being reused.
+        self._block_id_copy: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
+
+    def hand_off(self, engine: "OffStreamEngine | None", step: TransferStep) -> None:
+        """Keep an off-stream step for :meth:`when_queued`, with a copy of
+        its block ids: the next transfer restages the buffer they live in.
+
+        Consecutive steps that pass the same ``block_ids`` list (the batches
+        of one staging) share one copy, so a transfer must not reuse a staged
+        list after restaging the buffer; the engine must not change the copy.
+
+        Args:
+            engine: The engine that runs the step; None if there is none for
+                the step's objects, which fails the retrieve.
+            step: The step a transfer did not stage.
+        """
+        copied = self._block_id_copy
+        if copied is None or copied[0] is not step.block_ids:
+            copied = (step.block_ids, [ids.clone() for ids in step.block_ids])
+            self._block_id_copy = copied
+        self._off_stream.append((engine, replace(step, block_ids=copied[1])))
+
+    def when_queued(
+        self,
+        cache_context: BaseCacheContext,
+        succeeded: bool,
+        on_done: Callable[[bool], None],
+    ) -> None:
+        """Call ``on_done`` once all device work of the retrieve is queued on
+        the context's stream. Call once, after the last transfer, on the
+        thread that owns the stream.
+
+        With only on-stream steps that is now. Off-stream steps are given to
+        their engines first, and ``on_done`` runs when the last engine is
+        done, on this thread and under the context's device and stream.
+
+        Args:
+            cache_context: The retrieve's context.
+            succeeded: Whether every transfer of the retrieve ran; if not,
+                its off-stream steps are dropped.
+            on_done: Receives whether the retrieve's blocks will hold the
+                cached bytes: False if a transfer failed, an off-stream step
+                has no engine, or an engine could not stage its steps.
+        """
+        if not succeeded or not self._off_stream:
+            on_done(succeeded)
+            return
+        by_engine: dict[int, tuple[OffStreamEngine, list[TransferStep]]] = {}
+        for engine, step in self._off_stream:
+            if engine is None:
+                logger.error(
+                    "Cannot retrieve: no engine runs %d of its steps, whose "
+                    "bytes land off the stream",
+                    len(self._off_stream),
+                )
+                on_done(False)
+                return
+            by_engine.setdefault(id(engine), (engine, []))[1].append(step)
+        results: list[bool] = []
+
+        def engine_done(result: bool) -> None:
+            results.append(result)
+            if len(results) == len(by_engine):
+                on_done(all(results))
+
+        for engine, steps in by_engine.values():
+            engine.submit(cache_context, steps, engine_done)
 
 
-# The block ids last handed off in the current collect block and the copy made
-# of them. Holding the staged list keeps its identity from being reused.
-_block_id_copy: ContextVar[tuple[list[torch.Tensor], list[torch.Tensor]] | None] = (
-    ContextVar("lmcache_off_stream_block_id_copy", default=None)
+_current_retrieve: ContextVar[RetrieveTransfer | None] = ContextVar(
+    "lmcache_current_retrieve_transfer", default=None
 )
 
 
 @contextmanager
-def collect_off_stream_steps(steps: list[TransferStep]) -> Iterator[None]:
-    """Append to ``steps`` the off-stream steps of the transfers called
-    inside the block, on this thread.
+def retrieve_transfer() -> Iterator[RetrieveTransfer]:
+    """Run the transfers of one retrieve: the block's transfers, on this
+    thread, belong to the :class:`RetrieveTransfer` it yields.
 
-    The steps reach the caller this way and not as a return value because a
-    transfer runs as the cache context's ``transfer_object_group`` callback,
-    which returns nothing on every platform.
-
-    Args:
-        steps: Receives the steps, in transfer order.
+    The steps reach it this way and not as a return value because a transfer
+    runs as the cache context's ``transfer_object_group`` callback, which
+    returns nothing on every platform.
     """
-    token = _step_sink.set(steps)
-    copy_token = _block_id_copy.set(None)
+    transfer = RetrieveTransfer()
+    token = _current_retrieve.set(transfer)
     try:
-        yield
+        yield transfer
     finally:
-        _block_id_copy.reset(copy_token)
-        _step_sink.reset(token)
+        _current_retrieve.reset(token)
 
 
-def hand_off_step(step: TransferStep) -> None:
-    """Hand one step to the caller's :func:`collect_off_stream_steps` block,
-    with a copy of the block ids: the next transfer restages the buffer they
-    live in.
-
-    Consecutive steps that pass the same ``block_ids`` list (the batches of
-    one staging) share one copy, so a transfer must not reuse a staged list
-    after restaging the buffer; the engine must not change the copy.
+def hand_off_step(engine: "OffStreamEngine | None", step: TransferStep) -> None:
+    """Hand an off-stream step to the retrieve the calling transfer belongs
+    to (see :meth:`RetrieveTransfer.hand_off`).
 
     Args:
+        engine: The engine that runs the step, or None if there is none.
         step: The step a transfer did not stage.
 
     Raises:
-        NotImplementedError: If the caller collects none: it cannot run
-            off-stream steps.
+        NotImplementedError: If the transfer does not run inside
+            :func:`retrieve_transfer`: its caller cannot run off-stream
+            steps.
     """
-    sink = _step_sink.get()
-    if sink is None:
+    transfer = _current_retrieve.get()
+    if transfer is None:
         raise NotImplementedError(
-            "This transfer has off-stream steps: call it inside "
-            "collect_off_stream_steps()"
+            "This transfer has off-stream steps: call it inside retrieve_transfer()"
         )
-    copied = _block_id_copy.get()
-    if copied is None or copied[0] is not step.block_ids:
-        copied = (step.block_ids, [ids.clone() for ids in step.block_ids])
-        _block_id_copy.set(copied)
-    sink.append(replace(step, block_ids=copied[1]))
+    transfer.hand_off(engine, step)
 
 
 class OffStreamEngine(Protocol):
@@ -153,9 +220,9 @@ class OffStreamEngine(Protocol):
         steps: Sequence[TransferStep],
         on_done: Callable[[bool], None],
     ) -> None:
-        """Stage ``steps`` and queue their kernels; return at once. Call on
-        the thread that owns the context's stream, after the retrieve queued
-        its on-stream work.
+        """Stage ``steps`` and queue their kernels; return at once. Called by
+        :meth:`RetrieveTransfer.when_queued` on the thread that owns the
+        context's stream, after the retrieve queued its on-stream work.
 
         Args:
             cache_context: The retrieve's context.

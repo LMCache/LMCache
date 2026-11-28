@@ -30,8 +30,7 @@ from lmcache.v1.multiprocess.object_group_transfer.engines import (
 )
 from lmcache.v1.multiprocess.object_group_transfer.transfer_step import (
     TransferStep,
-    collect_off_stream_steps,
-    hand_off_step,
+    retrieve_transfer,
 )
 import lmcache.lmcache_native as lmcache_native
 
@@ -90,10 +89,31 @@ def _step(
     return TransferStep(memory_objs, block_ids, targets, launch)
 
 
+class _OffStreamEngine:
+    """Records what it is given; a test finishes a submission by hand."""
+
+    def __init__(self) -> None:
+        self.submitted: list[tuple] = []
+
+    def submit(self, cache_context, steps, on_done) -> None:
+        self.submitted.append((cache_context, list(steps), on_done))
+
+
+@pytest.fixture
+def nic_engine(monkeypatch) -> _OffStreamEngine:
+    """An off-stream engine for objects a peer owns."""
+    engine = _OffStreamEngine()
+    monkeypatch.setitem(engines.OFF_STREAM_ENGINES, NIC, engine)
+    return engine
+
+
 @pytest.mark.parametrize("engine, make", [(GPU, _host), (NVME, _storage)])
-def test_an_on_stream_engine_stages_a_step_then_launches_it(monkeypatch, engine, make):
+def test_an_on_stream_step_is_staged_then_launched_and_queued_at_once(
+    monkeypatch, engine, make
+):
     """The step lands in the context's own staging and its kernels are queued
-    right after, with the step's block ids; nothing is handed off."""
+    right after, with the step's block ids, so the retrieve is queued as soon
+    as its transfers ran."""
     calls: list = []
     monkeypatch.setattr(
         engines,
@@ -101,31 +121,58 @@ def test_an_on_stream_engine_stages_a_step_then_launches_it(monkeypatch, engine,
         lambda *args: calls.append(("stage", *args)),
     )
     context, objs, ids = MagicMock(), [make()], [torch.arange(2)]
-    collected: list[TransferStep] = []
-    with collect_off_stream_steps(collected):
+    done: list[bool] = []
+    with retrieve_transfer() as device_work:
         run_step(engine, context, _step(objs, ids, calls))
+        device_work.when_queued(context, True, done.append)
     assert calls == [
         ("targets", context),
         ("stage", engine, objs, ["region-0"], lmcache_native.TransferDirection.H2D),
         ("launch", context, ids),
     ]
-    assert collected == []
+    assert done == [True]
 
 
-def test_an_off_stream_engine_hands_a_step_to_the_collector_untouched():
+@pytest.mark.parametrize("result", [True, False])
+def test_an_off_stream_step_is_queued_when_its_engine_says_so(nic_engine, result):
     """Its bytes land by a path the stream does not order, so the step is
-    neither staged nor launched here. Without a collector the caller cannot
-    run it, as before the step interface."""
+    neither staged nor launched by the transfer: the engine gets it once the
+    transfers ran, and the retrieve is queued when the engine is done."""
     calls: list = []
-    objs = [_peer()]
-    step = _step(objs, [torch.arange(2)], calls)
+    context, objs = MagicMock(), [_peer()]
+    done: list[bool] = []
+    with retrieve_transfer() as device_work:
+        run_step(NIC, context, _step(objs, [torch.arange(2)], calls))
+        assert nic_engine.submitted == []
+        device_work.when_queued(context, True, done.append)
+    ((submitted_context, steps, on_done),) = nic_engine.submitted
+    assert submitted_context is context
+    assert [step.memory_objs for step in steps] == [objs]
+    assert calls == [] and done == []
+    on_done(result)
+    assert done == [result]
+
+
+def test_an_off_stream_step_without_an_engine_fails_the_retrieve():
+    """No engine reads objects a peer owns yet. A transfer outside
+    ``retrieve_transfer`` cannot run such a step at all."""
+    step = _step([_peer()], [torch.arange(2)], [])
     with pytest.raises(NotImplementedError):
         run_step(NIC, MagicMock(), step)
-    collected: list[TransferStep] = []
-    with collect_off_stream_steps(collected):
+    done: list[bool] = []
+    with retrieve_transfer() as device_work:
         run_step(NIC, MagicMock(), step)
-    assert [taken.memory_objs for taken in collected] == [objs]
-    assert calls == []
+        device_work.when_queued(MagicMock(), True, done.append)
+    assert done == [False]
+
+
+def test_a_failed_retrieve_gives_its_off_stream_steps_to_no_engine(nic_engine):
+    done: list[bool] = []
+    with retrieve_transfer() as device_work:
+        run_step(NIC, MagicMock(), _step([_peer()], [torch.arange(2)], []))
+        device_work.when_queued(MagicMock(), False, done.append)
+    assert done == [False]
+    assert nic_engine.submitted == []
 
 
 def _handed_off(block_ids: list[torch.Tensor]) -> TransferStep:
@@ -134,37 +181,42 @@ def _handed_off(block_ids: list[torch.Tensor]) -> TransferStep:
     )
 
 
-def test_steps_of_one_staging_share_one_copy_of_the_block_ids():
+def _submitted_steps(nic_engine: _OffStreamEngine) -> list[TransferStep]:
+    return [step for _, steps, _ in nic_engine.submitted for step in steps]
+
+
+def test_steps_of_one_staging_share_one_copy_of_the_block_ids(nic_engine):
     """The batches of a transfer pass the same staged block ids: they are
     copied once, and restaging the buffer afterwards does not reach the copy."""
     buffer = torch.arange(8)
     staged_ids = [buffer[:4], buffer[4:]]
-    collected: list[TransferStep] = []
-    with collect_off_stream_steps(collected):
-        hand_off_step(_handed_off(staged_ids))
-        hand_off_step(_handed_off(staged_ids))
+    with retrieve_transfer() as device_work:
+        run_step(NIC, MagicMock(), _handed_off(staged_ids))
+        run_step(NIC, MagicMock(), _handed_off(staged_ids))
         buffer.fill_(-1)
-    first, second = collected
+        device_work.when_queued(MagicMock(), True, lambda result: None)
+    first, second = _submitted_steps(nic_engine)
     assert first.block_ids is second.block_ids
     assert first.block_ids is not staged_ids
     assert [ids.tolist() for ids in first.block_ids] == [[0, 1, 2, 3], [4, 5, 6, 7]]
 
 
-def test_a_restaged_buffer_gets_its_own_copy_of_the_block_ids():
+def test_a_restaged_buffer_gets_its_own_copy_of_the_block_ids(nic_engine):
     """A later transfer restages the buffer and passes new views of it: its
-    steps get the new ids and the earlier steps keep theirs. A new collect
-    block starts without a copy, even for the same staged list."""
+    steps get the new ids and the earlier steps keep theirs. A new retrieve
+    starts without a copy, even for the same staged list."""
     buffer = torch.arange(4)
     first_staging = [buffer[:]]
-    collected: list[TransferStep] = []
-    with collect_off_stream_steps(collected):
-        hand_off_step(_handed_off(first_staging))
+    with retrieve_transfer() as device_work:
+        run_step(NIC, MagicMock(), _handed_off(first_staging))
         buffer.add_(10)
-        hand_off_step(_handed_off([buffer[:]]))
-    with collect_off_stream_steps(collected):
+        run_step(NIC, MagicMock(), _handed_off([buffer[:]]))
+        device_work.when_queued(MagicMock(), True, lambda result: None)
+    with retrieve_transfer() as device_work:
         buffer.add_(10)
-        hand_off_step(_handed_off(first_staging))
-    assert [step.block_ids[0].tolist() for step in collected] == [
+        run_step(NIC, MagicMock(), _handed_off(first_staging))
+        device_work.when_queued(MagicMock(), True, lambda result: None)
+    assert [step.block_ids[0].tolist() for step in _submitted_steps(nic_engine)] == [
         [0, 1, 2, 3],
         [10, 11, 12, 13],
         [20, 21, 22, 23],

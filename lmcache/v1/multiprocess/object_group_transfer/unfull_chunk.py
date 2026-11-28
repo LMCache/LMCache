@@ -239,7 +239,8 @@ def transfer_unfull_chunk(
 
     Raises:
         NotImplementedError: If the object is owned by a peer and this is a
-            store, or a retrieve whose caller collects no off-stream steps.
+            store, or a retrieve that does not run inside
+            ``retrieve_transfer``.
 
     Notes:
         Always staged, by the engine ``memory_obj`` selects. A retrieve is
