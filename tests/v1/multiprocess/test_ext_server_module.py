@@ -28,7 +28,6 @@ from lmcache.v1.multiprocess.ext_server_module import (
     load_server_module_classes,
     parse_server_module_specs,
     register_grpc_services,
-    register_zmq_services,
     server_module_handler,
 )
 from lmcache.v1.multiprocess.modules import lookup as lookup_mod
@@ -305,13 +304,21 @@ def test_build_server_module_router_returns_none_without_handlers() -> None:
 def test_transport_service_registrars_are_called() -> None:
     module = _FakePluginTransportServiceModule(MagicMock(name="ctx"))
     grpc_server = object()
-    zmq_server = object()
 
     register_grpc_services([module], grpc_server)
-    register_zmq_services([module], zmq_server)
 
     assert module.grpc_server is grpc_server
-    assert module.zmq_server is zmq_server
+
+
+def test_a_zmq_only_plugin_is_rejected_with_a_migration_error() -> None:
+    """The ZMQ request transport is gone, so a ZMQ-only plugin cannot work."""
+
+    class ZmqOnlyModule:
+        def register_zmq_services(self, server: object) -> None:
+            raise AssertionError("must not be called")
+
+    with pytest.raises(ValueError, match="ZMQ request transport was removed"):
+        register_grpc_services([ZmqOnlyModule()], object())
 
 
 def test_transport_service_registrars_must_be_callable() -> None:
