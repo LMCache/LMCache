@@ -16,6 +16,7 @@ LMCACHE_LOG="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache_cpu_validation.l
 VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
 VLLM_PID=""
+HEARTBEAT_OBSERVER_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 LMCACHE_REQUEST_PORT="${LMCACHE_REQUEST_PORT:-${LMCACHE_ZMQ_PORT:-5555}}"
 LMCACHE_REQUEST_TRANSPORT="${LMCACHE_REQUEST_TRANSPORT:-grpc}"
@@ -143,7 +144,7 @@ upload_artifacts() {
   cp -f "${VLLM_LOG}" "${ARTIFACT_DIR}/vllm_cpu_validation.log" 2>/dev/null || true
 
   if [ -n "${BUILDKITE_BUILD_ID:-}" ] && command -v buildkite-agent >/dev/null 2>&1; then
-    buildkite-agent artifact upload "${ARTIFACT_DIR}/*.log" || true
+    buildkite-agent artifact upload "${ARTIFACT_DIR}/**/*" || true
   fi
 }
 
@@ -191,6 +192,10 @@ print_failure_logs() {
 
 cleanup_processes() {
   set +e
+  local cleanup_status=0
+  if [ -n "${MP_TEST_PID_FILE:-}" ] && [ -f "$MP_TEST_PID_FILE" ]; then
+    LMCACHE_PID=$(sed -n '1p' "$MP_TEST_PID_FILE")
+  fi
   if [ -n "${VLLM_PID}" ] && kill -0 "${VLLM_PID}" 2>/dev/null; then
     echo "Stopping vLLM (PID=${VLLM_PID})"
     kill "${VLLM_PID}" 2>/dev/null || true
@@ -198,10 +203,16 @@ cleanup_processes() {
   fi
   if [ -n "${LMCACHE_PID}" ] && kill -0 "${LMCACHE_PID}" 2>/dev/null; then
     echo "Stopping LMCache server (PID=${LMCACHE_PID})"
-    kill "${LMCACHE_PID}" 2>/dev/null || true
-    wait "${LMCACHE_PID}" 2>/dev/null || true
+    python3 "${SHARED_SCRIPTS_DIR}/../../.buildkite/k3_tests/multiprocess/scripts/stop-processes.py" \
+      "$LMCACHE_PID" --ports "$LMCACHE_REQUEST_PORT" "$LMCACHE_HTTP_PORT" \
+      || cleanup_status=$?
+  fi
+  if [ -n "$HEARTBEAT_OBSERVER_PID" ] && kill -0 "$HEARTBEAT_OBSERVER_PID" 2>/dev/null; then
+    kill "$HEARTBEAT_OBSERVER_PID"
+    wait "$HEARTBEAT_OBSERVER_PID" 2>/dev/null || true
   fi
   set -e
+  return "$cleanup_status"
 }
 
 wait_for_endpoint_contains() {
@@ -385,10 +396,12 @@ import json
 print(json.dumps({
     'kv_connector': 'LMCacheMPConnector',
     'kv_role': 'kv_both',
+    'kv_load_failure_policy': 'recompute',
     'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
     'kv_connector_extra_config': {
         'lmcache.mp.host': '${LMCACHE_REQUEST_SCHEME}://localhost',
-        'lmcache.mp.port': int('${LMCACHE_REQUEST_PORT}'),
+        'lmcache.mp.port': int('${VLLM_LMCACHE_REQUEST_PORT:-$LMCACHE_REQUEST_PORT}'),
+        'lmcache.mp.heartbeat_interval': int('${VLLM_MP_HEARTBEAT_INTERVAL:-10}'),
         # CPU tensors use shared memory, not CUDA driver-mapped allocations.
         'lmcache.mp.use_vmm_api': False,
     },
@@ -596,10 +609,19 @@ else
   fi
 fi
 
+# Preserve the exact CPU server configuration for the shared restart workload.
 # LMCACHE_SERVER_VENV: the server's own venv with the full wheel, while vLLM
 # runs the lmcache-client wheel (install_lmcache_cpu.sh).
-"${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
-  >"${LMCACHE_LOG}" 2>&1 &
+MP_TEST_LMCACHE_LAUNCH_SCRIPT="$ARTIFACT_DIR/launch-lmcache.sh"
+write_lmcache_launch_script() {
+  printf '#!/usr/bin/env bash\nexec ' > "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+  printf '%q ' env VLLM_TARGET_DEVICE=cpu \
+    "${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
+    >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+  printf '\n' >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
+}
+write_lmcache_launch_script
+bash "$MP_TEST_LMCACHE_LAUNCH_SCRIPT" >"${LMCACHE_LOG}" 2>&1 &
 LMCACHE_PID=$!
 echo "LMCache server started (PID=${LMCACHE_PID})"
 sleep 1
@@ -934,6 +956,60 @@ if [ "${READ_DELTA}" -gt 0 ]; then
 fi
 echo "✅ Cache miss confirmed for different prompt — metrics are trustworthy"
 
+# One representative model, transfer mode, and RPC transport reuse this environment.
+if [[ "$VLLM_MODEL_ID" == "facebook/opt-125m" &&
+      "$LMCACHE_MP_TRANSFER_MODE" == "lmcache_driven" &&
+      "$LMCACHE_REQUEST_TRANSPORT" == "zmq" ]]; then
+  echo "=== Shared fault tolerance and restart recovery (Phase 4) ==="
+  MP_SCRIPTS="${SHARED_SCRIPTS_DIR}/../../.buildkite/k3_tests/multiprocess/scripts"
+  export MP_TEST_PID_FILE="$ARTIFACT_DIR/recovery-pids.txt"
+  printf '%s\n%s\n' "$LMCACHE_PID" "$VLLM_PID" > "$MP_TEST_PID_FILE"
+  export MP_TEST_LMCACHE_LAUNCH_SCRIPT
+  export MP_TEST_DEGRADED_LOG_OFFSET
+  MP_TEST_DEGRADED_LOG_OFFSET=$(wc -c < "$VLLM_LOG")
+  export MODEL="$VLLM_MODEL_ID" BUILD_ID VLLM_PORT LMCACHE_MP_TRANSFER_MODE
+  export LMCACHE_PORT="$LMCACHE_REQUEST_PORT" LMCACHE_HTTP_PORT
+  export ENGINE_LOG_FILE="$VLLM_LOG"
+  export LMCACHE_RESTART_LOG="$ARTIFACT_DIR/lmcache_restart.log"
+  export RESULTS_DIR="$ARTIFACT_DIR/recovery"
+  FT_REUSE_SERVICES=1 NUM_PROMPTS=16 RANDOM_INPUT_LEN=512 RANDOM_OUTPUT_LEN=32 \
+    FT_REQUEST_RATE=2 FT_KILL_DELAY=1 \
+    bash "$MP_SCRIPTS/workloads/vllm/fault-tolerance.sh"
+  RR_SERVER_STOPPED=1 bash "$MP_SCRIPTS/workloads/common/restart-recovery.sh"
+  LMCACHE_PID=$(sed -n '1p' "$MP_TEST_PID_FILE")
+  echo "✅ Shared fault tolerance and restart recovery passed"
+
+  echo "=== Restart between successful heartbeats (Phase 5) ==="
+  stop_vllm
+  cp "$VLLM_LOG" "$ARTIFACT_DIR/vllm-slow-recovery.log"
+  export VLLM_MP_HEARTBEAT_INTERVAL=120
+  export VLLM_LMCACHE_REQUEST_PORT=$((LMCACHE_REQUEST_PORT + 100))
+  export ENGINE_PORT="$VLLM_PORT"
+  GAP_DIR="$RESULTS_DIR/heartbeat_gap"
+  mkdir -p "$GAP_DIR"
+  GAP_HELPER="$MP_SCRIPTS/workloads/verification/heartbeat-gap.py"
+  python3 "$GAP_HELPER" observe --listen-port "$VLLM_LMCACHE_REQUEST_PORT" \
+    --server-port "$LMCACHE_REQUEST_PORT" --trace "$GAP_DIR/pings.jsonl" \
+    > "$GAP_DIR/observer.log" 2>&1 &
+  HEARTBEAT_OBSERVER_PID=$!
+  for _ in $(seq 1 30); do
+    if [ -f "$GAP_DIR/pings.ready" ]; then break; fi
+    if ! kill -0 "$HEARTBEAT_OBSERVER_PID" 2>/dev/null; then
+      cat "$GAP_DIR/observer.log"
+      false
+    fi
+    sleep 1
+  done
+  test -f "$GAP_DIR/pings.ready"
+  # Keep reaping from becoming a second fault when heartbeats are slowed down.
+  LMCACHE_ARGS+=(--worker-reap-timeout-seconds 600 --worker-registration-grace-seconds 600)
+  write_lmcache_launch_script
+  start_vllm
+  printf '%s\n%s\n' "$LMCACHE_PID" "$VLLM_PID" > "$MP_TEST_PID_FILE"
+  python3 "$GAP_HELPER" verify --trace "$GAP_DIR/pings.jsonl" \
+    --interval "$VLLM_MP_HEARTBEAT_INTERVAL" --output-dir "$GAP_DIR"
+fi
+
 echo "[Phase 3 / Step 12] Cleaning up"
 stop_vllm
 cleanup_processes
@@ -941,7 +1017,7 @@ echo "✅ Phase 3 cleanup completed"
 
 echo ""
 echo "=========================================="
-echo "✅ All phases passed (Phase 1 + 2 + 3)"
+echo "✅ All enabled CPU E2E phases passed"
 echo "=========================================="
 
 # Make sure lmcache/vllm processes started in this run are reaped so

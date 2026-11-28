@@ -15,7 +15,9 @@ a workload owns its requests and assertions.
   runs every check before exiting so a threshold failure still leaves the
   `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
   on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
-- `restart-recovery.sh`: LMCache server restart and worker re-registration.
+- `restart-recovery.sh`: wait for an unhealthy transition, restart LMCache, then
+  verify the original workers re-register and complete store/hit/retrieve with
+  identical outputs. Fast restarts between successful heartbeats are not covered.
 - `multi-chunk-size.sh`: two engines connected to one MP server register
   different model-scoped chunk sizes and independently complete an L1
   store/retrieve round trip.
@@ -69,3 +71,20 @@ An adapter may temporarily skip unsupported common workloads through
 allowlist. Transfer-mode and request-transport support is declared separately
 by the adapter, so a common pipeline matrix can safely include engines with
 different capabilities.
+
+CPU E2E reuses `vllm/fault-tolerance.sh` followed by `common/restart-recovery.sh`
+in its opt-125m / LMCache-driven / ZMQ leg. `FT_REUSE_SERVICES=1` preserves the
+already-running engine. Both workloads use `MP_TEST_PID_FILE` (server PID on
+line 1); `MP_TEST_LMCACHE_LAUNCH_SCRIPT` supplies the exact server launch command.
+`RR_SERVER_STOPPED=1` resumes after fault tolerance, using its registration
+snapshot and `MP_TEST_DEGRADED_LOG_OFFSET` in the engine log. Results and
+before/after registration snapshots are retained with the CPU E2E artifacts.
+
+The same representative CPU leg also runs `verification/heartbeat-gap.py` after
+ordinary restart recovery. A transparent ZMQ observer records real Scheduler
+and Worker PING replies. With a 120s heartbeat interval, the test restarts the
+Server after fresh replies, proves the outage ended before the next probe,
+then requires both post-restart PINGs to succeed before checking cache service.
+It intentionally fails on the current missing-registration recovery bug; it
+is not marked xfail. Timing, PING replies and registration snapshots are saved
+in `recovery/heartbeat_gap/`. The observer never manufactures a PING or reply.
