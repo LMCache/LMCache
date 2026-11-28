@@ -1074,3 +1074,114 @@ def test_sparse_classify_repeated_missing_chunk_takes_one_strike():
     )
 
     assert eng._stale_strike == {b"gone": 1}
+
+
+# ---------------------------------------------------------------------------
+# Producer fence: the retrieve waits through wait_producer_event
+# ---------------------------------------------------------------------------
+
+
+class _AbandonedFenceBackend:
+    """Host-ready event backend whose imported producer fence never completes."""
+
+    host_ready_before_imported_wait = True
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def create_event(self, device):
+        self.calls.append("create")
+        return "completion"
+
+    def import_event(self, handle, device):
+        self.calls.append("import")
+        return "producer"
+
+    def query_event(self, event) -> bool:
+        self.calls.append("query")
+        return False
+
+    def wait_event(self, event, stream) -> None:
+        self.calls.append("wait")
+
+    def record_event(self, event, stream) -> None:
+        self.calls.append("record")
+
+    def export_event(self, event, device) -> bytes:
+        self.calls.append("export")
+        return b"completion-handle"
+
+
+class _GpuContext:
+    """Hashable CPU stand-in for the registered cache context."""
+
+    def __init__(self) -> None:
+        # Third Party
+        import torch
+
+        self.device = torch.device("cpu")
+        self.stream = "stream"
+        self.cupy_stream = "cupy-stream"
+        self.kv_layer_groups_manager = SimpleNamespace(
+            kernel_groups=[SimpleNamespace(engine_group_idx=0, tokens_per_block=256)]
+        )
+
+
+def test_retrieve_fails_when_the_engine_is_gone_during_the_fence_wait(monkeypatch):
+    """On a host-ready backend the CacheBlend retrieve polls the producer fence
+    instead of queueing a GPU wait. When the engine is no longer registered it
+    gives up: no stream wait, no read, the retrieve span closes as failed, and
+    a fresh completion event is returned with False."""
+    # Standard
+    from collections import OrderedDict
+    from contextlib import nullcontext
+
+    # First Party
+    from lmcache.v1.common.custom_types import CBMatchResult
+    from lmcache.v1.mp_observability.event import EventType
+
+    monkeypatch.setattr(
+        retrieve_mod,
+        "torch_dev",
+        SimpleNamespace(device=lambda d: nullcontext(), stream=lambda s: nullcontext()),
+    )
+    monkeypatch.setattr(
+        retrieve_mod, "_cb_chunk_major_object_keys", lambda *args: ["chunk-0"]
+    )
+    backend = _AbandonedFenceBackend()
+    gpu_context = _GpuContext()
+    eng = MagicMock(spec=BlendModule)
+    eng._event_bus = MagicMock()
+    eng._ctx = MagicMock()
+    eng._ctx.chunk_size = 256
+    eng._ctx.session_manager.get.return_value = None
+    eng._transfer_module = MagicMock()
+    eng._transfer_module.get_and_touch_context_entry.return_value = SimpleNamespace(
+        cache_context=gpu_context, event_backend=backend
+    )
+    eng._transfer_module.is_current_entry.return_value = False
+    eng._cb_rope_state = {1: MagicMock()}
+    eng._cb_staged_groups.return_value = (SimpleNamespace(blend_gids=(0,)), [0])
+    eng._cb_applied_match_ranges = OrderedDict()
+    eng._cb_retrieve_streams = {}
+    eng._cb_retrieve_cupy_streams = {}
+    key = SimpleNamespace(request_id="req", worker_id=0, model_name="m", world_size=1)
+    match = CBMatchResult(old_st=0, old_ed=256, cur_st=0, cur_ed=256, hash=b"h" * 32)
+
+    result = BlendModule.cb_retrieve_pre_computed(
+        eng, key, [match], [[5]], 1, b"producer-handle"
+    )
+
+    assert result == (b"completion-handle", False)
+    assert "wait" not in backend.calls
+    assert backend.calls[-2:] == ["record", "export"]
+    eng._transfer_module.is_current_entry.assert_called_with(
+        1, eng._transfer_module.get_and_touch_context_entry.return_value
+    )
+    eng._ctx.storage_manager.read_prefetched_results.assert_not_called()
+    ends = [
+        c.args[1].metadata
+        for c in eng._event_bus.publish_on_stream.call_args_list
+        if c.args[1].event_type == EventType.CB_RETRIEVE_END
+    ]
+    assert ends == [{"success": False, "worker_id": 0}]

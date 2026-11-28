@@ -52,7 +52,9 @@ from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
+    ProducerEventWaitError,
     get_event_ipc_backend,
+    wait_producer_event,
 )
 from lmcache.v1.platform.base.ipc_wrapper import KVCache, set_fd_resolver
 from lmcache.v1.platform.cache_context import create_cache_context
@@ -366,6 +368,22 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def is_current_entry(self, instance_id: int, entry: ContextEntry) -> bool:
+        """Return whether ``entry`` is still the registration of ``instance_id``.
+
+        False once the instance was unregistered or reaped. Does not refresh
+        the last-seen time.
+
+        Args:
+            instance_id: The GPU instance ID.
+            entry: The entry a request looked up for ``instance_id``.
+
+        Returns:
+            True if ``entry`` is the instance's current registration.
+        """
+        with self._lock:
+            return self._cache_contexts.get(instance_id) is entry
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -772,6 +790,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A key addressing an unfull chunk (``key.has_unfull_chunk``) also
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
+
+            On a backend with ``host_ready_before_imported_wait`` (ROCm), the
+            call blocks this GPU affinity worker until the producer fence
+            completes (see ``wait_producer_event``); clients that share the
+            worker wait behind it. If the fence is given up on -- the instance
+            was unregistered or reaped, or it is still pending after the
+            deadline -- the store is skipped like the failures above: nothing
+            is reserved or committed, and the boolean result is False.
         """
         st = time.perf_counter()
 
@@ -875,7 +901,26 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
+            try:
+                wait_producer_event(
+                    event_backend,
+                    producer_event,
+                    cache_context.stream,
+                    is_alive=lambda: self.is_current_entry(instance_id, entry),
+                )
+            except ProducerEventWaitError:
+                # Nothing was reserved or copied: fail the store, commit nothing.
+                logger.exception(
+                    "Failing STORE for request_id=%s, GPU instance ID %d",
+                    key.request_id,
+                    instance_id,
+                )
+                event_backend.record_event(event, cache_context.stream)
+                return (
+                    event_backend.export_event(event, cache_context.device),
+                    False,
+                    [],
+                )
             import_token = cache_context.hold_imported_event(producer_event)
             submit_callback_to_stream(
                 cache_context.cupy_stream,
@@ -1155,6 +1200,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ``skip_first_n_tokens`` counts from ``key.start``, so it reaches
             the unfull chunk only when the range has no full chunk (the
             engine's prefix cache already holds part of the unfull chunk).
+
+            On a backend with ``host_ready_before_imported_wait`` (ROCm), the
+            call blocks this GPU affinity worker until the producer fence
+            completes (see ``wait_producer_event``); clients that share the
+            worker wait behind it. If the fence is given up on -- the instance
+            was unregistered or reaped, or it is still pending after the
+            deadline -- nothing is read or copied, the range's read locks are
+            released, and the second element is False.
         """
         st = time.perf_counter()
 
@@ -1259,13 +1312,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(producer_event, cache_context.stream)
-            import_token = cache_context.hold_imported_event(producer_event)
-            submit_callback_to_stream(
-                cache_context.cupy_stream,
-                "release_imported_event",
-                (instance_id, import_token),
-            )
+            producer_error: ProducerEventWaitError | None = None
+            try:
+                wait_producer_event(
+                    event_backend,
+                    producer_event,
+                    cache_context.stream,
+                    is_alive=lambda: self.is_current_entry(instance_id, entry),
+                )
+            except ProducerEventWaitError as exc:
+                # Failed below, inside the transfer's try, so that its finally
+                # releases the read locks and closes the retrieve span.
+                logger.exception(
+                    "Failing RETRIEVE for request_id=%s, GPU instance ID %d",
+                    key.request_id,
+                    instance_id,
+                )
+                producer_error = exc
+            else:
+                import_token = cache_context.hold_imported_event(producer_event)
+                submit_callback_to_stream(
+                    cache_context.cupy_stream,
+                    "release_imported_event",
+                    (instance_id, import_token),
+                )
 
             # Per object group, the prefetch only locked the in-window suffix
             # (the last ``num_chunks_in_sw`` chunks; the whole prefix for full
@@ -1309,6 +1379,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             total_bytes = 0
             retrieve_succeeded = True
             try:
+                if producer_error is not None:
+                    raise producer_error
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
                         continue
@@ -1354,6 +1426,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         chunk_size,
                     )
                     prefetched_keys.extend(unfull_retained_keys)
+            except ProducerEventWaitError:
+                # Logged where the poll gave up; nothing was read or copied.
+                retrieve_succeeded = False
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False

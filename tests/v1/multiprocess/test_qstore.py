@@ -245,7 +245,9 @@ def stub_device(monkeypatch):
     monkeypatch.setattr(
         qstore_mod,
         "torch_dev",
-        SimpleNamespace(device=_null, stream=_null, Event=_FakeEvent),
+        SimpleNamespace(
+            device=_null, stream=_null, Event=_FakeEvent, empty_cache=lambda: None
+        ),
     )
     monkeypatch.setattr(qstore_mod, "get_event_ipc_backend", lambda device: backend)
     return backend
@@ -780,6 +782,72 @@ def test_sdk_store_rejects_pieces_in_blocks_vllm_holds(
         False,
     )
     ctx.storage_manager.reserve_write.assert_not_called()
+
+
+def _abandon_fences(backend: _FakeEventBackend, on_first_query) -> list:
+    """Make ``backend`` host-ready with producer fences that never complete;
+    the first poll runs ``on_first_query``. Returns the stream waits queued."""
+    waits: list = []
+    queries: list = []
+
+    def query_event(event) -> bool:
+        queries.append(event)
+        if len(queries) == 1:
+            on_first_query()
+        return False
+
+    backend.host_ready_before_imported_wait = True  # type: ignore[attr-defined]
+    backend.query_event = query_event  # type: ignore[attr-defined]
+    backend.wait_event = lambda event, stream=None: waits.append(event)  # type: ignore[method-assign]
+    return waits
+
+
+def test_store_q_fails_when_the_ring_is_reaped_mid_wait(
+    stub_device, monkeypatch
+) -> None:
+    """A producer fence whose ring is unregistered while the server polls it
+    fails the store: no stream wait, nothing reserved, event still recorded."""
+    ctx = _ctx()
+    ctx.resolve_obj_keys.return_value = [["obj-0"]]
+    monkeypatch.setattr(
+        qstore_mod, "downsample_and_stage_block_ids", lambda _c, ids: ids
+    )
+    create = _stub_registration(monkeypatch)
+    monkeypatch.setattr(qstore_mod, "get_event_ipc_backend", lambda d: stub_device)
+    cache_context = create.return_value
+    cache_context.kv_layer_groups_manager.num_object_groups = 1
+    cache_context.kv_layer_groups_manager.num_kernel_groups = 1
+    cache_context.calculate_num_blocks.return_value = 2
+    module = _module(ctx)
+    _register(module)
+    waits = _abandon_fences(stub_device, lambda: module.unregister_q_cache(1))
+
+    handle, ok = module.store_q(MagicMock(), 1, [[0, 1]], b"peer-handle")
+
+    assert (handle, ok) == (b"event-handle", False)
+    assert waits == []
+    assert stub_device.created[0].records == 1
+    cast(MagicMock, ctx.storage_manager.reserve_write).assert_not_called()
+
+
+@pytest.mark.parametrize("op", ["sdk_retrieve", "sdk_store"])
+def test_sdk_transfers_fail_when_the_ring_is_reaped_mid_wait(
+    stub_device, monkeypatch, op
+) -> None:
+    """The SDK's fence is given up on once its ring is unregistered: the
+    transfer fails without touching the pieces or L1, and a retrieve still
+    releases its read locks."""
+    module, ctx, _, callbacks = _sdk_module(stub_device, monkeypatch)
+    waits = _abandon_fences(stub_device, lambda: module.unregister_q_cache(1))
+
+    handle, ok = getattr(module, op)(_sdk_key(), 1, [0], [0, 1, 2, 3, 4, 5], b"h")
+
+    assert (handle, ok) == (b"event-handle", False)
+    assert waits == []
+    ctx.storage_manager.unsafe_read.assert_not_called()
+    ctx.storage_manager.reserve_write.assert_not_called()
+    expected = ["finish_read_by_owner"] if op == "sdk_retrieve" else []
+    assert [kind for kind, _ in callbacks] == expected
 
 
 @pytest.mark.parametrize("to_ring", [True, False])

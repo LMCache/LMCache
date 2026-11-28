@@ -14,6 +14,7 @@ from lmcache.v1.platform.ipc_policy import get_ipc_policy
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
     from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
 
 
@@ -24,6 +25,29 @@ class RocmDeviceSpec(CudaDeviceSpec):
     def backend_name(self) -> str:
         """Return the LMCache-specific ROCm backend selector."""
         return "rocm"
+
+    @property
+    def event_ipc_backend(self) -> EventIPCBackend:
+        """Return the ROCm event IPC backend.
+
+        Without isolated IPC this is :class:`RocmEventIPCBackend`, which has a
+        producer fence complete before a stream waits on it (see
+        ``lmcache.v1.platform.devices.rocm.event_ipc``). With isolated IPC the
+        CUDA selection applies unchanged.
+        """
+        backend = self._event_backend_cache
+        if backend is None:
+            if get_ipc_policy().isolated_ipc:
+                backend = super().event_ipc_backend
+            else:
+                # First Party
+                from lmcache.v1.platform.devices.rocm.event_ipc import (
+                    RocmEventIPCBackend,
+                )
+
+                backend = RocmEventIPCBackend(device_type=self.device_type)
+            self._event_backend_cache = backend
+        return backend
 
     @property
     def ipc_wrapper_cls(self) -> type[DeviceIPCWrapper] | None:

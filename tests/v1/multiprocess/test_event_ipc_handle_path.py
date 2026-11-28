@@ -191,22 +191,33 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
-def test_server_store_and_retrieve_delegate_event_ordering(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Server imports, waits, records, and exports through the event backend."""
+def _server_handle_path(
+    monkeypatch: pytest.MonkeyPatch, backend: Any
+) -> SimpleNamespace:
+    """A LMCacheDrivenTransferModule with GPU instance 1 registered on CPU fakes.
+
+    Returns the module, ``register()`` (registers instance 1 again through
+    ``register_kv_cache``), a request ``key``, and the stream ``callbacks``,
+    held imports (``held``) and released import tokens (``released``) it
+    records.
+    """
     # First Party
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
-    backend = _FakeEventBackend()
+    registering = False
 
-    def unexpected_backend_lookup(_device: object) -> _FakeEventBackend:
-        raise AssertionError("server should reuse the registered event backend")
+    def backend_lookup(_device: object) -> _FakeEventBackend:
+        if not registering:
+            raise AssertionError("server should reuse the registered event backend")
+        return backend
 
     monkeypatch.setattr(
+        lmcache_driven_transfer, "get_event_ipc_backend", backend_lookup
+    )
+    monkeypatch.setattr(
         lmcache_driven_transfer,
-        "get_event_ipc_backend",
-        unexpected_backend_lookup,
+        "get_unfull_chunk_layout_desc",
+        lambda cache_context, object_group_id: object(),
     )
     monkeypatch.setattr(
         lmcache_driven_transfer,
@@ -259,6 +270,14 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
+        validate_chunk_size=lambda chunk_size: None,
+        separate_object_groups=False,
+        full_sw_kv=False,
+        hash_algorithm_name="hash",
+        layout_desc_registry=SimpleNamespace(
+            register=lambda *args, **kwargs: None,
+            unregister=lambda *args: None,
+        ),
     )
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
         cast(Any, server_context)
@@ -280,25 +299,59 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
         transfer_object_group=lambda *args, **kwargs: None,
-    )
-    entry = lmcache_driven_transfer.ContextEntry(
-        cache_context=cast(Any, cache_context),
-        model_name="model",
-        world_size=1,
-        chunk_size=256,
-        event_backend=cast(Any, backend),
+        close=lambda: None,
+        num_layers=1,
     )
     monkeypatch.setattr(
-        module,
-        "get_and_touch_context_entry",
-        lambda instance_id: entry,
+        lmcache_driven_transfer,
+        "create_cache_context",
+        lambda *args, **kwargs: cache_context,
     )
+
+    def register() -> None:
+        nonlocal registering
+        registering = True
+        try:
+            module.register_kv_cache(
+                1,
+                kv_caches=cast(Any, object()),
+                model_name="model",
+                world_size=1,
+                engine_type=cast(Any, None),
+                layout_hints=cast(Any, None),
+                engine_group_infos=[],
+                event_profile=None,
+                chunk_size=256,
+            )
+        finally:
+            registering = False
+
+    register()
     key = SimpleNamespace(
         request_id="request",
         cache_salt="",
         worker_id=0,
         has_unfull_chunk=lambda chunk_size: False,
     )
+
+    return SimpleNamespace(
+        module=module,
+        register=register,
+        key=key,
+        callbacks=callbacks,
+        held=held,
+        released=released,
+    )
+
+
+def test_server_store_and_retrieve_delegate_event_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server imports, waits, records, and exports through the event backend."""
+    backend = _FakeEventBackend()
+    server = _server_handle_path(monkeypatch, backend)
+    module, key = server.module, server.key
+    callbacks, held, released = server.callbacks, server.held, server.released
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
@@ -330,6 +383,61 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     for index, call in enumerate(backend.calls):
         if call[0] == "export":
             assert backend.calls[index - 1][0] == "record"
+
+
+class _AbandonedFenceBackend(_FakeEventBackend):
+    """A host-ready backend whose producer fence never completes; the first
+    poll runs ``on_first_query`` (e.g. the reaper dropping the engine)."""
+
+    host_ready_before_imported_wait = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_first_query = lambda: None
+
+    def query_event(self, event: object) -> bool:
+        self.calls.append(("query", event))
+        if sum(call[0] == "query" for call in self.calls) == 1:
+            self.on_first_query()
+        return False
+
+
+def test_server_fails_transfers_whose_engine_is_reaped_mid_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fence whose engine is reaped while the server polls it fails that
+    STORE / RETRIEVE instead of holding the worker: no stream wait, no import
+    held, a completion event still recorded, and the retrieve still releases
+    the read locks of its range."""
+    backend = _AbandonedFenceBackend()
+    server = _server_handle_path(monkeypatch, backend)
+    module, key = server.module, server.key
+    # One chunk, so the retrieve has read locks to release.
+    module.context.resolve_obj_keys = lambda key, group_ids: [["chunk-0"]]
+
+    def reap() -> None:
+        assert module.reap_stale_instances(-1.0, -1.0) == [1]
+
+    backend.on_first_query = reap
+    assert module.store_with_chunk_mask(key, 1, [[5]], b"store-producer") == (
+        b"completion-handle",
+        False,
+        [],
+    )
+    assert [call[0] for call in backend.calls[-2:]] == ["record", "export"]
+
+    server.register()
+    backend.calls.clear()
+    backend.on_first_query = reap
+    assert module.retrieve(key, 1, [[5]], b"retrieve-producer") == (
+        b"completion-handle",
+        False,
+    )
+    assert [call[0] for call in backend.calls[-2:]] == ["record", "export"]
+
+    assert not any(call[0] == "wait" for call in backend.calls)
+    assert server.held == []
+    assert [kind for kind, _ in server.callbacks] == ["finish_read_by_owner"]
 
 
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
