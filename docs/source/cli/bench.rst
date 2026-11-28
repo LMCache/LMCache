@@ -1156,6 +1156,12 @@ Options
    * - ``--block-size N``
      - ``16``
      - Fallback tokens per block; overridden by the shape spec.
+   * - ``--null-block-id N``
+     - ``0``
+     - Match the server's ``--null-block-id`` to avoid dropping one-block
+       chunks. An ID in ``[0, NB)`` reserves one block per group, leaving
+       ``NB - 1`` usable. An ID outside the pool (e.g. ``-1``) reserves
+       nothing, so all ``NB`` blocks are usable.
    * - ``--start N``
      - ``0``
      - First sequence number to run.
@@ -1201,10 +1207,13 @@ samples free IDs to exercise non-contiguous block mappings. Blocks become
 reusable after request release. Allocation fails immediately if any group
 lacks capacity, without reserving blocks in other groups.
 
-Capacity and block size come from ``NB`` and ``BS`` in
+Pool size and tokens per block come from ``NB`` and ``BS`` in
 ``--kvcache-shape-spec``, overriding ``--num-blocks`` and ``--block-size``.
-For example, 512 tokens in complete chunks with a block size of 16 require
-32 blocks per group.
+With the defaults (``NB=1024``, ``BS=16``), ``--num-tokens 16384``
+needs all ``NB`` blocks (``NB * BS`` tokens) and now fails with
+``only 1023 free`` because block 0 is reserved. Increase ``NB`` in the
+shape spec (or the fallback ``--num-blocks``) by one, or pass
+``--null-block-id -1`` only if the server also uses ``-1``.
 
 If transfer completion is uncertain, the client rejects further operations
 and retains its blocks until teardown.

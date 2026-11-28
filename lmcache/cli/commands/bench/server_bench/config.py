@@ -36,6 +36,9 @@ class BenchConfig:
         concurrency: Number of clients sending requests at the same time.
         isolated_ipc: Whether clients use the isolated IPC policy.
         block_allocation: Allocate the lowest free IDs or sample free IDs randomly.
+        null_block_id: Server null block id; an id inside the block pool
+            is excluded from allocation, an id outside it (e.g. ``-1``)
+            reserves nothing, mirroring the server.
         transfer_timeout_s: Positive, finite shared wait budget per transfer call.
     """
 
@@ -53,6 +56,7 @@ class BenchConfig:
     isolated_ipc: bool = False
     block_allocation: Literal["sequential", "random"] = "sequential"
     transfer_timeout_s: float = 10.0
+    null_block_id: int = 0
 
     def __post_init__(self) -> None:
         if self.mode not in ("cpu", "gpu"):
@@ -157,5 +161,6 @@ def parse_args_to_config(args: argparse.Namespace) -> BenchConfig:
         concurrency=int(getattr(args, "concurrency", 1)),
         isolated_ipc=args.isolated_ipc,
         block_allocation=getattr(args, "block_allocation", "sequential"),
+        null_block_id=int(getattr(args, "null_block_id", 0)),
         transfer_timeout_s=float(getattr(args, "transfer_timeout", 10.0)),
     )

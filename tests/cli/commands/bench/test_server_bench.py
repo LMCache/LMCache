@@ -479,6 +479,34 @@ class TestCommandArguments:
         args = parser.parse_args(["bench", "server", "--no-isolated-ipc"])
         assert parse_args_to_config(args).isolated_ipc is False
 
+    def test_null_block_id_flag_reaches_config(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--null-block-id", "3"])
+        assert parse_args_to_config(args).null_block_id == 3
+        args = parser.parse_args(["bench", "server"])
+        assert parse_args_to_config(args).null_block_id == 0
+
+    def test_out_of_pool_null_block_ids_parse_like_on_the_server(
+        self,
+        parser: argparse.ArgumentParser,
+    ) -> None:
+        # First Party
+        from lmcache.cli.commands.bench.server_bench.config import (
+            parse_args_to_config,
+        )
+
+        args = parser.parse_args(["bench", "server", "--null-block-id", "-1"])
+        assert parse_args_to_config(args).null_block_id == -1
+        args = parser.parse_args(["bench", "server", "--null-block-id", "-2"])
+        assert parse_args_to_config(args).null_block_id == -2
+
     def test_isolated_ipc_rejected_in_cpu_mode(
         self,
         parser: argparse.ArgumentParser,
@@ -1558,7 +1586,7 @@ def test_handle_mode_preserves_event_lifetime_through_transfer_context(
         assert result.failed_worker_ranks == ((0,) if times_out else ())
         call = getattr(transport, operation)
         call.assert_called_once()
-        assert call.call_args.args[1:4] == (1000, [[0, 1]], b"producer-handle")
+        assert call.call_args.args[1:4] == (1000, [[1, 2]], b"producer-handle")
         assert backend_calls[:3] == ["create", "record", "export"]
         assert "wait" in backend_calls
         assert ("synchronize" in backend_calls) is not times_out

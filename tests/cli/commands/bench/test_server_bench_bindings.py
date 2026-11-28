@@ -60,9 +60,9 @@ def bench(
             tp_size=2,
             use_mla=False,
             num_tokens=3,
-            num_blocks=8,
+            num_blocks=9,
             block_size=2,
-            kvcache_shape_spec="(2,8,2,1,4):float32:1;(1,8,2,1,8):bfloat16:1",
+            kvcache_shape_spec="(2,9,2,1,4):float32:1;(1,9,2,1,8):bfloat16:1",
             **getattr(request, "param", {}),
         ),
         lambda message: None,
@@ -82,8 +82,8 @@ def test_live_requests_are_disjoint_and_released_blocks_can_be_reused(
 ) -> None:
     client, _ = bench
     first, second = _request(client), _request(client, 1)
-    assert first.block_allocation.as_block_ids() == [[0, 1], [0, 1]]
-    assert second.block_allocation.as_block_ids() == [[2, 3], [2, 3]]
+    assert first.block_allocation.as_block_ids() == [[1, 2], [1, 2]]
+    assert second.block_allocation.as_block_ids() == [[3, 4], [3, 4]]
     cleanup = MagicMock(
         side_effect=RuntimeError("cleanup failed") if cleanup_fails else None
     )
@@ -99,6 +99,18 @@ def test_live_requests_are_disjoint_and_released_blocks_can_be_reused(
     assert _request(client, 2).block_allocation == first.block_allocation
     with pytest.raises(RuntimeError, match="not active"):
         client.lookup(first)
+
+
+@pytest.mark.parametrize("bench", [{"null_block_id": 1}], indirect=True)
+def test_configured_null_block_id_is_the_excluded_id(bench: Bench) -> None:
+    """A non-zero --null-block-id reaches the allocator: 1 is never handed out."""
+    client, _ = bench
+    first, second = _request(client), _request(client, 1)
+    for allocation in (first.block_allocation, second.block_allocation):
+        for group in allocation.groups:
+            assert 1 not in group.block_ids
+    assert first.block_allocation.as_block_ids() == [[0, 2], [0, 2]]
+    assert second.block_allocation.as_block_ids() == [[3, 4], [3, 4]]
 
 
 @pytest.mark.parametrize("bench", [{"block_allocation": "random"}], indirect=True)
