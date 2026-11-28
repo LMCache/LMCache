@@ -35,9 +35,8 @@ class _Storage(_FakeStorageManager):
 
 @pytest.fixture
 def harness(monkeypatch: pytest.MonkeyPatch):
-    """A transfer module with one registered context whose transfer hands
-    the steps in ``handed_off`` to ``engine``; ``order`` logs the completion
-    calls and ``ended`` the end events' metadata."""
+    """A transfer module whose transfer hands ``handed_off`` to ``engine``;
+    ``order`` logs completion calls, ``ended`` the end events' metadata."""
     order: list[Any] = []
     ended: list[dict] = []
     handed_off: list[TransferStep] = []

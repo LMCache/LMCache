@@ -111,9 +111,8 @@ def nic_engine(monkeypatch) -> _OffStreamEngine:
 def test_an_on_stream_step_is_staged_then_launched_and_queued_at_once(
     monkeypatch, engine, make
 ):
-    """The step lands in the context's own staging and its kernels are queued
-    right after, with the step's block ids, so the retrieve is queued as soon
-    as its transfers ran."""
+    """Staged into the context's buffer, launched with the step's block ids,
+    and reported queued right away."""
     calls: list = []
     monkeypatch.setattr(
         engines,
@@ -135,9 +134,8 @@ def test_an_on_stream_step_is_staged_then_launched_and_queued_at_once(
 
 @pytest.mark.parametrize("result", [True, False])
 def test_an_off_stream_step_is_queued_when_its_engine_says_so(nic_engine, result):
-    """Its bytes land by a path the stream does not order, so the step is
-    neither staged nor launched by the transfer: the engine gets it once the
-    transfers ran, and the retrieve is queued when the engine is done."""
+    """The transfer neither stages nor launches it; the engine gets it after
+    the transfers ran and reports when it is queued."""
     calls: list = []
     context, objs = MagicMock(), [_peer()]
     done: list[bool] = []
@@ -154,8 +152,7 @@ def test_an_off_stream_step_is_queued_when_its_engine_says_so(nic_engine, result
 
 
 def test_an_off_stream_step_without_an_engine_fails_the_retrieve():
-    """No engine reads objects a peer owns yet. A transfer outside
-    ``retrieve_transfer`` cannot run such a step at all."""
+    """Also outside ``retrieve_transfer``, where such a step cannot run at all."""
     step = _step([_peer()], [torch.arange(2)], [])
     with pytest.raises(NotImplementedError):
         run_step(NIC, MagicMock(), step)
@@ -186,8 +183,8 @@ def _submitted_steps(nic_engine: _OffStreamEngine) -> list[TransferStep]:
 
 
 def test_steps_of_one_staging_share_one_copy_of_the_block_ids(nic_engine):
-    """The batches of a transfer pass the same staged block ids: they are
-    copied once, and restaging the buffer afterwards does not reach the copy."""
+    """Batches of one staging pass the same block ids: copied once, and
+    restaging the buffer does not reach the copy."""
     buffer = torch.arange(8)
     staged_ids = [buffer[:4], buffer[4:]]
     with retrieve_transfer() as device_work:
@@ -202,9 +199,8 @@ def test_steps_of_one_staging_share_one_copy_of_the_block_ids(nic_engine):
 
 
 def test_a_restaged_buffer_gets_its_own_copy_of_the_block_ids(nic_engine):
-    """A later transfer restages the buffer and passes new views of it: its
-    steps get the new ids and the earlier steps keep theirs. A new retrieve
-    starts without a copy, even for the same staged list."""
+    """A restaged buffer and a new retrieve each get a fresh copy; earlier
+    steps keep theirs."""
     buffer = torch.arange(4)
     first_staging = [buffer[:]]
     with retrieve_transfer() as device_work:

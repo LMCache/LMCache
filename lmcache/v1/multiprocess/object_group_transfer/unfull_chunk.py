@@ -238,14 +238,12 @@ def transfer_unfull_chunk(
         direction: H2D (retrieve) or D2H (store).
 
     Raises:
-        NotImplementedError: If the object is owned by a peer and this is a
-            store, or a retrieve that does not run inside
-            ``retrieve_transfer``.
+        NotImplementedError: For a peer-owned object on a store, or on a
+            retrieve outside ``retrieve_transfer``.
 
     Notes:
         Always staged, by the engine ``memory_obj`` selects. A retrieve is
-        one :class:`TransferStep`: an off-stream engine launches its kernels
-        later.
+        one :class:`TransferStep`.
     """
     is_h2d = direction == lmcache_native.TransferDirection.H2D
     engine = select_engine(memory_obj)
@@ -296,8 +294,7 @@ def _launch_unfull_chunk_kernels(
     direction: "lmcache_native.TransferDirection",
     staging: Staging,
 ) -> None:
-    """Launch the kernels of :func:`transfer_unfull_chunk` for an object
-    staged at ``object_buffer`` in ``staging``."""
+    """Launch the unfull chunk's kernels for an object in ``staging``."""
     kernel_group_ids = cache_context.kv_layer_groups_manager.object_groups[
         object_group_id
     ].kernel_group_indices

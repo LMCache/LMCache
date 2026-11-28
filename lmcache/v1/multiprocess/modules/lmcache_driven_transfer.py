@@ -1144,9 +1144,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted. A
-            retrieve of objects no transfer engine can read yet (objects a
-            peer owns) fails.
+            The event handle is empty when no device work was submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1315,9 +1313,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             retrieve_succeeded = True
 
             def finish(succeeded: bool) -> None:
-                """Complete the retrieve, once all its device work is queued
-                on the stream; ``succeeded`` is whether its blocks will hold
-                the cached bytes."""
+                """Complete the retrieve, once its device work is queued."""
                 nonlocal num_tokens, retrieve_succeeded
                 retrieve_succeeded = succeeded
                 event_backend.record_event(event, cache_context.stream)

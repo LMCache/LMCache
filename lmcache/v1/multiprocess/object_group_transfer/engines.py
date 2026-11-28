@@ -123,10 +123,8 @@ def run_step(
 ) -> None:
     """Run one retrieve step with ``engine``.
 
-    An on-stream engine stages the step's objects into the context's own
-    staging and queues its kernels now. An off-stream engine's step is
-    handed to the retrieve the transfer belongs to (``retrieve_transfer``),
-    neither staged nor launched here.
+    On-stream: stage into the context's buffer and queue the kernels now.
+    Off-stream: hand the step to the current retrieve; nothing is queued yet.
 
     Args:
         engine: The engine of every object of the step.
@@ -135,8 +133,7 @@ def run_step(
 
     Raises:
         ValueError: If a host-memory object and its region differ in size.
-        NotImplementedError: If the engine is off-stream and the transfer
-            does not run inside ``retrieve_transfer``.
+        NotImplementedError: Off-stream outside ``retrieve_transfer``.
     """
     if engine in OFF_STREAM_ENGINES:
         hand_off_step(OFF_STREAM_ENGINES[engine], step)

@@ -263,8 +263,7 @@ def _launch_batch_kernels(
         batch_len: Chunks in the batch; chunk ``i`` is in staging slot ``i``.
         skip_tokens_in_chunk: Leading tokens of the batch not written.
         direction: H2D (retrieve) or D2H (store).
-        staging: Where the batch is staged: the cache context, or the slots
-            an off-stream engine read it into.
+        staging: Where the batch is staged.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
@@ -333,8 +332,7 @@ def _batch_step(
     first: int,
     memory_objs: Sequence[MemoryObj],
 ) -> TransferStep:
-    """Describe one retrieve batch: its objects (chunks ``first`` to
-    ``batch_len``), where they land in a staging, and its kernels."""
+    """Describe one retrieve batch (chunks ``first`` to ``batch_len``)."""
 
     def targets(staging: Staging) -> list[torch.Tensor]:
         return [
@@ -385,9 +383,8 @@ def run_staged_loop(
 
     Raises:
         ValueError: If a None entry is found on retrieve.
-        NotImplementedError: If an object is owned by a peer and this is a
-            store, or a retrieve that does not run inside
-            ``retrieve_transfer``.
+        NotImplementedError: For a peer-owned object on a store, or on a
+            retrieve outside ``retrieve_transfer``.
     """
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager

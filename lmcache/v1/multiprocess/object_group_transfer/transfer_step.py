@@ -35,9 +35,10 @@ logger = init_logger(__name__)
 
 
 class Staging(Protocol):
-    """Where one transfer step is staged, indexed by its chunks: chunk ``i``
-    of the step is in slot ``i``. A cache context is one (its shared
-    buffer); an off-stream engine passes a view of its own buffer."""
+    """The buffer a step is staged in; chunk ``i`` of the step is in slot ``i``.
+
+    A cache context is one; an off-stream engine passes a view of its own.
+    """
 
     def get_temp_object_group_buffer(
         self, batch_idx: int, object_group_idx: int
@@ -52,8 +53,7 @@ class Staging(Protocol):
         ...
 
     def get_temp_staging_buffer(self, num_bytes: int) -> torch.Tensor | None:
-        """The first ``num_bytes`` bytes from chunk 0 on, as one flat region;
-        None if they do not fit."""
+        """The first ``num_bytes`` bytes as one flat region; None if too many."""
         ...
 
 
@@ -64,15 +64,10 @@ class TransferStep:
     Attributes:
         memory_objs: The objects to stage, in chunk order; all of one engine.
         block_ids: The block ids the kernels use.
-        targets: ``staging -> regions``: where each object lands, one region
-            per object.
-        launch: ``(staging, block_ids) -> None``: queues the kernels that
-            copy the landed bytes into the paged KV cache.
-        skipped: Chunks of the step before the first object; the kernels
-            skip them, so an off-stream engine gives them no slot.
-        spans_slots: The object may extend past its slot into the following
-            ones (an unfull chunk with lead blocks), so an off-stream engine
-            must stage it where the slots after it are free.
+        targets: ``staging -> regions``: where each object lands.
+        launch: ``(staging, block_ids) -> None``: queues the kernels.
+        skipped: Leading chunks the kernels skip; they need no slot.
+        spans_slots: The object may run past its slot into the next ones.
     """
 
     memory_objs: Sequence[MemoryObj]
@@ -84,31 +79,25 @@ class TransferStep:
 
 
 class RetrieveTransfer:
-    """The device work of one retrieve, whichever engines move its objects.
+    """The device work of one retrieve.
 
-    The transfers of the retrieve run inside :func:`retrieve_transfer`. Steps
-    of on-stream engines are queued as they run; steps of off-stream engines
-    are kept here. :meth:`when_queued` then reports, once, when all of it is
-    queued on the stream.
+    On-stream steps are queued as they run; off-stream steps are kept here
+    until :meth:`when_queued` gives them to their engines.
     """
 
     def __init__(self) -> None:
         self._off_stream: list[tuple[OffStreamEngine | None, TransferStep]] = []
-        # The block ids last handed off and the copy made of them. Holding
-        # the staged list keeps its identity from being reused.
+        # The staged block ids last handed off, and their copy.
         self._block_id_copy: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
 
     def hand_off(self, engine: "OffStreamEngine | None", step: TransferStep) -> None:
-        """Keep an off-stream step for :meth:`when_queued`, with a copy of
-        its block ids: the next transfer restages the buffer they live in.
+        """Keep an off-stream step, with its own copy of the block ids.
 
-        Consecutive steps that pass the same ``block_ids`` list (the batches
-        of one staging) share one copy, so a transfer must not reuse a staged
-        list after restaging the buffer; the engine must not change the copy.
+        The next transfer restages the buffer the ids live in. Steps that
+        pass the same ``block_ids`` list share one copy.
 
         Args:
-            engine: The engine that runs the step; None if there is none for
-                the step's objects, which fails the retrieve.
+            engine: The engine that runs the step; None fails the retrieve.
             step: The step a transfer did not stage.
         """
         copied = self._block_id_copy
@@ -123,21 +112,16 @@ class RetrieveTransfer:
         succeeded: bool,
         on_done: Callable[[bool], None],
     ) -> None:
-        """Call ``on_done`` once all device work of the retrieve is queued on
-        the context's stream. Call once, after the last transfer, on the
-        thread that owns the stream.
+        """Call ``on_done`` once all the retrieve's device work is queued.
 
-        With only on-stream steps that is now. Off-stream steps are given to
-        their engines first, and ``on_done`` runs when the last engine is
-        done, on this thread and under the context's device and stream.
+        With only on-stream steps that is now; otherwise when the last
+        off-stream engine is done. Call once, after the last transfer.
 
         Args:
             cache_context: The retrieve's context.
-            succeeded: Whether every transfer of the retrieve ran; if not,
-                its off-stream steps are dropped.
-            on_done: Receives whether the retrieve's blocks will hold the
-                cached bytes: False if a transfer failed, an off-stream step
-                has no engine, or an engine could not stage its steps.
+            succeeded: Whether every transfer ran; if not, the off-stream
+                steps are dropped.
+            on_done: Receives True if the blocks will hold the cached bytes.
         """
         if not succeeded or not self._off_stream:
             on_done(succeeded)
@@ -171,11 +155,9 @@ _current_retrieve: ContextVar[RetrieveTransfer | None] = ContextVar(
 
 @contextmanager
 def retrieve_transfer() -> Iterator[RetrieveTransfer]:
-    """Run the transfers of one retrieve: the block's transfers, on this
-    thread, belong to the :class:`RetrieveTransfer` it yields.
+    """Scope the transfers of one retrieve, on this thread.
 
-    The steps reach it this way and not as a return value because a transfer
-    runs as the cache context's ``transfer_object_group`` callback, which
+    A context variable carries the steps because ``transfer_object_group``
     returns nothing on every platform.
     """
     transfer = RetrieveTransfer()
@@ -187,17 +169,14 @@ def retrieve_transfer() -> Iterator[RetrieveTransfer]:
 
 
 def hand_off_step(engine: "OffStreamEngine | None", step: TransferStep) -> None:
-    """Hand an off-stream step to the retrieve the calling transfer belongs
-    to (see :meth:`RetrieveTransfer.hand_off`).
+    """Hand an off-stream step to the current retrieve.
 
     Args:
         engine: The engine that runs the step, or None if there is none.
         step: The step a transfer did not stage.
 
     Raises:
-        NotImplementedError: If the transfer does not run inside
-            :func:`retrieve_transfer`: its caller cannot run off-stream
-            steps.
+        NotImplementedError: Outside :func:`retrieve_transfer`.
     """
     transfer = _current_retrieve.get()
     if transfer is None:
@@ -208,7 +187,7 @@ def hand_off_step(engine: "OffStreamEngine | None", step: TransferStep) -> None:
 
 
 class OffStreamEngine(Protocol):
-    """Runs the off-stream steps of retrieves without blocking the caller."""
+    """Runs off-stream retrieve steps without blocking the caller."""
 
     def submit(
         self,
@@ -216,31 +195,24 @@ class OffStreamEngine(Protocol):
         steps: Sequence[TransferStep],
         on_done: Callable[[bool], None],
     ) -> None:
-        """Stage ``steps`` and queue their kernels; return at once. Called by
-        :meth:`RetrieveTransfer.when_queued` on the thread that owns the
-        context's stream, after the retrieve queued its on-stream work.
+        """Stage ``steps`` and queue their kernels; return at once.
 
         Args:
             cache_context: The retrieve's context.
             steps: The steps its transfers handed off.
-            on_done: Called once, on the thread that submitted and under the
-                context's device and stream: True after the last step's
-                kernels are queued, False if the steps could not all be
-                staged (no kernel is queued after the failure).
+            on_done: Called once on the submitting thread: True when the
+                last kernels are queued, False if staging failed.
         """
         ...
 
     def drain(self, cache_context: BaseCacheContext) -> bool:
-        """Wait until every submission of ``cache_context`` is done. Call
-        before closing the context, and not on the thread that owns its
-        stream. From this call on, a submission for the context fails.
+        """Wait for the context's submissions; call before closing it.
 
         Args:
             cache_context: The context about to be closed.
 
         Returns:
-            False if a submission is still running after the engine's
-            timeout: the context must then stay open.
+            False if one is still running after the engine's timeout.
         """
         ...
 
