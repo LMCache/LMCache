@@ -2,6 +2,7 @@
 """P2PController: peer discovery, adapter lifecycle, lookup and write serving."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
@@ -48,6 +49,7 @@ from lmcache.v1.multiprocess.engine_module import (
     ModuleBuildContext,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
+from lmcache.v1.transport.auth import request_client_auth_headers
 
 logger = init_logger(__name__)
 
@@ -179,6 +181,8 @@ class P2PController(DiscoverableModule):
         coordinator_config: Coordinator connection used for peer discovery.
         instance_id: Stable id of this instance, used to exclude itself from the
             discovered peer set.
+        api_key_files: MP server key files; the first key authenticates the
+            peer-discovery poll to a coordinator that enforces API keys.
     """
 
     module_name = "p2p_controller"
@@ -192,6 +196,7 @@ class P2PController(DiscoverableModule):
             build_ctx.mp_config.p2p_config,
             build_ctx.coordinator_config,
             build_ctx.mp_config.instance_id,
+            api_key_files=build_ctx.mp_config.api_key_files,
         )
 
     def __init__(
@@ -200,6 +205,7 @@ class P2PController(DiscoverableModule):
         p2p_config: P2PConfig,
         coordinator_config: CoordinatorConfig,
         instance_id: str,
+        api_key_files: Sequence[str] = (),
     ) -> None:
         self._ctx = ctx
         self._p2p_config = p2p_config
@@ -221,15 +227,18 @@ class P2PController(DiscoverableModule):
         self._poll_thread: PeriodicThread | None = None
 
         if p2p_config.enabled:
-            self._start_orchestration(coordinator_config)
+            self._start_orchestration(coordinator_config, api_key_files)
 
         self._setup_metrics()
 
-    def _start_orchestration(self, coordinator_config: CoordinatorConfig) -> None:
+    def _start_orchestration(
+        self, coordinator_config: CoordinatorConfig, api_key_files: Sequence[str]
+    ) -> None:
         """Initialize the transfer channel and start the peer-poll thread.
 
         Args:
             coordinator_config: Coordinator connection used for peer discovery.
+            api_key_files: Key files whose first key authenticates the poll.
 
         Raises:
             ValueError: There is not exactly one local DRAM L1, or it exposes
@@ -255,7 +264,10 @@ class P2PController(DiscoverableModule):
         )
         self._instances_url = coordinator_config.url.rstrip("/") + "/instances"
         timeout = max(1.0, coordinator_config.heartbeat_interval)
-        self._http_client = httpx.Client(timeout=timeout)
+        self._http_client = httpx.Client(
+            timeout=timeout,
+            headers=request_client_auth_headers(api_key_files),
+        )
         self._poll_thread = create_periodic_thread(
             name="p2p-controller-thread",
             interval=coordinator_config.heartbeat_interval,
