@@ -16,6 +16,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.transport.auth import (
     load_request_client_api_key,
 )
+from lmcache.v1.transport.errors import REQUEST_FAILURES
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.grpc._proto_gen import p2p_service_pb2 as pb
 from lmcache.v1.transport.grpc._proto_gen.p2p_service_pb2_grpc import (
@@ -33,6 +34,13 @@ from lmcache.v1.transport.grpc.utils import GRPC_CHANNEL_OPTIONS, request_error
 from lmcache.v1.transport.rpc import rpc_method
 
 T = TypeVar("T")
+# Deadline of a lookup or probe call. A lookup also fails fast instead of
+# waiting for a connection, so no request waits on a peer that is down, and a
+# lookup queued behind a down peer is dropped at the deadline instead of being
+# sent, and read-locking keys, when the peer comes back. The query keeps
+# waiting for a connection without a deadline: it follows an ack, and the peer
+# hands a result out once, so a reply after a deadline would be lost.
+LOOKUP_RPC_TIMEOUT_S = 3.0
 _lookup_request, _ = compile_request_codec_for_types(
     pb.P2pLookupAndLockRequest, (list[ObjectKey], dict[int, MemoryLayoutDesc])
 )
@@ -105,7 +113,8 @@ class P2PClient:
         """Submit peer keys and group layouts; return the lookup task ID."""
         return _future(
             self._stub.P2PLookupAndLock.future(
-                _lookup_request((keys, group_layout_descs), {}), wait_for_ready=True
+                _lookup_request((keys, group_layout_descs), {}),
+                timeout=LOOKUP_RPC_TIMEOUT_S,
             ),
             lambda reply: int(reply.task_id),
         )
@@ -155,6 +164,52 @@ class P2PClient:
             ),
             _finish_write_result,
         )
+
+    def probe(self) -> MessagingFuture[None]:
+        """Check that the peer answers a lookup: one of no keys, then its query.
+
+        The peer completes an empty lookup at once and locks nothing, so both
+        calls wait for a connection, each up to the lookup deadline, and a
+        peer that is down is probed at most once per deadline.
+
+        Returns:
+            A future that completes when the peer answers the query, or fails
+            with the error of the first call that failed.
+        """
+        probe: MessagingFuture[None] = MessagingFuture()
+
+        def on_query(query: MessagingFuture[Any]) -> None:
+            try:
+                query.result()
+            except REQUEST_FAILURES as exc:
+                probe.set_exception(exc)
+            else:
+                probe.set_result(None)
+
+        def on_ack(ack: MessagingFuture[int]) -> None:
+            try:
+                task_id = ack.result()
+            except REQUEST_FAILURES as exc:
+                probe.set_exception(exc)
+                return
+            _future(
+                self._stub.P2PQueryLookupResults.future(
+                    pb.P2pQueryLookupResultsRequest(task_id=task_id),
+                    wait_for_ready=True,
+                    timeout=LOOKUP_RPC_TIMEOUT_S,
+                ),
+                _query_result,
+            ).add_done_callback(on_query)
+
+        _future(
+            self._stub.P2PLookupAndLock.future(
+                _lookup_request(([], {}), {}),
+                wait_for_ready=True,
+                timeout=LOOKUP_RPC_TIMEOUT_S,
+            ),
+            lambda reply: int(reply.task_id),
+        ).add_done_callback(on_ack)
+        return probe
 
     def close(self) -> None:
         """Close the peer channel and cancel outstanding calls."""

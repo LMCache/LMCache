@@ -109,7 +109,31 @@ shared with those callbacks and guarded by a lock. Failures stay bounded:
   connection is seen to drop, and a copy of one stuck behind an unready
   channel or a silent peer would wait the same way;
 - a failed query is retried once, and a second failure is a miss;
-- the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup.
+- the lookup deadline (`lookup_timeout_s`) still bounds the whole lookup;
+- a lookup acknowledgement that fails because the peer is down
+  (`UNAVAILABLE` or `CANCELLED`) or past the ~3 s lookup RPC deadline (a
+  frozen peer) marks the peer unhealthy (`_PeerHealth`); other ack errors
+  are only a miss. While marked, lookups to the peer are a miss at once,
+  without an RPC, and the first of them sends a probe that no request waits
+  on: a lookup of no keys and its query. The peer completes such a lookup at
+  once and locks nothing, so both calls wait for a connection with the ~3 s
+  deadline, and a peer that is down is probed at most once per deadline. An
+  answered probe clears the mark. Trade-off: a peer that acks lookups but
+  never answers their queries is not marked, and each lookup to it waits
+  `lookup_timeout_s`.
+
+The lookup RPC fails fast instead of waiting for a connection and has the
+~3 s deadline, so lookups no longer pile up behind a peer that is down:
+waiting for a connection, they were all sent, and read-locked their keys
+until the peer's read TTL, when the peer came back. The query still waits
+for a connection and has no deadline: it is only sent after the peer acked,
+so a short connection drop delays it instead of losing the result, and the
+peer hands a result out once, so a reply after a deadline would be lost
+with its read locks.
+The deadline does not stop a peer from running a lookup that it received in
+time but handled after the deadline (for example while its handler threads
+were busy): the requester has dropped it by then, so its read locks last
+until the TTL.
 
 The transfer-channel read exposes no completion fd: the RDMA read completes
 inside the transfer engine. So the adapter also registers its lookup and load

@@ -108,6 +108,9 @@ class _FakeOwner:
                 self.locks.pop(key, None)
         return _Future(None)
 
+    def probe(self) -> _Future:
+        return _Future(None)
+
     def close(self) -> None:
         pass
 

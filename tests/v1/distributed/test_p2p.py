@@ -3,19 +3,24 @@
 
 # Standard
 from collections.abc import Callable
+from concurrent import futures
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 import argparse
+import threading
+import time
 
 # Third Party
+import grpc
 import pytest
 import torch
 
 # First Party
 from lmcache.v1.client.transport.factory import RequestClientFactory
 from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.distributed import p2p as p2p_mod
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -42,7 +47,14 @@ from lmcache.v1.multiprocess.transport.grpc_impl.server_builder import (
     build_grpc_request_server,
 )
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
-from lmcache.v1.transport.errors import MPRequestError
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
+from lmcache.v1.transport.grpc._proto_gen import (
+    p2p_service_pb2,
+    p2p_service_pb2_grpc,
+)
 from tests.v1.multiprocess.transport_test_utils import requires_pygrpc_native
 
 
@@ -189,12 +201,16 @@ def test_independent_peer_channel(
         TransferChannelAddress(offset=-1, size=0),
     ]
     unlocked = []
+    queried = []
 
     class Peer(P2PController):
         @request_handler(HandlerType.BLOCKING)
         def p2p_lookup_and_lock(
             self, keys: list[ObjectKey], group_layout_descs: dict[int, MemoryLayoutDesc]
         ) -> int:
+            if not keys:  # the probe
+                assert group_layout_descs == {}
+                return 7
             assert keys == [ObjectKey(b"chunk", "model", 0)]
             assert group_layout_descs == layouts
             return 41
@@ -203,7 +219,8 @@ def test_independent_peer_channel(
         def p2p_query_lookup_results(
             self, task_id: int
         ) -> list[TransferChannelAddress] | None:
-            return None if task_id == 0 else addresses
+            queried.append(task_id)
+            return {0: None, 7: []}.get(task_id, addresses)
 
         @request_handler(HandlerType.BLOCKING)
         def p2p_unlock_objects(self, keys: list[ObjectKey]) -> None:
@@ -277,6 +294,8 @@ def test_independent_peer_channel(
         assert client.p2p_query_lookup_results(41).result(5) == addresses
         assert client.p2p_unlock_objects(keys).result(5) is None
         assert unlocked == keys
+        assert client.probe().result(5) is None
+        assert queried[-1] == 7
         write_keys = [ObjectKey(b"a", "model", 0), ObjectKey(b"b", "model", 0)]
         assert client.p2p_reserve_write(write_keys, layouts[0]).result(5) == (
             write_addresses
@@ -300,3 +319,64 @@ def test_independent_peer_channel(
         worker_client.close()
         worker.close()
         engine.close()
+
+
+def test_lookup_fails_fast_the_query_waits_for_the_peer(
+    monkeypatch: pytest.MonkeyPatch,
+    unused_tcp_port_factory: Callable[[], int],
+) -> None:
+    """A lookup does not wait for a peer that is down, and fails at the
+    deadline on a peer that accepts calls but never answers. A query (sent
+    only after an ack) waits for the connection instead, so a peer that is
+    briefly unreachable still hands over its result, and it has no deadline:
+    an answer after the lookup deadline is still returned. A probe (a lookup
+    of no keys and its query) waits for a connection, up to the deadline."""
+    monkeypatch.setattr(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 1.0)
+    keys = [ObjectKey(b"chunk", "model", 0)]
+    layouts = {0: MemoryLayoutDesc([torch.Size([2, 4])], [torch.float16])}
+    addresses = [TransferChannelAddress(offset=8, size=16)]
+    port = unused_tcp_port_factory()
+    client = P2PClient(f"grpc://127.0.0.1:{port}")
+    frozen = threading.Event()
+
+    class Peer(p2p_service_pb2_grpc.P2PServiceServicer):
+        def P2PLookupAndLock(self, request: Any, context: Any) -> Any:
+            if request.keys:
+                frozen.wait()
+            return p2p_service_pb2.P2pLookupAndLockResponse(task_id=7)
+
+        def P2PQueryLookupResults(self, request: Any, context: Any) -> Any:
+            if request.task_id == 7:
+                return p2p_service_pb2.P2pQueryLookupResultsResponse(
+                    addresses=p2p_service_pb2.TransferChannelAddressList()
+                )
+            time.sleep(1.5)  # past the 1 s deadline
+            return p2p_service_pb2.P2pQueryLookupResultsResponse(
+                addresses=p2p_service_pb2.TransferChannelAddressList(
+                    addresses=[
+                        p2p_service_pb2.TransferChannelAddress(offset=8, size=16)
+                    ]
+                )
+            )
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    p2p_service_pb2_grpc.add_P2PServiceServicer_to_server(Peer(), server)
+    try:
+        with pytest.raises(MPServerUnavailableError):
+            client.p2p_lookup_and_lock(keys, layouts).result(5)
+        with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
+            client.probe().result(5)
+        query = client.p2p_query_lookup_results(0)
+        time.sleep(1.5)  # the peer is down for longer than the deadline
+        assert not query.query()
+
+        server.add_insecure_port(f"127.0.0.1:{port}")
+        server.start()
+        assert query.result(10) == addresses
+        assert client.probe().result(5) is None
+        with pytest.raises(MPRequestError, match="DEADLINE_EXCEEDED"):
+            client.p2p_lookup_and_lock(keys, layouts).result(5)
+    finally:
+        frozen.set()
+        client.close()
+        server.stop(None)

@@ -34,7 +34,7 @@ The request client and the transfer-channel client lock internally.
 from abc import abstractmethod
 from contextlib import ExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 import functools
 import threading
 import time
@@ -57,17 +57,20 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
-from lmcache.v1.distributed.p2p import P2PClient
+from lmcache.v1.distributed.p2p import LOOKUP_RPC_TIMEOUT_S, P2PClient
 from lmcache.v1.distributed.transfer_channel import get_transfer_channel_context
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import HAS_EVENTFD, create_event_notifier
-from lmcache.v1.transport.errors import REQUEST_FAILURES
+from lmcache.v1.transport.errors import (
+    REQUEST_FAILURES,
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
 
 logger = init_logger(__name__)
 
-_LOOKUP_RPC_TIMEOUT_S = 3.0
 _PERIODIC_NOTIFIER_INTERVAL_MS = 5
 
 
@@ -230,6 +233,108 @@ def _unregister_from_notifier(fd: int) -> None:
         notifier.unregister_fd(fd)
 
 
+class _PeerHealth:
+    """Whether lookups are sent to one peer, and the probe that clears it.
+
+    A lookup ack that fails because the peer is down or past the deadline
+    marks the peer unhealthy; lookups then miss without an RPC. The first
+    lookup after that sends a probe, which no request waits on, and an
+    answered probe clears the mark. One probe is in flight at a time, and
+    nothing runs on a timer: probes start only from :meth:`check_health`.
+
+    Args:
+        peer_url: The peer's RPC endpoint, for the log.
+        send_probe: Sends one probe; its future completes when the peer
+            answers it, or fails with the call's error.
+    """
+
+    def __init__(
+        self, peer_url: str, send_probe: Callable[[], MessagingFuture[None]]
+    ) -> None:
+        self._peer_url = peer_url
+        self._send_probe = send_probe
+        # Probe and ack callbacks run on the gRPC channel's thread.
+        self._lock = threading.Lock()
+        self._healthy = True
+        self._probing = False
+        self._closed = False
+
+    @property
+    def is_healthy(self) -> bool:
+        """Whether lookups are sent to the peer."""
+        return self._healthy
+
+    def check_health(self) -> bool:
+        """Return whether to send a lookup; if not, probe the peer.
+
+        Returns:
+            True if the peer is healthy. False if it is marked, in which case
+            a probe is sent unless one is already in flight.
+        """
+        with self._lock:
+            if self._healthy:
+                return True
+            if self._probing:
+                return False
+            self._probing = True
+        # Outside the lock: a probe that is already done runs its callback here.
+        self._send_probe().add_done_callback(self._on_probe_done)
+        return False
+
+    def close(self) -> None:
+        """Stop marking the peer: closing the client cancels calls in flight."""
+        with self._lock:
+            self._closed = True
+
+    def observe(self, future: MessagingFuture[int]) -> None:
+        """Mark the peer if a lookup ack failed because it is unreachable.
+
+        A done-callback of the lookup future. Only ``UNAVAILABLE`` or
+        ``CANCELLED`` (both :class:`MPServerUnavailableError`) and
+        ``DEADLINE_EXCEEDED`` mark the peer; any other outcome is left to the
+        lookup itself. The first mark of an outage is logged with the error.
+
+        Args:
+            future: The completed ``p2p_lookup_and_lock`` future.
+        """
+        try:
+            future.result()
+        # Broad like _on_lookup_ack: other errors are that lookup's miss, and
+        # one escaping a callback would only be logged again.
+        except Exception as exc:
+            if not (
+                isinstance(exc, MPServerUnavailableError)
+                or (isinstance(exc, MPRequestError) and exc.code == "DEADLINE_EXCEEDED")
+            ):
+                return
+            with self._lock:
+                if self._closed or not self._healthy:
+                    return
+                self._healthy = False
+            logger.exception(
+                "P2P lookup to %s failed; skipping the peer until a probe is answered",
+                self._peer_url,
+            )
+
+    def _on_probe_done(self, future: MessagingFuture[None]) -> None:
+        """End the probe; an answered one clears the mark.
+
+        Args:
+            future: The completed probe future.
+        """
+        try:
+            future.result()
+        # A failure only ends this probe: the next lookup sends another.
+        except REQUEST_FAILURES:
+            with self._lock:
+                self._probing = False
+            return
+        with self._lock:
+            self._probing = False
+            self._healthy = True
+        logger.info("P2P peer %s answered a probe; looking it up again", self._peer_url)
+
+
 class PeerL2AdapterBase(L2AdapterInterface):
     """Shared control plane for adapters that read one peer's region.
 
@@ -276,6 +381,11 @@ class PeerL2AdapterBase(L2AdapterInterface):
                 config.peer_mq_server_url,
             )
             resources.callback(self._req_client.close)
+            self._health = _PeerHealth(
+                config.peer_mq_server_url, self._req_client.probe
+            )
+            # Runs before the client closes (LIFO).
+            resources.callback(self._health.close)
             self._store_efd = create_event_notifier()
             resources.callback(self._store_efd.close)
             self._lookup_efd = create_event_notifier()
@@ -355,14 +465,20 @@ class PeerL2AdapterBase(L2AdapterInterface):
         task = _LookupTask(
             keys=keys,
             deadline=now + self._config.lookup_timeout_s,
-            ack_deadline=now + _LOOKUP_RPC_TIMEOUT_S,
+            ack_deadline=now + LOOKUP_RPC_TIMEOUT_S,
         )
         with self._lookup_lock:
             self._lookup_tasks[task_id] = task
             if self._closed:
                 task.failed = True
                 return task_id
+            if not self._health.check_health():
+                task.failed = True
+                self._lookup_efd.notify()
+                return task_id
             future = self._req_client.p2p_lookup_and_lock(keys, group_layout_descs)
+            # Before _on_lookup_ack, which logs a failure only while healthy.
+            future.add_done_callback(self._health.observe)
             future.add_done_callback(lambda fut: self._on_lookup_ack(task_id, fut))
         return task_id
 
@@ -429,9 +545,12 @@ class PeerL2AdapterBase(L2AdapterInterface):
         self._resources.close()
 
     def report_status(self) -> dict[str, Any]:
-        """Return health, the peer endpoint and the in-flight lookup count."""
+        """Return health, the peer endpoint and the in-flight lookup count.
+
+        ``is_healthy`` is False while lookups to the peer are skipped.
+        """
         return {
-            "is_healthy": True,
+            "is_healthy": self._health.is_healthy,
             "peer_mq_server_url": self._config.peer_mq_server_url,
             "in_flight_lookups": len(self._lookup_tasks),
         }
@@ -489,7 +608,7 @@ class PeerL2AdapterBase(L2AdapterInterface):
         # escapes the callback is only logged, leaving the task pending until
         # its ack deadline.
         except Exception:
-            if not self._closed:
+            if not self._closed and self._health.is_healthy:
                 logger.exception(
                     "P2P lookup submit to %s failed; treating as a miss",
                     self._config.peer_mq_server_url,

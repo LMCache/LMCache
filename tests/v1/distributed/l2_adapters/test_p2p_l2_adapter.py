@@ -4,6 +4,7 @@
 # Standard
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
+import logging
 import queue
 import select
 import threading
@@ -33,7 +34,10 @@ from lmcache.v1.distributed.l2_adapters.p2p_l2_adapter import (
     PeerL2AdapterBase,
 )
 from lmcache.v1.distributed.p2p import P2PClient
-from lmcache.v1.transport.errors import MPRequestError
+from lmcache.v1.transport.errors import (
+    MPRequestError,
+    MPServerUnavailableError,
+)
 from lmcache.v1.transport.futures import MessagingFuture
 
 _LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
@@ -656,7 +660,7 @@ def test_unacknowledged_lookup_is_a_miss_at_the_rpc_timeout():
     """A peer that never acknowledges costs the RPC timeout, not the much
     longer lookup deadline."""
     with (
-        patch.object(p2p_mod, "_LOOKUP_RPC_TIMEOUT_S", 0.05),
+        patch.object(p2p_mod, "LOOKUP_RPC_TIMEOUT_S", 0.05),
         _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_),
     ):
         req_client.p2p_lookup_and_lock.return_value = _PendingFuture()
@@ -1177,3 +1181,178 @@ def test_replies_from_another_thread_resolve_each_lookup_once():
         assert not pending
         assert all(adapter.query_lookup_and_lock_result(t) is None for t in task_ids)
         assert adapter.report_status()["in_flight_lookups"] == 0
+
+
+@pytest.mark.parametrize(
+    "ack_error",
+    [
+        MPServerUnavailableError("UNAVAILABLE", "peer down"),
+        MPRequestError("DEADLINE_EXCEEDED", "peer frozen"),
+    ],
+    ids=["down", "frozen"],
+)
+def test_unacknowledged_peer_is_skipped_until_a_probe_is_answered(ack_error):
+    """After a lookup is not acknowledged, every lookup to the peer is a
+    signalled miss at once with no RPC, and the adapter reports itself
+    unhealthy. The first of them sends a probe that no request waits on, one
+    at a time; a failed probe keeps the peer skipped and the next lookup
+    probes again; an answered probe ends it."""
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    first_ack, straggler_ack = _PendingFuture(), _PendingFuture()
+    probes = [_PendingFuture() for _ in range(2)]
+    with _adapter(lookup_timeout_s=30.0) as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            first_ack,
+            straggler_ack,
+            _FakeFuture(value=7),
+        ]
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
+        req_client.probe.side_effect = probes
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+
+        def submit() -> int:
+            return adapter.submit_lookup_and_lock_task([_key(9)], {0: _LAYOUT})
+
+        def assert_skipped() -> None:
+            task_id = submit()
+            assert _fd_ready(lookup_fd)
+            assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+            assert req_client.p2p_lookup_and_lock.call_count == 2
+            assert adapter.report_status()["is_healthy"] is False
+
+        first = submit()
+        submit()
+        assert adapter.report_status()["is_healthy"] is True
+        first_ack.resolve(exc=ack_error)
+        assert adapter.query_lookup_and_lock_result(first).popcount() == 0
+
+        # The first lookup after the failure probes at once, even with
+        # another lookup from before the failure still unacknowledged.
+        assert_skipped()
+        assert req_client.probe.call_count == 1
+        straggler_ack.resolve(exc=ack_error)
+        assert_skipped()  # the probe is still pending: no second one
+        assert req_client.probe.call_count == 1
+        probes[0].resolve(exc=ack_error)  # the peer is still out
+        assert_skipped()
+        assert req_client.probe.call_count == 2
+
+        probes[1].resolve()  # answered: the peer is back
+        assert adapter.report_status()["is_healthy"] is True
+        assert adapter.query_lookup_and_lock_result(submit()).popcount() == 1
+        assert req_client.p2p_lookup_and_lock.call_count == 3
+        assert req_client.probe.call_count == 2
+
+
+def test_a_peer_error_on_an_ack_does_not_skip_the_peer():
+    """An ack the peer answered with an error is a miss for that lookup only:
+    the next lookup is still sent and no probe goes out."""
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPRequestError("INTERNAL", "boom")),
+            _PendingFuture(),
+        ]
+        task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        assert adapter.query_lookup_and_lock_result(task_id).popcount() == 0
+        adapter.submit_lookup_and_lock_task([_key(1)], {0: _LAYOUT})
+        assert req_client.p2p_lookup_and_lock.call_count == 2
+        req_client.probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "ack_error",
+    [
+        MPServerUnavailableError("UNAVAILABLE", "peer down"),
+        MPRequestError("DEADLINE_EXCEEDED", "peer frozen"),
+    ],
+    ids=["down", "frozen"],
+)
+def test_one_traceback_per_outage(ack_error, caplog, monkeypatch):
+    """A run of failed acks to an unreachable peer logs one traceback for the
+    outage, a probe that fails adds none, and the next outage after the peer
+    recovers logs one again."""
+    acks: list[_PendingFuture] = []
+    probes: list[_PendingFuture] = []
+
+    def send_lookup(*_args) -> _PendingFuture:
+        acks.append(_PendingFuture())
+        return acks[-1]
+
+    def send_probe() -> _PendingFuture:
+        probes.append(_PendingFuture())
+        return probes[-1]
+
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = send_lookup
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(
+            value=[TransferChannelAddress(offset=100, size=10)]
+        )
+        req_client.probe.side_effect = send_probe
+        # The lmcache logger does not propagate, so caplog would see nothing.
+        monkeypatch.setattr(p2p_mod.logger, "handlers", [caplog.handler])
+
+        def submit() -> int:
+            return adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+
+        def tracebacks() -> int:
+            return sum(r.exc_info is not None for r in caplog.records)
+
+        for outage in (1, 2):
+            run = [submit() for _ in range(5)]
+            for ack in acks[-5:]:
+                ack.resolve(exc=ack_error)
+            assert all(
+                adapter.query_lookup_and_lock_result(t).popcount() == 0 for t in run
+            )
+            assert tracebacks() == outage
+
+            submit()  # skipped; sends a probe
+            probes[-1].resolve(exc=ack_error)  # the peer is still out
+            assert tracebacks() == outage
+
+            submit()  # probe again
+            probes[-1].resolve()  # the peer is back
+            task_id = submit()
+            acks[-1].resolve(value=7)
+            assert adapter.query_lookup_and_lock_result(task_id).popcount() == 1
+            assert tracebacks() == outage
+        assert req_client.p2p_lookup_and_lock.call_count == 12
+        assert req_client.probe.call_count == 4
+
+
+def test_closing_with_a_lookup_in_flight_logs_no_error(caplog, monkeypatch):
+    """Closing the adapter cancels its calls; the cancelled ack of a lookup
+    in flight neither logs an error nor marks the peer."""
+    ack = _PendingFuture()
+    with _adapter() as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.return_value = ack
+        monkeypatch.setattr(p2p_mod.logger, "handlers", [caplog.handler])
+        adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+        adapter.close()
+        ack.resolve(exc=MPServerUnavailableError("CANCELLED", "channel closed"))
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert adapter.report_status()["is_healthy"] is True
+
+
+def test_peer_recovers_when_lookups_are_further_apart_than_the_lookup_timeout():
+    """An answered probe brings the peer back even when lookups arrive less
+    often than lookup_timeout_s."""
+    addresses = [TransferChannelAddress(offset=100, size=10)]
+    with _adapter(lookup_timeout_s=0.1) as (adapter, req_client, *_):
+        req_client.p2p_lookup_and_lock.side_effect = [
+            _FakeFuture(exc=MPServerUnavailableError("UNAVAILABLE", "down")),
+        ] + [_FakeFuture(value=7)] * 8
+        req_client.p2p_query_lookup_results.return_value = _FakeFuture(value=addresses)
+        req_client.probe.return_value = _FakeFuture()  # every probe answered
+
+        def lookup() -> int:
+            task_id = adapter.submit_lookup_and_lock_task([_key(0)], {0: _LAYOUT})
+            return adapter.query_lookup_and_lock_result(task_id).popcount()
+
+        assert lookup() == 0
+        hits = []
+        for _ in range(8):
+            time.sleep(0.15)
+            hits.append(lookup())
+        assert sum(hits) >= 7
+        assert req_client.probe.call_count == 1
