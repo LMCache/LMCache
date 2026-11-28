@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""RBLN server SHM pool policy: the server never registers host memory.
+"""RBLN SHM registration policy without an NPU.
 
-The worker's registration round trip runs on an NPU in
-``test_rbln_host_registration.py``. These tests remove ``torch.rbln``
-entirely, so any registration attempt on the server path fails them.
+The server never registers host memory, and a worker on a torch-rbln release
+without host registration fails with an upgrade message. The worker's
+registration round trip runs on an NPU in ``test_rbln_host_registration.py``.
+These tests remove ``torch.rbln``, so any registration attempt fails them.
 """
 
 # Standard
+from types import SimpleNamespace
 from uuid import uuid4
 import ctypes
+import importlib.metadata
 
 # Third Party
 import pytest
@@ -18,6 +21,7 @@ import torch
 from lmcache.v1.distributed import config
 from lmcache.v1.platform.devices.rbln import RblnDeviceSpec
 from lmcache.v1.platform.devices.rbln.device_ops import RblnDeviceOps
+from lmcache.v1.platform.devices.rbln.pin_memory import RblnPinMemoryBackend
 from lmcache.v1.platform.posix_shm import shm_open_pool_as_mmap
 from lmcache.v1.platform.torch_ops import mem_alloc
 
@@ -57,3 +61,16 @@ def test_l1_config_preserves_shm_and_disables_lazy(
     )
     assert not cfg.use_lazy
     assert cfg.shm_name == "rbln-test-l1"
+
+
+def test_worker_registration_requires_torch_rbln_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older torch-rbln is refused by version before ``torch.rbln`` is used."""
+    # torch-rbln 0.12.0 has no host_register; an empty module makes any
+    # attribute lookup fail, so reaching torch.rbln would raise AttributeError.
+    monkeypatch.setattr(torch, "rbln", SimpleNamespace(), raising=False)
+    versions = {"torch-rbln": "0.12.0"}
+    monkeypatch.setattr(importlib.metadata, "version", versions.__getitem__)
+    with pytest.raises(RuntimeError, match=r"torch-rbln 0\.12\.1a0.*0\.12\.0"):
+        RblnPinMemoryBackend().pin_memory(4096, 4096)

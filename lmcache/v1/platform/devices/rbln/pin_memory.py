@@ -7,9 +7,11 @@ from __future__ import annotations
 # Standard
 from collections.abc import Iterator
 from contextlib import contextmanager
+import importlib.metadata
 import threading
 
 # Third Party
+from packaging.version import Version
 import torch
 
 # First Party
@@ -18,6 +20,23 @@ from lmcache.v1.platform.base.pin_memory import PinMemoryBackend
 
 logger = init_logger(__name__)
 _registration_scope = threading.local()
+# First torch-rbln release with host_register and host_unregister.
+_MIN_TORCH_RBLN = Version("0.12.1a0")
+
+
+def _require_host_registration() -> None:
+    """Fail with an upgrade message when torch-rbln predates host registration.
+
+    Raises:
+        RuntimeError: If the installed torch-rbln is older than 0.12.1a0.
+    """
+    installed = importlib.metadata.version("torch-rbln")
+    if Version(installed) < _MIN_TORCH_RBLN:
+        raise RuntimeError(
+            f"Registering the SHM pool on RBLN requires torch-rbln "
+            f"{_MIN_TORCH_RBLN} or later, but {installed} is installed; "
+            "upgrade torch-rbln."
+        )
 
 
 @contextmanager
@@ -60,12 +79,16 @@ class RblnPinMemoryBackend(PinMemoryBackend):
             ``skip_host_registration()``, or when the runtime refuses the range
             (for example, one already registered on this device) or cannot
             register host memory.
+
+        Raises:
+            RuntimeError: If the installed torch-rbln is older than 0.12.1a0.
         """
         del flags
         if getattr(_registration_scope, "skip", False):
             return False
         if ptr <= 0 or size <= 0:
             return False
+        _require_host_registration()
         device = torch.rbln.current_device()
         try:
             registered = torch.rbln.host_register(ptr, size, device=device)

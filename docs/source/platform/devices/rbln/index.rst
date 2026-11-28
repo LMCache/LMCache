@@ -66,9 +66,10 @@ As on GPUs, start an LMCache server and point vLLM-RBLN at it with
        }'
 
 With ``--shm-name``, the worker registers its mapping of the server's pool
-with its NPU (torch-rbln 0.12.1a0 and later), so transfers copy to and from
-the pool directly. The pool must fit the device's host registration budget
-(16 GiB for a pool on ordinary 4 KiB pages).
+with its NPU, so transfers copy to and from the pool directly. This needs
+torch-rbln 0.12.1a0 or later; on an older release the worker stops with an
+error that asks for the upgrade. The pool must fit the device's host
+registration budget (16 GiB for a pool on ordinary 4 KiB pages).
 
 Three settings are specific to RBLN:
 
