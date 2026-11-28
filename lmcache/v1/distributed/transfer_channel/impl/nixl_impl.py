@@ -2,10 +2,9 @@
 """Nixl-backed implementation of the transfer channel abstraction."""
 
 # Standard
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, TypeVar, Union
 import importlib
 import itertools
-import math
 import threading
 import uuid
 
@@ -32,8 +31,8 @@ from lmcache.v1.distributed.transfer_channel.factory import (
 
 if TYPE_CHECKING:
     # Third Party
-    from nixl._api import nixl_agent, nixl_agent_config, nixl_prepped_dlist_handle
-    from nixl._bindings import nixlRegDList
+    from nixl._api import nixl_agent, nixl_agent_config
+    from nixl._bindings import nixlRegDList, nixlXferDList
 
 logger = init_logger(__name__)
 
@@ -41,6 +40,11 @@ logger = init_logger(__name__)
 # misconfigured/unreachable server url would block the connecting thread
 # forever. Hard-coded for now.
 _HANDSHAKE_TIMEOUT_MS = 60_000
+
+# Bumped whenever the handshake messages change, so peers on either side of
+# the change fail the first stage with a clear error instead of misreading the
+# second. Peers that predate the field count as version 0.
+_HANDSHAKE_PROTOCOL_VERSION = 2
 
 
 ############################################################
@@ -69,6 +73,15 @@ def _parse_url(url: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def _version_mismatch_message(peer_version: int, who: str) -> str:
+    """Describe a handshake protocol mismatch for logs and errors."""
+    return (
+        f"Transfer channel protocol mismatch: {who} speaks version "
+        f"{peer_version}, this side speaks {_HANDSHAKE_PROTOCOL_VERSION}. "
+        f"Run the same LMCache version on both peers."
+    )
+
+
 ############################################################
 # Handshake messages (msgspec, tagged union)
 ############################################################
@@ -79,24 +92,32 @@ class HandshakeMsgBase(msgspec.Struct, tag=True):
 class InitReq(HandshakeMsgBase):
     agent_name: str
     agent_meta: bytes
+    # Peers before the field existed decode as version 0.
+    protocol_version: int = 0
 
 
 class InitResp(HandshakeMsgBase):
     agent_name: str
     agent_meta: bytes
+    protocol_version: int = 0
 
 
 class MemRegReq(HandshakeMsgBase):
     sender_agent_name: str
     sender_advertise_url: str
-    xfer_descs: bytes
+    l1_base_ptr: int
 
 
 class MemRegResp(HandshakeMsgBase):
-    xfer_descs: bytes
+    l1_base_ptr: int
 
 
-HandshakeMsg = Union[InitReq, InitResp, MemRegReq, MemRegResp]
+class ErrorResp(HandshakeMsgBase):
+    message: str
+
+
+HandshakeMsg = Union[InitReq, InitResp, MemRegReq, MemRegResp, ErrorResp]
+_ReplyT = TypeVar("_ReplyT", InitResp, MemRegResp)
 
 
 ############################################################
@@ -107,11 +128,11 @@ class NixlTransferChannelClient(TransferChannelClient):
         self,
         context: "NixlTransferChannelContext",
         remote_agent_name: str,
-        remote_dlist_handle: "nixl_prepped_dlist_handle",
+        remote_l1_base_ptr: int,
     ):
         self._ctx = context
         self._remote_agent_name = remote_agent_name
-        self._remote_handle = remote_dlist_handle
+        self._remote_l1_base_ptr = remote_l1_base_ptr
 
         self._task_counter = 0
         # task_id -> (xfer_handle, remote_addresses)
@@ -193,7 +214,7 @@ class NixlTransferChannelClient(TransferChannelClient):
 
     def close(self) -> None:
         """
-        Close the transfer channel, releasing any pending tasks and the remote handle.
+        Close the transfer channel, releasing any pending tasks.
 
         Note:
             This function does not send any notifications to the server side. The
@@ -207,12 +228,6 @@ class NixlTransferChannelClient(TransferChannelClient):
                 self._ctx.agent.release_xfer_handle(handle)
             except Exception:  # noqa: BLE001 - best-effort cleanup
                 pass
-        if self._remote_handle is not None:
-            try:
-                self._ctx.agent.release_dlist_handle(self._remote_handle)
-            except Exception:  # noqa: BLE001
-                pass
-            self._remote_handle = None
 
     def _submit_transfer(
         self,
@@ -241,17 +256,22 @@ class NixlTransferChannelClient(TransferChannelClient):
 
         if local_region is None:
             local_region = self._ctx.default_region
-        local_idx = self._ctx.addresses_to_indices(local_addresses)
-        remote_idx = self._ctx.addresses_to_indices(remote_addresses)
-
+        # One descriptor per object, built per transfer: a prepped list would
+        # need one descriptor per alignment page of the whole region, which
+        # makes the handshake and each submit cost scale with bytes.
         agent = self._ctx.agent
-        handle = agent.make_prepped_xfer(
-            operation,
-            self._ctx.local_handles[local_region],
-            local_idx,
-            self._remote_handle,
-            remote_idx,
+        local_descs = self._ctx.get_local_xfer_descs(local_region, local_addresses)
+        remote_descs = agent.get_xfer_descs(
+            [
+                (self._remote_l1_base_ptr + a.offset, a.size, 0)
+                for a in remote_addresses
+            ],
+            "cpu",
         )
+        with self._ctx.remote_md_lock:
+            handle = agent.initialize_xfer(
+                operation, local_descs, remote_descs, self._remote_agent_name
+            )
         agent.transfer(handle)
 
         with self._lock:
@@ -305,9 +325,23 @@ class NixlTransferChannelServer(TransferChannelServer):
                 if self._socket not in events:
                     continue
                 req_bytes = self._socket.recv()
+            except Exception:  # noqa: BLE001
+                if self._running:
+                    logger.exception("Error in transfer channel server loop")
+                continue
+            # A REP socket accepts no request until it replies to this one, so
+            # every received request gets a reply, an error one if handling
+            # fails; otherwise one bad request blocks every later handshake.
+            try:
                 req = msgspec.msgpack.decode(req_bytes, type=HandshakeMsg)
-                resp = self._handle_msg(req)
-                self._socket.send(msgspec.msgpack.encode(resp))
+                resp_bytes = msgspec.msgpack.encode(self._handle_msg(req))
+            except Exception as err:  # noqa: BLE001
+                logger.exception("Rejected a transfer channel handshake request")
+                resp_bytes = msgspec.msgpack.encode(
+                    ErrorResp(message=f"{type(err).__name__}: {err}")
+                )
+            try:
+                self._socket.send(resp_bytes)
             except Exception:  # noqa: BLE001
                 if self._running:
                     logger.exception("Error in transfer channel server loop")
@@ -315,27 +349,30 @@ class NixlTransferChannelServer(TransferChannelServer):
     def _handle_msg(self, req: HandshakeMsg) -> HandshakeMsg:
         agent = self._ctx.agent
         if isinstance(req, InitReq):
+            if req.protocol_version != _HANDSHAKE_PROTOCOL_VERSION:
+                message = _version_mismatch_message(
+                    req.protocol_version, f"dialing agent {req.agent_name!r}"
+                )
+                logger.warning("%s", message)
+                return ErrorResp(message=message)
             # Learn the connecting peer's agent (idempotent on repeat).
-            agent.add_remote_agent(req.agent_meta)
+            with self._ctx.remote_md_lock:
+                agent.add_remote_agent(req.agent_meta)
             return InitResp(
                 agent_name=self._ctx.agent_name,
                 agent_meta=agent.get_agent_metadata(),
+                protocol_version=_HANDSHAKE_PROTOCOL_VERSION,
             )
         elif isinstance(req, MemRegReq):
-            remote_xfer_dlist = agent.deserialize_descs(req.xfer_descs)
-            remote_handle = agent.prep_xfer_dlist(
-                req.sender_agent_name, remote_xfer_dlist
-            )
-
             self._ctx.register_client(
                 key=req.sender_advertise_url,
                 client=NixlTransferChannelClient(
                     context=self._ctx,
                     remote_agent_name=req.sender_agent_name,
-                    remote_dlist_handle=remote_handle,
+                    remote_l1_base_ptr=req.l1_base_ptr,
                 ),
             )
-            return MemRegResp(xfer_descs=self._ctx.serialized_xfer_descs)
+            return MemRegResp(l1_base_ptr=self._ctx.l1_base_ptr)
         else:
             raise ValueError(f"Unexpected handshake message: {type(req)}")
 
@@ -377,6 +414,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         nixl_agent, nixl_agent_config = _load_nixl()
 
         self._l1_memory_desc = l1_memory_desc
+        self.l1_base_ptr = l1_memory_desc.ptr
         self._align = l1_memory_desc.align_bytes
         self.listen_url = listen_url
         self.advertise_url = advertise_url
@@ -384,12 +422,18 @@ class NixlTransferChannelContext(TransferChannelContext):
 
         self.agent_name = str(uuid.uuid4())
         self.agent = nixl_agent(self.agent_name, nixl_agent_config(backends=backends))
+        # Transfers resolve the remote agent's metadata on every submit, from
+        # the prefetch and store threads, while the handshake can add a remote
+        # agent at any time. The agent runs without internal locking, so this
+        # lock serializes those calls.
+        self.remote_md_lock = threading.Lock()
 
         # Local regions by id. L1 is registered first and is the only one
         # peers see.
         self._region_sizes: dict[int, int] = {}
         self._reg_descs: dict[int, "nixlRegDList"] = {}
-        self.local_handles: dict[int, "nixl_prepped_dlist_handle"] = {}
+        # Region id -> (base pointer, nixl memory type, device id).
+        self._region_bases: dict[int, tuple[int, str, int]] = {}
         self._region_ids = itertools.count()
         self.default_region = self.register_memory_region(
             l1_memory_desc.ptr, l1_memory_desc.size
@@ -458,7 +502,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         Raises:
             ValueError: If the size is not a multiple of the L1 alignment.
         """
-        is_l1 = not self.local_handles  # the constructor registers L1 first
+        is_l1 = not self._reg_descs  # the constructor registers L1 first
         # L1 is not checked, as before.
         if not is_l1 and (size <= 0 or size % self._align):
             raise ValueError(
@@ -467,18 +511,10 @@ class NixlTransferChannelContext(TransferChannelContext):
         mem_type, dev_id = ("cpu", 0) if device_id is None else ("VRAM", device_id)
         reg_descs = self.agent.get_reg_descs([(ptr, size, dev_id, "")], mem_type)
         self.agent.register_memory(reg_descs)
-        xfer_list = [
-            (addr, self._align, dev_id) for addr in range(ptr, ptr + size, self._align)
-        ]
-        xfer_descs = self.agent.get_xfer_descs(xfer_list, mem_type)
         region = next(self._region_ids)
-        if is_l1:
-            self.serialized_xfer_descs = self.agent.get_serialized_descs(xfer_descs)
         self._region_sizes[region] = size
         self._reg_descs[region] = reg_descs
-        self.local_handles[region] = self.agent.prep_xfer_dlist(
-            "", xfer_descs, mem_type
-        )
+        self._region_bases[region] = (ptr, mem_type, dev_id)
         return region
 
     def deregister_memory_region(self, region: int) -> None:
@@ -493,23 +529,25 @@ class NixlTransferChannelContext(TransferChannelContext):
         if region == self.default_region:
             raise KeyError(region)
         del self._region_sizes[region]
-        self.agent.release_dlist_handle(self.local_handles.pop(region))
+        del self._region_bases[region]
         self.agent.deregister_memory(self._reg_descs.pop(region))
 
-    def addresses_to_indices(
-        self, addresses: list[TransferChannelAddress]
-    ) -> list[int]:
-        """Translate (offset, size) addresses into page indices in the prepped dlist."""
-        indices: list[int] = []
-        for a in addresses:
-            if a.offset % self._align != 0:
-                raise ValueError(
-                    f"Address offset {a.offset} is not aligned to {self._align}"
-                )
-            start = a.offset // self._align
-            n_pages = max(1, math.ceil(a.size / self._align))
-            indices.extend(range(start, start + n_pages))
-        return indices
+    def get_local_xfer_descs(
+        self, region: int, addresses: list[TransferChannelAddress]
+    ) -> "nixlXferDList":
+        """Build one transfer descriptor per address in a local region.
+
+        Args:
+            region: The local region the offsets are in.
+            addresses: ``(offset, size)`` addresses relative to the region base.
+
+        Returns:
+            The nixl transfer-descriptor list, in address order.
+        """
+        base, mem_type, dev_id = self._region_bases[region]
+        return self.agent.get_xfer_descs(
+            [(base + a.offset, a.size, dev_id) for a in addresses], mem_type
+        )
 
     ############################################################
     # Server / client management
@@ -608,11 +646,8 @@ class NixlTransferChannelContext(TransferChannelContext):
         for client in clients:
             client.close()
 
-        for region in list(self.local_handles):
-            try:
-                self.agent.release_dlist_handle(self.local_handles.pop(region))
-            except Exception:  # noqa: BLE001
-                pass
+        for region in list(self._reg_descs):
+            self._region_bases.pop(region, None)
             try:
                 self.agent.deregister_memory(self._reg_descs.pop(region))
             except Exception:  # noqa: BLE001
@@ -645,6 +680,43 @@ class NixlTransferChannelContext(TransferChannelContext):
                 f"reachable."
             ) from err
 
+    def _decode_reply(
+        self, socket: "zmq.Socket", server_url: str, expected: type[_ReplyT]
+    ) -> _ReplyT:
+        """Receive and decode one handshake reply of the ``expected`` type.
+
+        Args:
+            socket: The REQ socket awaiting the server's reply.
+            server_url: The peer url being dialed (for error messages).
+            expected: The reply type this stage expects.
+
+        Returns:
+            The decoded reply.
+
+        Raises:
+            RuntimeError: The server rejected the request, or replied with
+                something this version cannot read as ``expected``.
+        """
+        reply_bytes = self._recv_handshake(socket, server_url)
+        try:
+            reply = msgspec.msgpack.decode(reply_bytes, type=HandshakeMsg)
+        except msgspec.DecodeError as err:
+            raise RuntimeError(
+                f"Unreadable transfer channel handshake reply from {server_url!r}; "
+                f"the peer may run a different LMCache version: {err}"
+            ) from err
+        if isinstance(reply, ErrorResp):
+            raise RuntimeError(
+                f"Transfer channel handshake rejected by {server_url!r}: "
+                f"{reply.message}"
+            )
+        if not isinstance(reply, expected):
+            raise RuntimeError(
+                f"Unexpected transfer channel handshake reply from {server_url!r}: "
+                f"{type(reply).__name__}, expected {expected.__name__}"
+            )
+        return reply
+
     def _connect(self, server_url: str) -> NixlTransferChannelClient:
         socket = self.zmq_context.socket(zmq.REQ)
         socket.setsockopt(zmq.LINGER, 0)
@@ -658,40 +730,40 @@ class NixlTransferChannelContext(TransferChannelContext):
                     InitReq(
                         agent_name=self.agent_name,
                         agent_meta=self.agent.get_agent_metadata(),
+                        protocol_version=_HANDSHAKE_PROTOCOL_VERSION,
                     )
                 )
             )
-            init_resp = msgspec.msgpack.decode(
-                self._recv_handshake(socket, server_url), type=HandshakeMsg
-            )
-            assert isinstance(init_resp, InitResp)
-            server_agent_name = self.agent.add_remote_agent(init_resp.agent_meta)
+            init_resp = self._decode_reply(socket, server_url, InitResp)
+            if init_resp.protocol_version != _HANDSHAKE_PROTOCOL_VERSION:
+                raise RuntimeError(
+                    _version_mismatch_message(
+                        init_resp.protocol_version, f"peer {server_url!r}"
+                    )
+                )
+            with self.remote_md_lock:
+                server_agent_name = self.agent.add_remote_agent(init_resp.agent_meta)
 
-            # Stage 2: exchange transfer-descriptor lists.
+            # Stage 2: exchange L1 base addresses. The agent metadata from
+            # stage 1 already carries the registered memory, so a transfer
+            # builds its remote descriptors from the base plus each offset.
             socket.send(
                 msgspec.msgpack.encode(
                     MemRegReq(
                         sender_agent_name=self.agent_name,
                         sender_advertise_url=self.advertise_url,
-                        xfer_descs=self.serialized_xfer_descs,
+                        l1_base_ptr=self.l1_base_ptr,
                     )
                 )
             )
-            memreg_resp = msgspec.msgpack.decode(
-                self._recv_handshake(socket, server_url), type=HandshakeMsg
-            )
-            assert isinstance(memreg_resp, MemRegResp)
-            remote_xfer_dlist = self.agent.deserialize_descs(memreg_resp.xfer_descs)
-            remote_handle = self.agent.prep_xfer_dlist(
-                server_agent_name, remote_xfer_dlist
-            )
+            memreg_resp = self._decode_reply(socket, server_url, MemRegResp)
         finally:
             socket.close(linger=0)
 
         return NixlTransferChannelClient(
             context=self,
             remote_agent_name=server_agent_name,
-            remote_dlist_handle=remote_handle,
+            remote_l1_base_ptr=memreg_resp.l1_base_ptr,
         )
 
 
