@@ -38,8 +38,7 @@ class TransferEngine(enum.Enum):
     NVME_DMA = "nvme_dma"
     """Storage-backed object: a file read or write against GPU memory."""
     NIC_DMA = "nic_dma"
-    """Object a peer owns: a transfer-channel read into GPU memory. Off the
-    stream, and not implemented yet."""
+    """Object a peer owns: a transfer-channel read into GPU memory."""
 
 
 def select_engine(memory_obj: MemoryObj) -> TransferEngine:
