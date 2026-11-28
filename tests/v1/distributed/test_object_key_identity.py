@@ -72,6 +72,48 @@ def test_existing_field_validation_is_preserved() -> None:
         ObjectKey(b"chunk", "model", 0, cache_salt="bad/salt")
 
 
+def test_derive_matches_the_constructor() -> None:
+    base = ObjectKeyIdentity(
+        chunk_hash=b"chunk",
+        model_name="model",
+        kv_rank=7,
+        object_group_id=3,
+        cache_salt="tenant",
+        tags={"b": "2", "a": "1"},
+    )
+    derived = base.derive(chunk_hash=b"other", kv_rank=1)
+    constructed = ObjectKeyIdentity(
+        chunk_hash=b"other",
+        model_name="model",
+        kv_rank=1,
+        object_group_id=3,
+        cache_salt="tenant",
+        tags={"a": "1", "b": "2"},
+    )
+    assert derived == constructed
+    assert hash(derived) == hash(constructed)
+    assert derived.tags == base.tags
+    assert base.derive() == base
+    assert hash(base.derive()) == hash(base)
+
+
+def test_equal_keys_hash_equal_however_they_were_built() -> None:
+    flat = ObjectKey(b"chunk", "model", 7, 3, "tenant", tags={"a": "1"})
+    identity = ObjectKeyIdentity(
+        chunk_hash=b"chunk",
+        model_name="model",
+        kv_rank=7,
+        object_group_id=3,
+        cache_salt="tenant",
+        tags={"a": "1"},
+    )
+    typed = ObjectKey(identity=identity)
+    derived = ObjectKey(identity=identity.derive())
+    assert flat == typed == derived
+    assert hash(flat) == hash(typed) == hash(derived)
+    assert len({flat, typed, derived}) == 1
+
+
 @pytest.mark.parametrize(
     "derive",
     [

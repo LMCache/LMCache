@@ -31,20 +31,28 @@ class TTLLock {
   explicit TTLLock(uint32_t ttl_second = 300);
 
   /**
-   * @brief Increment the lock counter by 1 and update the TTL.
+   * @brief Increment the lock counter by count and update the TTL.
    *
-   * If the previous TTL has expired, the counter is reset to 1.
-   * Otherwise, the counter is incremented by 1.
+   * If the previous TTL has expired, the counter is reset to count.
+   * Otherwise, the counter is incremented by count.
    * The TTL is always refreshed to the current time + TTL duration.
+   * One call with count == N is equivalent to N calls with count == 1.
+   *
+   * @param count The number of lock acquisitions to record. Must be >= 1.
+   * @throws std::invalid_argument if count < 1.
    */
-  void lock();
+  void lock(int64_t count = 1);
 
   /**
-   * @brief Decrement the lock counter by 1.
+   * @brief Decrement the lock counter by count.
    *
-   * The counter will not go below 0.
+   * The counter will not go below 0. One call with count == N is
+   * equivalent to N calls with count == 1.
+   *
+   * @param count The number of lock releases to record. Must be >= 1.
+   * @throws std::invalid_argument if count < 1.
    */
-  void unlock();
+  void unlock(int64_t count = 1);
 
   /**
    * @brief Check if the lock is currently held.

@@ -10,7 +10,8 @@ These tests verify the basic functionality of the LRUEvictionPolicy:
 5. Eviction destinations
 """
 
-# Third Party
+# Standard
+import random
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -138,6 +139,33 @@ class TestLRUEvictionPolicyOrdering:
         assert ObjectKey.Bytes2IntHash(candidates[0].chunk_hash) == 2
         assert ObjectKey.Bytes2IntHash(candidates[1].chunk_hash) == 1
         assert ObjectKey.Bytes2IntHash(candidates[2].chunk_hash) == 3
+
+    def test_batched_touch_matches_reversed_single_key_touches(self):
+        """A touch batch leaves the exact order of touching its keys one by
+        one in reverse, the documented batch semantics, under a randomized
+        workload with untracked keys, duplicates, and removals mixed in."""
+        rng = random.Random(0x6403)
+        tracked = [make_key(i) for i in range(64)]
+        batched = LRUEvictionPolicy()
+        reference = LRUEvictionPolicy()
+        batched.on_keys_created(tracked)
+        reference.on_keys_created(tracked)
+
+        for _ in range(25):
+            # Keys 64..95 were never created, so some touches miss; a key
+            # may also repeat within one batch.
+            batch = [make_key(rng.randrange(96)) for _ in range(rng.randrange(1, 48))]
+            batched.on_keys_touched(batch)
+            for key in reversed(batch):
+                reference.on_keys_touched([key])
+            removed = [make_key(rng.randrange(96)) for _ in range(rng.randrange(3))]
+            batched.on_keys_removed(removed)
+            reference.on_keys_removed(removed)
+
+            assert batched.get_num_tracked_keys() == reference.get_num_tracked_keys()
+            assert batched.get_eviction_candidates(
+                len(tracked)
+            ) == reference.get_eviction_candidates(len(tracked))
 
 
 # =============================================================================

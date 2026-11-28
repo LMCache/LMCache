@@ -265,6 +265,41 @@ class ObjectKeyIdentity:
         validate_identity_tags(self.tags)
         object.__setattr__(self, "tags", freeze_dict(self.tags, sort_keys=True))
 
+    def derive(
+        self,
+        chunk_hash: bytes | None = None,
+        kv_rank: int | None = None,
+    ) -> "ObjectKeyIdentity":
+        """Copy this identity, replacing the chunk hash and/or kv rank.
+
+        Skips ``__post_init__``: neither replaced field carries a
+        construction invariant, and every other field is taken, already
+        validated and frozen, from this instance. The copy shares this
+        identity's ``tags`` mapping, so bulk key expansion validates and
+        freezes the tags once per template instead of once per key.
+
+        Args:
+            chunk_hash: Replacement content hash; this identity's when None.
+            kv_rank: Replacement packed KV rank; this identity's when None.
+
+        Returns:
+            A new identity equal to one the constructor would build from
+            the same field values.
+        """
+        new = object.__new__(ObjectKeyIdentity)
+        set_attr = object.__setattr__
+        set_attr(
+            new,
+            "chunk_hash",
+            chunk_hash if chunk_hash is not None else self.chunk_hash,
+        )
+        set_attr(new, "kv_rank", kv_rank if kv_rank is not None else self.kv_rank)
+        set_attr(new, "model_name", self.model_name)
+        set_attr(new, "object_group_id", self.object_group_id)
+        set_attr(new, "cache_salt", self.cache_salt)
+        set_attr(new, "tags", self.tags)
+        return new
+
 
 @dataclass(frozen=True, init=False)
 class ObjectKey:
@@ -886,6 +921,30 @@ class PrefetchResult:
         return self._l2_hit_count
 
 
+def _identity_template(
+    ipc_key: "IPCCacheServerKey",
+    object_group_id: int,
+    tags: Mapping[str, str],
+) -> ObjectKeyIdentity:
+    """Build one validated identity for an object group's bulk expansion.
+
+    The template runs the constructor's validation once; the per-chunk,
+    per-rank identities are then produced with
+    :meth:`ObjectKeyIdentity.derive`, which replaces only the two fields
+    without construction invariants. The placeholder ``chunk_hash`` and
+    ``kv_rank`` never leave this module: every derived identity overwrites
+    both.
+    """
+    return ObjectKeyIdentity(
+        chunk_hash=b"",
+        kv_rank=0,
+        model_name=ipc_key.model_name,
+        object_group_id=object_group_id,
+        cache_salt=ipc_key.cache_salt,
+        tags=tags,
+    )
+
+
 def ipc_key_to_object_keys(
     ipc_key: "IPCCacheServerKey",
     chunk_hashes: list[bytes],
@@ -927,32 +986,30 @@ def ipc_key_to_object_keys(
         list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
         for ``object_group_ids[i]``.
     """
-    cache_salt = ipc_key.cache_salt
     extra_attributes = (
         ipc_key.request_configs if ipc_key.request_configs is not None else {}
     )
     tags = _get_object_identity_tags(ipc_key.request_configs, chunk_size)
 
-    return [
-        [
-            ObjectKey(
-                chunk_hash=chunk_hash,
-                model_name=ipc_key.model_name,
-                kv_rank=kv_rank,
-                object_group_id=object_group_id,
-                cache_salt=cache_salt,
-                extra_attributes=extra_attributes,
-                tags=tags,
-            )
-            for chunk_hash in chunk_hashes
-            for kv_rank in _lookup_kv_ranks(
-                ipc_key,
-                shard_replication_desc.tp_replicas(object_group_id),
-                shard_replication_desc.dcp_shards(object_group_id),
-            )
-        ]
-        for object_group_id in object_group_ids
-    ]
+    groups: list[list[ObjectKey]] = []
+    for object_group_id in object_group_ids:
+        template = _identity_template(ipc_key, object_group_id, tags)
+        kv_ranks = _lookup_kv_ranks(
+            ipc_key,
+            shard_replication_desc.tp_replicas(object_group_id),
+            shard_replication_desc.dcp_shards(object_group_id),
+        )
+        groups.append(
+            [
+                ObjectKey(
+                    identity=template.derive(chunk_hash=chunk_hash, kv_rank=kv_rank),
+                    extra_attributes=extra_attributes,
+                )
+                for chunk_hash in chunk_hashes
+                for kv_rank in kv_ranks
+            ]
+        )
+    return groups
 
 
 def ipc_key_to_grouped_object_keys(
@@ -1020,6 +1077,7 @@ def ipc_key_to_grouped_object_keys(
             )
         window = attn_desc.num_chunks_in_sw[object_group_id]
         num_kv_readers = shard_replication_desc.num_kv_readers(object_group_id)
+        template = _identity_template(ipc_key, object_group_id, tags)
         for kv_rank in _lookup_kv_ranks(
             ipc_key,
             shard_replication_desc.tp_replicas(object_group_id),
@@ -1029,13 +1087,10 @@ def ipc_key_to_grouped_object_keys(
                 GroupedObjectKeys(
                     keys=[
                         ObjectKey(
-                            chunk_hash=chunk_hash,
-                            model_name=ipc_key.model_name,
-                            kv_rank=kv_rank,
-                            object_group_id=object_group_id,
-                            cache_salt=ipc_key.cache_salt,
+                            identity=template.derive(
+                                chunk_hash=chunk_hash, kv_rank=kv_rank
+                            ),
                             extra_attributes=extra_attributes,
-                            tags=tags,
                         )
                         for chunk_hash in chunk_hashes
                     ],

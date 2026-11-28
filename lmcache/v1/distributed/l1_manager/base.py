@@ -331,17 +331,14 @@ class BaseL1Manager(L1ManagerInterface):
         total = validate_read_locks(read_locks)
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
+        get_entry = self._objects.get
         for key in keys:
-            entry = self._objects.get(key, None)
+            entry = get_entry(key, None)
             if entry is None:
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -442,11 +439,7 @@ class BaseL1Manager(L1ManagerInterface):
                 self._prefetch_locked.pop(key, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.unlock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.unlock()
+            entry.read_lock.unlock(total)
             if not entry.read_lock.is_locked():
                 self._prefetch_locked.pop(key, None)
             if entry.is_temporary and not entry.read_lock.is_locked():
@@ -744,8 +737,7 @@ class BaseL1Manager(L1ManagerInterface):
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            for _ in range(total):
-                entry.read_lock.lock()
+            entry.read_lock.lock(total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         self._memory_manager.free(discarded)
