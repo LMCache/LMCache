@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections.abc import Callable, Iterator
-from typing import Any, Generic, Optional, TypeVar, cast
+from concurrent.futures import Future
+from typing import Any, Generic, Optional, TypeVar, cast, get_args, get_origin
 import threading
 
 # First Party
@@ -16,6 +17,29 @@ from lmcache.v1.platform.base.event_ipc import (
 logger = init_logger(__name__)
 
 T = TypeVar("T")
+
+
+class Deferred(Future[T]):
+    """A handler result that may be completed after the handler returned.
+
+    The reply is sent when it completes; the handler's thread is free as
+    soon as the handler returns. Annotate the handler ``-> Deferred[T]``:
+    ``T`` is the wire type. Only client-affinity handlers may return one.
+    """
+
+    @classmethod
+    def completed(cls, result: T) -> "Deferred[T]":
+        """Return a ``Deferred`` that already holds ``result``."""
+        deferred: Deferred[T] = cls()
+        deferred.set_result(result)
+        return deferred
+
+
+def unwrap_deferred_type(annotation: Any) -> Any:
+    """Return ``T`` for ``Deferred[T]``, and any other annotation as is."""
+    if get_origin(annotation) is Deferred:
+        return get_args(annotation)[0]
+    return annotation
 
 
 class MessagingStream(Iterator[T]):

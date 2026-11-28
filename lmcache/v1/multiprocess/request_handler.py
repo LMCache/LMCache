@@ -8,6 +8,7 @@ from typing import Any, Callable, TypeVar, get_type_hints
 import inspect
 
 # First Party
+from lmcache.v1.transport.futures import unwrap_deferred_type
 from lmcache.v1.transport.rpc import RpcOperation, get_rpc_spec
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -91,7 +92,9 @@ def validate_handler(
     payload_types = tuple(
         hints.get(parameter.name, parameter.annotation) for parameter in parameters
     )
-    response_type = hints.get("return", handler_signature.return_annotation)
+    response_type = unwrap_deferred_type(
+        hints.get("return", handler_signature.return_annotation)
+    )
     if payload_types != spec.payload_types:
         raise TypeError(
             f"Handler {handler.__qualname__} payload annotations "

@@ -10,6 +10,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
+from lmcache.v1.transport.futures import Deferred
 
 
 def test_submit_returns_correct_result():
@@ -246,3 +247,33 @@ def test_shutdown_no_wait():
     pool.submit(lambda: time.sleep(0.5), affinity_key=0)
     # Should return immediately without waiting
     pool.shutdown(wait=False)
+
+
+def test_deferred_result_frees_the_worker_and_completes_the_future_later():
+    """The next task of the same key runs while the first is unanswered."""
+    pool = AffinityThreadPool(max_workers=1)
+    deferred: Deferred[int] = Deferred()
+    first = pool.submit(lambda: deferred, affinity_key=0)
+    second = pool.submit(lambda: 2, affinity_key=0)
+    assert second.result(timeout=5) == 2
+    assert not first.done()
+    deferred.set_result(1)
+    assert first.result(timeout=5) == 1
+    pool.shutdown()
+
+
+def test_deferred_exception_reaches_the_future():
+    pool = AffinityThreadPool(max_workers=1)
+    deferred: Deferred[int] = Deferred()
+    future = pool.submit(lambda: deferred, affinity_key=0)
+    deferred.set_exception(ValueError("late failure"))
+    with pytest.raises(ValueError, match="late failure"):
+        future.result(timeout=5)
+    pool.shutdown()
+
+
+def test_completed_deferred_completes_the_future_at_once():
+    pool = AffinityThreadPool(max_workers=1)
+    future = pool.submit(lambda: Deferred.completed(7), affinity_key=0)
+    assert future.result(timeout=5) == 7
+    pool.shutdown()

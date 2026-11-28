@@ -337,7 +337,7 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
-    )
+    ).result()
     assert ok is True
 
     # Full-attention group reads all 5 keys; mamba group reads only the last.
@@ -366,7 +366,7 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
         event_ipc_handle=b"x",
-    )
+    ).result()
     assert ok is True
     assert read_calls == [["g0c0", "g0c1", "g0c2"]]
     _grp, mem = transfer_calls[0]
@@ -400,7 +400,7 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
-    )
+    ).result()
     assert ok is True
 
     # Recurrent group reads its one-block window; attention reads everything;
@@ -429,7 +429,7 @@ def test_failed_copy_releases_all_retained_owners_on_stream(monkeypatch):
         1,
         [[1, 2], [0, 3]],
         b"producer",
-    )
+    ).result()
     assert not ok
     assert reads == [["g0c0", "g0c1"]]
     module.context.storage_manager.prepare_read_completion.assert_called_once_with(
@@ -627,7 +627,7 @@ def test_retrieve_of_only_an_unfull_chunk_skips_aux_groups(monkeypatch):
         ),
     )
 
-    _handle, ok = module.retrieve(_unfull_key(), 1, [[4], [5], [6]], b"x")
+    _handle, ok = module.retrieve(_unfull_key(), 1, [[4], [5], [6]], b"x").result()
 
     assert ok is True
     assert read_calls == [["g0u", "g1u"]]

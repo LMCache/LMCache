@@ -111,15 +111,34 @@ after them, on the stream, with an on-stream engine.
 
 **The RETRIEVE handler** (`lmcache_driven_transfer.py`) has no branch for
 either kind. Its transfers run inside `retrieve_transfer()`, and the code
-that completes a retrieve (record the completion event, queue the read-lock
-release, publish `MP_RETRIEVE_END`) is one function, `finish(succeeded)`,
-which it passes to `when_queued`.
+that completes a retrieve is one function, `finish(succeeded)`, which it
+passes to `when_queued`. `finish` records the completion event, queues the
+read-lock release, publishes `MP_RETRIEVE_END` and answers the request.
+
+**Answering after the handler returned.** The inference engine waits on the
+completion event, so the event must be recorded on the stream behind the
+last kernel. For off-stream steps that is after the handler returned, so the
+handler returns a `Deferred[tuple[bytes, bool]]`
+(`lmcache/v1/transport/futures.py`) and `finish` completes it:
+
+```
+handler:  queue on-stream steps, give off-stream steps to their engines,
+          return the Deferred          -> the affinity worker is free
+engine:   bytes landed -> queue the kernels -> on_done(True)
+finish:   record the event behind them, release the read locks,
+          Deferred.set_result((event handle, True))  -> the reply is sent
+```
+
+With only on-stream steps `finish` runs before the handler returns, and the
+`Deferred` it returns is already completed. The affinity pool and the native
+gRPC server send a `Deferred`'s reply when it completes; the wire type of a
+handler annotated `-> Deferred[T]` is `T`. Only handlers that run on the
+client-affinity pool may return one.
 
 **Status.** NIC DMA has no engine yet, so a retrieve of a peer-owned
 object fails (`finish(False)`: no tokens reported, read locks released, the
-handler returns False). It failed before too, with `NotImplementedError`.
-Every `on_done` therefore runs before `when_queued` returns today; a handler
-that answers after it returned is a follow-up.
+reply is False). It failed before too, with `NotImplementedError`. Every
+`Deferred` is therefore completed before the handler returns today.
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|

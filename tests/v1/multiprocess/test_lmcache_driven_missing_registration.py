@@ -57,5 +57,8 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
         producer_event,
     )
 
+    # RETRIEVE answers through a Deferred, completed here before it returns.
+    if method_name == "retrieve":
+        result = result.result()
     assert result == (b"", False)
     module.get_and_touch_context_entry.assert_called_once_with(42)

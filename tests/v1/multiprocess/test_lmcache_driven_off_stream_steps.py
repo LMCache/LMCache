@@ -113,37 +113,50 @@ def harness(monkeypatch: pytest.MonkeyPatch):
 
 
 class _Engine:
-    """An off-stream engine that is done at once, with ``result``."""
+    """An off-stream engine that is done when a test says so."""
 
-    def __init__(self, result: bool) -> None:
-        self._result = result
+    def __init__(self) -> None:
+        self.on_done: list = []
 
     def submit(self, cache_context, steps, on_done) -> None:
-        on_done(self._result)
+        self.on_done.append(on_done)
 
 
-@pytest.mark.parametrize(
-    "off_stream, engine, succeeded",
-    [
-        (False, None, True),
-        (True, _Engine(True), True),
-        # Its steps could not be staged.
-        (True, _Engine(False), False),
-        # No engine runs the step: its bytes would never land.
-        (True, None, False),
-    ],
-)
-def test_a_retrieve_completes_once_whichever_way_its_steps_ran(
-    harness, off_stream, engine, succeeded
+def _off_stream_step() -> TransferStep:
+    return TransferStep([], [], lambda staging: [], lambda staging, ids: None)
+
+
+@pytest.mark.parametrize("off_stream, succeeded", [(False, True), (True, False)])
+def test_a_retrieve_the_stream_orders_is_answered_when_it_returns(
+    harness, off_stream, succeeded
 ) -> None:
-    """A failed retrieve makes the inference engine recompute the blocks; its
-    read locks are released and the end event reports no tokens."""
-    harness.state.engine = engine
+    """Also with a step no engine runs: it fails at once, releases its read
+    locks and reports no tokens."""
     if off_stream:
-        harness.handed_off.append(
-            TransferStep([], [], lambda staging: [], lambda staging, ids: None)
-        )
-    assert harness.retrieve() == (b"completion-handle", succeeded)
+        harness.handed_off.append(_off_stream_step())
+    response = harness.retrieve()
+    assert response.done()
+    assert response.result() == (b"completion-handle", succeeded)
+    assert harness.order[-3:] == _COMPLETION
+    assert harness.order.count("finish_read_by_owner") == 1
+    assert harness.ended[-1]["num_tokens"] == (2 * _CHUNK_SIZE if succeeded else 0)
+
+
+@pytest.mark.parametrize("succeeded", [True, False])
+def test_a_retrieve_with_off_stream_steps_is_answered_when_its_engine_is_done(
+    harness, succeeded
+) -> None:
+    """The event, the lock release and the reply wait until the engine queued
+    the kernels, or gave up."""
+    engine = _Engine()
+    harness.state.engine = engine
+    harness.handed_off.append(_off_stream_step())
+    response = harness.retrieve()
+    assert not response.done()
+    assert not set(_COMPLETION) & set(harness.order)
+    (on_done,) = engine.on_done
+    on_done(succeeded)
+    assert response.result(timeout=5) == (b"completion-handle", succeeded)
     assert harness.order[-3:] == _COMPLETION
     assert harness.order.count("finish_read_by_owner") == 1
     assert harness.ended[-1]["num_tokens"] == (2 * _CHUNK_SIZE if succeeded else 0)

@@ -63,6 +63,7 @@ from lmcache.v1.platform.fd_channel import (
     is_fd_channel_supported,
 )
 from lmcache.v1.transport.errors import InvalidRequestError
+from lmcache.v1.transport.futures import Deferred
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -1125,7 +1126,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
-    ) -> tuple[bytes, bool]:
+    ) -> Deferred[tuple[bytes, bool]]:
         """Retrieve the CPU KV cache and put into GPU blocks.
 
         Args:
@@ -1141,10 +1142,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 requests.
 
         Returns:
-            A tuple where the first element is the IPC handle of the event
-            that signals the completion of the retrieve operation, and the
-            second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted.
+            A ``Deferred`` for ``(event handle, succeeded)``:
+
+            - The event completes when the KV blocks are written. Its handle
+              is empty when no device work was submitted.
+            - ``succeeded`` is False if the key could not be retrieved; the
+              caller then recomputes the blocks.
+
+            The ``Deferred`` completes once all the retrieve's device work is
+            queued on the GPU stream. For on-stream work that is before this
+            method returns; for off-stream work it is later.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1168,7 +1175,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 "Rejecting RETRIEVE for unregistered GPU instance ID %d",
                 instance_id,
             )
-            return b"", False
+            return Deferred.completed((b"", False))
         cache_context = entry.cache_context
         model_name = entry.model_name
         chunk_size = entry.chunk_size
@@ -1225,6 +1232,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             gpu_block_ids, blocks_per_chunk, num_chunks, bool(unfull_obj_keys)
         )
 
+        # Completed by finish(): now for on-stream work, later for off-stream.
+        response: Deferred[tuple[bytes, bool]] = Deferred()
         with (
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
@@ -1252,7 +1261,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     blocks_per_chunk,
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return Deferred.completed(
+                    (event_backend.export_event(event, cache_context.device), False)
+                )
 
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
@@ -1309,13 +1320,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 retained_keys, read_owners
             )
             total_bytes = 0
-            num_tokens = 0
             retrieve_succeeded = True
 
             def finish(succeeded: bool) -> None:
-                """Complete the retrieve, once its device work is queued."""
-                nonlocal num_tokens, retrieve_succeeded
-                retrieve_succeeded = succeeded
+                """Complete the retrieve and answer, once its work is queued."""
                 event_backend.record_event(event, cache_context.stream)
                 if retained_keys:
                     submit_callback_to_stream(
@@ -1345,6 +1353,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                             "transfer_key": transfer_key,
                         },
                     ),
+                )
+                if succeeded:
+                    logger.info(
+                        "Retrieved %d tokens in %.3f seconds",
+                        num_tokens,
+                        time.perf_counter() - st,
+                    )
+                response.set_result(
+                    (event_backend.export_event(event, cache_context.device), succeeded)
                 )
 
             try:
@@ -1398,18 +1415,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 retrieve_succeeded = False
             finally:
                 device_work.when_queued(cache_context, retrieve_succeeded, finish)
-        if retrieve_succeeded:
-            ed = time.perf_counter()
-            logger.info(
-                "Retrieved %d tokens in %.3f seconds",
-                num_tokens,
-                ed - st,
-            )
-
-        return (
-            event_backend.export_event(event, cache_context.device),
-            retrieve_succeeded,
-        )
+        return response
 
     def _publish_token_bindings(
         self,

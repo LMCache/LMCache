@@ -26,6 +26,7 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.transport.futures import unwrap_deferred_type
 from lmcache.v1.transport.grpc.codecs import (
     get_message_codec_registry,
 )
@@ -559,7 +560,7 @@ def compile_response_encoder(
     """Compile a protobuf response encoder from a handler return annotation."""
     sig = inspect.signature(handler)
     hints = get_type_hints(handler)
-    response_type = hints.get("return", sig.return_annotation)
+    response_type = unwrap_deferred_type(hints.get("return", sig.return_annotation))
     if response_type is inspect.Signature.empty:
         response_type = Any
     encoder = compile_response_encoder_for_type(message_cls, response_type)
