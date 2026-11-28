@@ -202,6 +202,71 @@ def test_musa_block_transfer_fallback_mla_d2h_and_h2d() -> None:
 
 @pytest.mark.skipif(
     not _using_python_fallback(),
+    reason="CPU fallback correctness check needs the Python fallback backend",
+)
+def test_musa_block_transfer_fallback_mla_d2h_handles_padded_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fallback MLA D2H gathers selected blocks from padded layer views."""
+    num_blocks = 4
+    block_size = 2
+    head_size = 4
+    block_stride = block_size * head_size + 3
+    storage = torch.arange(
+        num_blocks * block_stride,
+        dtype=torch.float32,
+    ).reshape(num_blocks, block_stride)
+    source = [
+        storage.as_strided(
+            (num_blocks, block_size, head_size),
+            (block_stride, head_size, 1),
+        )
+    ]
+    block_ids = torch.tensor([1, 3], dtype=torch.int64)
+    chunk = torch.zeros(1, block_ids.numel() * block_size, head_size)
+    shape_desc = _shape_desc(
+        num_layers=1,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=1,
+        head_size=head_size,
+        kv_size=1,
+        dtype=source[0].dtype,
+    )
+    shape_desc.block_stride_elems = block_stride
+
+    real_index_select = torch.index_select
+
+    def reject_noncontiguous_out(
+        input_tensor: torch.Tensor,
+        dim: int,
+        index: torch.Tensor,
+        *,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not input_tensor.is_contiguous():
+            raise AssertionError("padded source must bypass index_select")
+        return real_index_select(input_tensor, dim, index, out=out)
+
+    monkeypatch.setattr(torch, "index_select", reject_noncontiguous_out)
+
+    device_ops.multi_layer_block_kv_transfer(
+        source,
+        [chunk],
+        block_ids,
+        torch.device("cpu"),
+        lmcache_native.TransferDirection.D2H,
+        shape_desc,
+        chunk.shape[1],
+        lmcache_native.EngineKVFormat.NL_X_NB_BS_HS,
+        0,
+    )
+
+    assert torch.equal(chunk[0], source[0][block_ids].reshape_as(chunk[0]))
+
+
+@pytest.mark.skipif(
+    not _using_python_fallback(),
     reason="CPU fallback stress check needs the Python fallback backend",
 )
 def test_musa_block_transfer_fallback_repeated_round_trip() -> None:
@@ -392,6 +457,101 @@ def test_musa_block_transfer_fallback_sglang_mha_d2h_and_h2d() -> None:
             )
             assert torch.count_nonzero(target[kv_idx][layer_idx][0]) == 0
             assert torch.count_nonzero(target[kv_idx][layer_idx][2]) == 0
+
+
+@pytest.mark.skipif(not _has_musa_runtime(), reason="MUSA hardware is required")
+def test_musa_cache_context_sglang_mha_operand_round_trip() -> None:
+    """The MUSA context detects SGLang MHA and preserves K/V IPC order."""
+    device = torch.device("musa:0")
+    num_layers, num_blocks, block_size = 2, 3, 2
+    num_heads, head_size = 2, 4
+
+    class _Wrapper(DeviceIPCWrapper):
+        device_type = "musa"
+
+        def __init__(self, tensor: torch.Tensor) -> None:
+            self.tensor = tensor
+
+        def to_tensor(self) -> torch.Tensor:
+            return self.tensor
+
+        def close(self) -> None:
+            return None
+
+    source = [
+        [
+            torch.arange(
+                num_blocks * block_size * num_heads * head_size,
+                dtype=torch.float32,
+                device=device,
+            )
+            .reshape(num_blocks * block_size, num_heads, head_size)
+            .add(kv_idx * 100_000 + layer_idx * 1_000)
+            for layer_idx in range(num_layers)
+        ]
+        for kv_idx in range(2)
+    ]
+    wrappers: list[DeviceIPCWrapper] = [
+        _Wrapper(tensor) for layer_group in source for tensor in layer_group
+    ]
+    context = MUSACacheContext(
+        wrappers,
+        lmcache_tokens_per_chunk=block_size,
+        engine_type=EngineType.SGLANG,
+        engine_group_infos=[],
+    )
+    try:
+        assert context.get_engine_kv_format(0) == EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
+        assert context.get_kernel_group_kv_pointers(0).numel() == 2 * num_layers
+        staging = context.get_temp_kernel_group_buffer(0, 0)
+        assert staging.shape == (
+            2,
+            num_layers,
+            block_size,
+            num_heads * head_size,
+        )
+
+        expected = [
+            [tensor.clone() for tensor in layer_group] for layer_group in source
+        ]
+        block_ids = torch.tensor([2], dtype=torch.int64, device=device)
+        device_ops.multi_layer_block_kv_transfer(
+            context.get_kernel_group_kv_pointers(0),
+            [staging.data_ptr()],
+            block_ids,
+            device,
+            lmcache_native.TransferDirection.D2H,
+            context.get_shape_desc(0),
+            block_size,
+            EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+            0,
+        )
+        for layer_group in source:
+            for tensor in layer_group:
+                tensor.zero_()
+        device_ops.multi_layer_block_kv_transfer(
+            context.get_kernel_group_kv_pointers(0),
+            [staging.data_ptr()],
+            block_ids,
+            device,
+            lmcache_native.TransferDirection.H2D,
+            context.get_shape_desc(0),
+            block_size,
+            EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+            0,
+        )
+        for kv_idx in range(2):
+            for layer_idx in range(num_layers):
+                torch.testing.assert_close(
+                    source[kv_idx][layer_idx].view(
+                        num_blocks, block_size, num_heads, head_size
+                    )[2],
+                    expected[kv_idx][layer_idx].view(
+                        num_blocks, block_size, num_heads, head_size
+                    )[2],
+                )
+    finally:
+        context.close()
 
 
 @pytest.mark.skipif(
