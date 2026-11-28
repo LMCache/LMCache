@@ -12,9 +12,13 @@ Happy-path round trips through ``StorageManager`` live in
 
 # Standard
 from collections.abc import Iterator
+from pathlib import Path
+import errno
+import os
 import select
 import threading
 import time
+import zlib
 
 # Third Party
 import pytest
@@ -33,10 +37,21 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+from lmcache.v1.distributed.key_codec import encode_fs_filename
 from lmcache.v1.distributed.l1_manager import DramL1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
+from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
+    FSL2Adapter,
+    FSL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
-from lmcache.v1.distributed.serde import SerdeProcessor, SerdeTaskId
+from lmcache.v1.distributed.serde import (
+    AsyncSerdeProcessor,
+    Deserializer,
+    SerdeProcessor,
+    SerdeTaskId,
+    Serializer,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import consume_fd, create_event_notifier
 import lmcache.v1.memory_management as memory_management
@@ -653,3 +668,93 @@ def test_event_fds_are_pairwise_distinct(wrapper: SerdeL2AdapterWrapper) -> None
         wrapper.get_load_event_fd(),
     }
     assert len(fds) == 3
+
+
+class _ZlibFrame(Serializer, Deserializer):
+    """Test serde for a single 4 KiB source whose stored frame may be shorter."""
+
+    def __init__(self) -> None:
+        self.received_lengths: list[int] = []
+
+    def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
+        return SERIALIZED_BYTES + 64
+
+    def serialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> int:
+        frame = zlib.compress(src.byte_array)
+        memoryview(dst.byte_array).cast("B")[: len(frame)] = frame
+        return len(frame)
+
+    def deserialize(self, src: MemoryObj, dst: MemoryObj, key: ObjectKey) -> None:
+        out = memoryview(dst.byte_array).cast("B")
+        self.received_lengths.append(len(src.byte_array))
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(src.byte_array, len(out) + 1)
+        if len(raw) != len(out) or not decoder.eof or decoder.unused_data:
+            raise ValueError("incomplete or trailing zlib frame")
+        out[:] = raw
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_short_framed_fs_object(
+    l1: DramL1Manager, tmp_path: Path, bounded: bool
+) -> None:
+    """Only opted-in decoders receive short records at their stored length."""
+    codec = _ZlibFrame()
+    fs = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
+    serde = AsyncSerdeProcessor(codec, codec, framed_variable_length=bounded)
+    adapter = SerdeL2AdapterWrapper(fs, serde, l1)
+    try:
+        keys, objs = commit_objects(l1, 1)
+        buf = memoryview(objs[0].byte_array).cast("B")
+        expected = bytes(range(256)) * 16
+        buf[:] = expected
+        tid = adapter.submit_store_task(keys, objs)
+        assert int(wait_for_store_result(adapter, tid)) == len(zlib.compress(expected))
+        buf[:] = bytes(len(buf))
+        tid = adapter.submit_load_task(keys, objs)
+        assert wait_for_load_result(adapter, tid).test(0) == bounded
+        assert bytes(buf) == (expected if bounded else bytes(len(buf)))
+        assert codec.received_lengths == (
+            [len(zlib.compress(expected))] if bounded else []
+        )
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("size", ["truncated", "over_capacity"])
+def test_bounded_fs_refuses_invalid_record(
+    l1: DramL1Manager, tmp_path: Path, size: str
+) -> None:
+    """Reject incomplete or oversized frames at the appropriate layer."""
+    codec = _ZlibFrame()
+    fs = FSL2Adapter(FSL2AdapterConfig(base_path=str(tmp_path)))
+    serde = AsyncSerdeProcessor(codec, codec, framed_variable_length=True)
+    adapter = SerdeL2AdapterWrapper(fs, serde, l1)
+    try:
+        keys, objs = commit_objects(l1, 1)
+        frame = zlib.compress(bytes(SERIALIZED_BYTES))
+        capacity = codec.estimate_serialized_size(KV_LAYOUT)
+        data = (
+            frame[:-1]
+            if size == "truncated"
+            else frame + bytes(capacity + 1 - len(frame))
+        )
+        (tmp_path / encode_fs_filename(keys[0])).write_bytes(data)
+        tid = adapter.submit_load_task(keys, objs)
+        assert not wait_for_load_result(adapter, tid).test(0)
+        assert codec.received_lengths == ([len(data)] if size == "truncated" else [])
+    finally:
+        adapter.close()
+
+
+def test_framed_serde_refuses_unsupported_adapter(l1: DramL1Manager) -> None:
+    """Reject unsupported framed reads and close the owned resources."""
+    inner, serde = FakeInnerAdapter(), FakeSerde()
+    serde.framed_variable_length = True
+    fds = (inner.get_store_event_fd(), serde.get_serialize_event_fd())
+    with pytest.raises(ValueError, match="bounded framed-record"):
+        SerdeL2AdapterWrapper(inner, serde, l1)
+    for fd in fds:
+        with pytest.raises(OSError) as exc:
+            os.fstat(fd)
+        assert exc.value.errno == errno.EBADF
