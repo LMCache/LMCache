@@ -106,6 +106,10 @@ All concrete workloads depend on `BaseWorkload`, `RequestSender`,
 - `AggregatedStats` — running totals: request counts, elapsed, mean TTFT /
   decode speed / latency, input & output throughput, token totals.
 - `FinalStats` — extends it with p50/p90/p99 for TTFT, decode speed, latency.
+- `StatsSnapshot` — one locked copy of the counters, the per-request rows
+  (optional), and both clocks (`timestamp` and `start_time`). Elapsed time
+  is `timestamp - start_time` from that copy, so a later `reset()` cannot
+  change a snapshot that was already taken.
 
 `StatsCollector` is **thread-safe** (`threading.Lock`):
 
@@ -113,9 +117,11 @@ All concrete workloads depend on `BaseWorkload`, `RequestSender`,
 |--------|-----------|
 | `on_request_finished(result)` | RequestSender callback |
 | `get_current_stats()` | ProgressMonitor (every 1s) |
-| `get_final_stats()` | Orchestrator, after the benchmark |
+| `take_snapshot(need_results=True)` | Orchestrator, once `workload.run()` returns |
+| `get_final_stats_from_snapshot(snapshot)` | Orchestrator, for the final report |
+| `export_csv_from_final_snapshot` / `export_json_from_final_snapshot` | Orchestrator, from that same snapshot |
+| `get_final_stats()` / `export_csv(path)` / `export_json(path, config)` | Read the live collector. The orchestrator does not use these after the run |
 | `reset()` | BaseWorkload, before the benchmark (after warmup, when it runs) |
-| `export_csv(path)` / `export_json(path, config)` | Orchestrator |
 
 ### 2.3 `request_sender.py`
 
@@ -148,7 +154,10 @@ reaches a non-vLLM backend.
 control, reading `StatsCollector.get_current_stats()`. Tracks in-flight count
 and the last 5 log messages. No-op when `quiet=True`.
 
-Methods: `start()`, `stop()`, `on_request_sent(id)`,
+`stop(snapshot)` joins that thread, then draws one last frame from the
+snapshot.
+
+Methods: `start()`, `stop(snapshot)`, `on_request_sent(id)`,
 `on_request_finished(id, successful)`, `log_message(msg)`.
 
 ### 2.5 `workloads/base.py`
@@ -219,9 +228,12 @@ returns an instance ready to `run()`.
 7. workload.log_config()   → before the live display starts
 8. progress_monitor.start()
 9. workload.run()          → blocks
-10. progress_monitor.stop()  →  11. request_sender.close()
-12. Emit final metrics (incl. workload.extra_metric_sections())
-13. Export CSV / JSON       →  14. sys.exit(1) if any failures
+10. snapshot = stats_collector.take_snapshot(need_results=True)
+11. progress_monitor.stop(snapshot)
+12. Emit final metrics from that snapshot
+    (incl. workload.extra_metric_sections())
+13. Export CSV / JSON from that snapshot
+    →  14. sys.exit(1) if any failures
 ```
 
 ```

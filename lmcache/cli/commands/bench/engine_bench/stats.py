@@ -54,6 +54,29 @@ class AggregatedStats:
 
 
 @dataclass
+class StatsSnapshot:
+    """One locked copy of a collector's counters and clock.
+
+    ``results`` is empty when the snapshot was taken with
+    ``need_results=False``. Percentiles and CSV export require those
+    rows. Elapsed time is ``timestamp - start_time``; both clocks are
+    copied in the same critical section as the counters, so a later
+    :meth:`StatsCollector.reset` does not change this snapshot.
+    """
+
+    results: list[RequestResult]
+    successful: int
+    failed: int
+    sum_ttft: float
+    sum_decode_speed: float
+    sum_request_latency: float
+    total_input_tokens: int
+    total_output_tokens: int
+    timestamp: float  # time.monotonic() at capture
+    start_time: float  # collector timer at capture
+
+
+@dataclass
 class FinalStats(AggregatedStats):
     """Final statistics with percentiles. Extends AggregatedStats."""
 
@@ -126,44 +149,115 @@ class StatsCollector:
             self._total_output_tokens = 0
         logger.debug("Stats collector reset")
 
+    def take_snapshot(self, need_results: bool = True) -> StatsSnapshot:
+        """Copy the counters at one instant. Thread-safe.
+
+        Later ``on_request_finished`` calls and :meth:`reset` do not
+        change the returned object.
+
+        Args:
+            need_results: When ``True``, copy the per-request rows.
+                When ``False``, ``results`` is empty. Final percentiles
+                and CSV export require ``True``.
+
+        Returns:
+            A snapshot for the ``*_from_snapshot`` methods.
+        """
+        with self._lock:
+            timestamp = time.monotonic()
+            results: list[RequestResult] = []
+            if need_results:
+                results = list(self._results)
+            return StatsSnapshot(
+                results=results,
+                successful=self._successful,
+                failed=self._failed,
+                sum_ttft=self._sum_ttft,
+                sum_decode_speed=self._sum_decode_speed,
+                sum_request_latency=self._sum_request_latency,
+                total_input_tokens=self._total_input_tokens,
+                total_output_tokens=self._total_output_tokens,
+                timestamp=timestamp,
+                start_time=self._start_time,
+            )
+
+    def get_current_stats_from_snapshot(
+        self, snapshot: StatsSnapshot
+    ) -> AggregatedStats:
+        """Aggregate means and throughput from a snapshot.
+
+        Does not read the collector's live counters. Safe to call
+        without the collector lock.
+
+        Args:
+            snapshot: Value returned by :meth:`take_snapshot`. Rows are
+                not required.
+
+        Returns:
+            Running totals for that snapshot.
+        """
+        return self._calculate_aggregated_stats_from_snapshot(snapshot)
+
     def get_current_stats(self) -> AggregatedStats:
         """Return current aggregated stats snapshot. Thread-safe."""
-        with self._lock:
-            successful = self._successful
-            failed = self._failed
-            elapsed = time.monotonic() - self._start_time
-            sum_ttft = self._sum_ttft
-            sum_decode = self._sum_decode_speed
-            sum_latency = self._sum_request_latency
-            total_in = self._total_input_tokens
-            total_out = self._total_output_tokens
+        return self._calculate_aggregated_stats_from_snapshot(
+            self.take_snapshot(need_results=False)
+        )
 
-        safe_successful = max(successful, 1)
+    def _calculate_aggregated_stats_from_snapshot(
+        self, snapshot: StatsSnapshot
+    ) -> AggregatedStats:
+        """Turn one snapshot into means and throughput."""
+        safe_successful = max(snapshot.successful, 1)
+        elapsed = snapshot.timestamp - snapshot.start_time
 
         return AggregatedStats(
-            total_requests=successful + failed,
-            successful_requests=successful,
-            failed_requests=failed,
+            total_requests=snapshot.successful + snapshot.failed,
+            successful_requests=snapshot.successful,
+            failed_requests=snapshot.failed,
             elapsed_time=elapsed,
-            mean_ttft_ms=(sum_ttft / safe_successful) * 1000.0,
-            mean_decode_speed=sum_decode / safe_successful,
-            mean_request_latency_ms=(sum_latency / safe_successful) * 1000.0,
-            input_throughput=total_in / max(elapsed, 1e-9),
-            output_throughput=total_out / max(elapsed, 1e-9),
-            total_input_tokens=total_in,
-            total_output_tokens=total_out,
+            mean_ttft_ms=(snapshot.sum_ttft / safe_successful) * 1000.0,
+            mean_decode_speed=snapshot.sum_decode_speed / safe_successful,
+            mean_request_latency_ms=(snapshot.sum_request_latency / safe_successful)
+            * 1000.0,
+            input_throughput=snapshot.total_input_tokens / max(elapsed, 1e-9),
+            output_throughput=snapshot.total_output_tokens / max(elapsed, 1e-9),
+            total_input_tokens=snapshot.total_input_tokens,
+            total_output_tokens=snapshot.total_output_tokens,
         )
+
+    def get_final_stats_from_snapshot(self, snapshot: StatsSnapshot) -> FinalStats:
+        """Compute percentiles from one snapshot.
+
+        Means and percentiles come from the same counters and rows, so
+        the summary cannot tear if more requests finish while it is
+        being computed.
+
+        Args:
+            snapshot: Value returned by :meth:`take_snapshot` with
+                ``need_results=True``. An empty ``results`` list yields
+                zero percentiles.
+
+        Returns:
+            Aggregated totals plus p50/p90/p99.
+        """
+        return self._calculate_final_stats_from_snapshot(snapshot)
 
     def get_final_stats(self) -> FinalStats:
         """Compute and return final stats with percentiles.
 
         Should be called once after the benchmark completes.
         """
-        with self._lock:
-            results = list(self._results)
+        return self._calculate_final_stats_from_snapshot(
+            self.take_snapshot(need_results=True)
+        )
 
-        successful_results = [r for r in results if r.successful]
-        current = self.get_current_stats()
+    def _calculate_final_stats_from_snapshot(
+        self, snapshot: StatsSnapshot
+    ) -> FinalStats:
+        """Add percentiles to the aggregated view of one snapshot."""
+        successful_results = [r for r in snapshot.results if r.successful]
+        current = self._calculate_aggregated_stats_from_snapshot(snapshot)
 
         if not successful_results:
             return FinalStats(
@@ -213,8 +307,32 @@ class StatsCollector:
             return list(self._results)
 
     def export_csv(self, path: str) -> None:
-        """Write per-request results to a CSV file."""
-        results = self.get_all_results()
+        """Write the current per-request results to a CSV file.
+
+        Args:
+            path: Destination path. Parent directories are created.
+
+        Raises:
+            OSError: If the file cannot be created or written.
+        """
+        self.export_csv_from_final_snapshot(path, self.take_snapshot(need_results=True))
+
+    def export_csv_from_final_snapshot(
+        self, path: str, final_stats_snapshot: StatsSnapshot
+    ) -> None:
+        """Write one snapshot's per-request rows to a CSV file.
+
+        Rows recorded after the snapshot are omitted. A snapshot taken
+        with ``need_results=False`` writes a header only.
+
+        Args:
+            path: Destination path. Parent directories are created.
+            final_stats_snapshot: Snapshot whose ``results`` are written.
+
+        Raises:
+            OSError: If the file cannot be created or written.
+        """
+        results = final_stats_snapshot.results
         fieldnames = [
             "request_id",
             "successful",
@@ -237,8 +355,40 @@ class StatsCollector:
         logger.debug("Exported %d results to CSV: %s", len(results), path)
 
     def export_json(self, path: str, config: EngineBenchConfig) -> None:
-        """Write summary JSON with config and aggregated metrics."""
-        final = self.get_final_stats()
+        """Write summary JSON from the current collector state.
+
+        Args:
+            path: Destination path. Parent directories are created.
+            config: Benchmark config stored under the ``config`` key.
+
+        Raises:
+            OSError: If the file cannot be created or written.
+        """
+        self.export_json_from_final_snapshot(
+            path, config, self.take_snapshot(need_results=True)
+        )
+
+    def export_json_from_final_snapshot(
+        self,
+        path: str,
+        config: EngineBenchConfig,
+        final_stats_snapshot: StatsSnapshot,
+    ) -> None:
+        """Write summary JSON computed from one snapshot.
+
+        Does not read the collector. Percentiles require the snapshot's
+        per-request rows.
+
+        Args:
+            path: Destination path. Parent directories are created.
+            config: Benchmark config stored under the ``config`` key.
+            final_stats_snapshot: Snapshot aggregated into the ``results``
+                key.
+
+        Raises:
+            OSError: If the file cannot be created or written.
+        """
+        final = self.get_final_stats_from_snapshot(final_stats_snapshot)
         output = {
             "config": asdict(config),
             "results": asdict(final),
