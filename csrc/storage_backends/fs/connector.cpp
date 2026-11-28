@@ -93,8 +93,9 @@ static std::string unique_staging_suffix() {
   uint64_t ticks = static_cast<uint64_t>(
       std::chrono::steady_clock::now().time_since_epoch().count());
   char buf[48];
-  std::snprintf(buf, sizeof(buf), "%lx-%llx", static_cast<unsigned long>(pid),
-                static_cast<unsigned long long>(ticks ^ s * 0x9E3779B97F4A7C15ULL));
+  std::snprintf(
+      buf, sizeof(buf), "%lx-%llx", static_cast<unsigned long>(pid),
+      static_cast<unsigned long long>(ticks ^ s * 0x9E3779B97F4A7C15ULL));
   return buf;
 }
 
@@ -214,11 +215,15 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
     return;
   }
 
-  // Determine temp file path: final name + ".tmp.<pid>-<n>", unique per
-  // write. A shared staging name let a concurrent same-key store
-  // O_TRUNC the middle of another store, and the rename then published
-  // a truncated final .data even though the other store reported success.
-  std::string staging_prefix = filename + TMP_EXT + ".";
+  // Determine temp file path: a short fixed prefix plus a per-write
+  // unique suffix, in the configured staging dir. The name must not
+  // derive from the final one: key_to_filename() caps nothing, and long
+  // model paths or tenant salts put some final names within ~30 bytes
+  // of the filesystem component limit, so any suffix appended to the
+  // final name can push the staging file over it and fail every store
+  // of that key with ENAMETOOLONG. Per-write names are also what keeps
+  // a concurrent same-key store from O_TRUNC-ing another store's
+  // staged bytes and publishing the truncated payload through rename.
   std::filesystem::path staging_dir =
       !conn.tmp_dir.empty() ? conn.tmp_dir : conn.base_path;
 
@@ -230,19 +235,23 @@ void FSConnector::do_single_set(WorkerFSConn& conn, const std::string& key,
   std::filesystem::path tmp_path;
   int fd = -1;
   for (int attempt = 0; attempt < 8; ++attempt) {
-    tmp_path = staging_dir / (staging_prefix + unique_staging_suffix());
+    // ".tmp.<pid>-<n>": fixed width, so no cache key can push the
+    // staging name over a filesystem's filename limit.
+    tmp_path =
+        staging_dir / (std::string(TMP_EXT) + "." + unique_staging_suffix());
     fd = ::open(tmp_path.c_str(), flags, 0644);
     if (fd >= 0) {
       break;
     }
     if (errno != EEXIST) {
       throw std::runtime_error("open for write failed: " + tmp_path.string() +
-                               ": " + strerror(errno));
+                               " (storing " + file_path.string() +
+                               "): " + strerror(errno));
     }
   }
   if (fd < 0) {
-    throw std::runtime_error(
-        "could not create a unique staging file for: " + file_path.string());
+    throw std::runtime_error("could not create a unique staging file for: " +
+                             file_path.string());
   }
 
   try {
