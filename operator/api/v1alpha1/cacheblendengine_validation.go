@@ -92,6 +92,7 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
 	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
+	errs = append(errs, validateSecurityContextPrivileged(spec.SecurityContext, field.NewPath("spec", "securityContext"))...)
 
 	return errs
 }

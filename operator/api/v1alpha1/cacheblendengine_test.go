@@ -18,6 +18,8 @@ package v1alpha1
 
 import (
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ptr is defined in lmcacheengine_test.go (same package); reuse it here.
@@ -583,5 +585,20 @@ func TestCBValidateSpec_PartialBucketValid(t *testing.T) {
 	}}
 	if errs := e.ValidateSpec(); len(errs) != 0 {
 		t.Fatalf("expected no errors, got %v", errs)
+	}
+}
+
+func TestCBValidateSpec_SecurityContextPrivilegedRejected(t *testing.T) {
+	// The builder forces the privileged bit from spec.privileged, so a
+	// privileged key inside securityContext would silently do nothing on
+	// CacheBlendEngine too — validation must reject it.
+	privileged := true
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:              L1BackendSpec{SizeGB: 10},
+		SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 || errs[0].Field != "spec.securityContext.privileged" {
+		t.Fatalf("expected a rejection at spec.securityContext.privileged, got %v", errs)
 	}
 }

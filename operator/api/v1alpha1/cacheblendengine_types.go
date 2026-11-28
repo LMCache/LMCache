@@ -235,10 +235,31 @@ type CacheBlendEngineSpec struct {
 	// claiming any via the nvidia.com/gpu device plugin; on many clusters
 	// NVIDIA_VISIBLE_DEVICES=all already grants that visibility without it, so it
 	// defaults to false. Set it to true only on clusters where the engine cannot
-	// otherwise see the GPUs.
+	// otherwise see the GPUs. This field is the single source of truth for the
+	// privileged bit: it always wins over spec.securityContext (whose
+	// privileged key is rejected at validation).
 	// +optional
 	// +kubebuilder:default=false
 	Privileged *bool `json:"privileged,omitempty"`
+
+	// securityContext sets the engine container's security context
+	// (runAsUser, runAsGroup, capabilities, seccompProfile, ...). The
+	// official LMCache images run as the non-root `lmcache` user (uid 1000);
+	// set runAsUser: 0 to run as root — e.g. to reuse a cache or mount
+	// previously populated under /root, or to read the 0400 root-owned L2
+	// master-key mount. The privileged key is governed by spec.privileged
+	// and rejected here.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// podSecurityContext sets the pod-level security context (fsGroup,
+	// runAsUser/runAsGroup defaults, supplementalGroups, ...) inherited by
+	// the engine container and the init containers. fsGroup is the
+	// Kubernetes fix for volume-ownership problems: the L2 master key is
+	// mounted 0400 root-owned, so a non-root engine needs fsGroup (or
+	// securityContext.runAsUser: 0) to read it.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 
 	// extraArgs are additional CLI flags appended to the server command.
 	// They are appended last and can override any auto-generated flag.

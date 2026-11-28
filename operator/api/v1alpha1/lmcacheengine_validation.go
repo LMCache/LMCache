@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -42,7 +43,21 @@ func (e *LMCacheEngine) ValidateSpec() field.ErrorList {
 
 	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
 	errs = append(errs, validateCoordinatorConnectionSpec(spec.Coordinator)...)
+	errs = append(errs, validateSecurityContextPrivileged(spec.SecurityContext, field.NewPath("spec", "securityContext"))...)
 
+	return errs
+}
+
+// validateSecurityContextPrivileged enforces the securityContext contract
+// shared by both engine kinds: the builder always forces the privileged bit
+// from spec.privileged, so a privileged key inside securityContext would be
+// a silent no-op — reject it and point at the dedicated field.
+func validateSecurityContextPrivileged(sc *corev1.SecurityContext, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if sc != nil && sc.Privileged != nil {
+		errs = append(errs, field.Invalid(path.Child("privileged"), *sc.Privileged,
+			"is governed by spec.privileged; set privileged there instead"))
+	}
 	return errs
 }
 
