@@ -96,7 +96,7 @@ def test_retrieve_copies_only_through_the_cache_context(monkeypatch):
         instance_id=1,
         gpu_block_ids=[[1, 2, 3], [0, 0, 9]],
         event_ipc_handle=b"x",
-    )
+    ).result()
 
     assert ok is True
     assert _copies(cache_context) == [(0, _H2D), (1, _H2D)]

@@ -8,20 +8,34 @@ worker thread.  Within each worker, tasks execute sequentially in FIFO order.
 This is used for GPU-bound request handlers (STORE / RETRIEVE) so that all
 operations for a given vLLM instance land on one thread, eliminating the need
 for per-instance locks on the shared temporary GPU buffer.
+
+A task may return a ``Deferred``: its worker is then free, and the submitter's
+future completes when the ``Deferred`` does.
 """
 
 # Standard
 from concurrent.futures import Future
+import functools
 import queue
 import threading
 
 # First Party
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.transport.futures import Deferred
 
 logger = init_logger(__name__)
 
 # Sentinel object to signal worker shutdown
 _SHUTDOWN = object()
+
+
+def _complete_from(target: Future, source: Future) -> None:
+    """Give ``target`` the result or exception ``source`` finished with."""
+    exc = source.exception()
+    if exc is not None:
+        target.set_exception(exc)
+    else:
+        target.set_result(source.result())
 
 
 class AffinityThreadPool:
@@ -81,6 +95,11 @@ class AffinityThreadPool:
             if future.set_running_or_notify_cancel():
                 try:
                     result = fn(*args, **kwargs)
+                    if isinstance(result, Deferred):
+                        result.add_done_callback(
+                            functools.partial(_complete_from, future)
+                        )
+                        continue
                     future.set_result(result)
                 except BaseException as exc:
                     future.set_exception(exc)
@@ -134,7 +153,8 @@ class AffinityThreadPool:
     def submit(self, fn, *args, affinity_key: int = 0, **kwargs) -> Future:
         """Submit *fn* for execution on the worker bound to *affinity_key*.
 
-        Returns a :class:`concurrent.futures.Future`.
+        Returns a :class:`concurrent.futures.Future`. If *fn* returns a
+        ``Deferred``, the future completes when that does.
         """
         future: Future = Future()
         slot = self._slot_for_key(affinity_key)

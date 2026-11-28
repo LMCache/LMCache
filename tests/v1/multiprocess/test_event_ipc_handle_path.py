@@ -304,7 +304,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         b"completion-handle",
         True,
     )
-    assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
+    assert module.retrieve(key, 1, [[]], b"retrieve-producer").result() == (
         b"completion-handle",
         False,
     )

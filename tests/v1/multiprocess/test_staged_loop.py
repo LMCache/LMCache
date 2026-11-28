@@ -13,7 +13,7 @@ import torch
 
 # First Party
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.object_group_transfer import staged
+from lmcache.v1.multiprocess.object_group_transfer import engines, staged
 from lmcache.v1.multiprocess.object_group_transfer.engines import TransferEngine
 from lmcache.v1.multiprocess.object_group_transfer.planning import (
     resolve_chunk_range,
@@ -54,6 +54,8 @@ def harness(monkeypatch):
     ops.multi_layer_block_kv_transfer.side_effect = fake_kernel
     monkeypatch.setattr(staged, "device_ops", ops)
     monkeypatch.setattr(staged, "stage", fake_stage)
+    # A retrieve step is staged through ``engines.run_step``.
+    monkeypatch.setattr(engines, "stage", fake_stage)
     return cc, log
 
 
