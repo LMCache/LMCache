@@ -2,16 +2,21 @@
 # Standard
 from pathlib import Path
 from unittest.mock import patch
+import importlib.util
 import sys
 import unittest
 
-# Add .buildkite/scripts to sys.path
-# test-import: allow -- standalone CI script outside lmcache package
-scripts_dir = Path(__file__).resolve().parent.parent / ".buildkite" / "scripts"
-sys.path.insert(0, str(scripts_dir))  # test-import: allow
-
-# Third Party
-import fast_fail_cancel  # noqa: E402
+_SCRIPT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / ".buildkite"
+    / "scripts"
+    / "fast_fail_cancel.py"
+)
+_SPEC = importlib.util.spec_from_file_location("fast_fail_cancel", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+fast_fail_cancel = importlib.util.module_from_spec(_SPEC)
+sys.modules["fast_fail_cancel"] = fast_fail_cancel
+_SPEC.loader.exec_module(fast_fail_cancel)
 
 
 class TestFastFailCancel(unittest.TestCase):
