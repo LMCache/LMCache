@@ -39,7 +39,6 @@ steps:
   - group: ":zap: Multiprocess PR-Smoke (1-GPU)"
     steps:
       - label: ":zap: vllm / lm_eval_lmcache_driven / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
         env:
           INFERENCE_ENGINE: "vllm"
@@ -55,7 +54,6 @@ steps:
       # the CPU client wheel has no lmcache.cuda_ops, so the worker falls back
       # to the torch kernels. client-wheel.sh exits 42 when only it fails.
       - label: ":zap: vllm / client_wheel / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh client_wheel
         env:
           INFERENCE_ENGINE: "vllm"
@@ -68,7 +66,6 @@ steps:
         artifact_paths: ["*.log", "ci_results_*/client_wheel/*.txt"]
 
       - label: ":zap: vllm / restart_recovery / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
         env:
           INFERENCE_ENGINE: "vllm"
@@ -79,7 +76,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":zap: vllm / cache_stats / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
         env:
           INFERENCE_ENGINE: "vllm"
@@ -90,7 +86,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":zap: vllm / lazy_offload / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
         env:
           INFERENCE_ENGINE: "vllm"
@@ -101,7 +96,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":zap: vllm / http_api / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         env:
           INFERENCE_ENGINE: "vllm"
@@ -114,7 +108,6 @@ steps:
   - group: ":zap: Multiprocess PR-Smoke (CPU-only)"
     steps:
       - label: ":zap: cpu_e2e_validation ({{matrix.mode}} / {{matrix.request_transport}})"
-        cancel_on_build_failing: true
         command: |
           case "{{matrix.mode}}" in
             shm) ;;

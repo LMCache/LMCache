@@ -83,7 +83,6 @@ steps:
     if: build.env("CI_WEEKLY_FULL") == "1"
     steps:
       - label: ":compression: {{matrix.inference_engine}} / dsv4_flash_tp / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh dsv4_flash_tp
         matrix: *common-matrix
         env:
@@ -123,7 +122,6 @@ steps:
     steps:
       # Retain uncompressed, 4x, and 128x KV paths without loading the full model.
       - label: ":compression: vllm / hma_dsv4_correctness / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
@@ -172,7 +170,6 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log", "ci_results_*/hma_dsv4_correctness/**/*"]
       - label: ":compression: sglang / hma_dsv4_correctness / grpc"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh hma_dsv4_correctness
         env:
           MODEL: "deepseek-ai/DeepSeek-V4-Flash"
@@ -219,7 +216,6 @@ steps:
     if: build.env("VERIFY_AND_PIN_VLLM") !~ /true/ && build.env("VERIFY_AND_PIN_SGLANG") !~ /true/
     steps:
       - label: ":compression: {{matrix.inference_engine}} / vllm_bench / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
         matrix: *vllm-matrix
         env:
@@ -245,7 +241,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         matrix: *common-matrix
         env:
@@ -258,7 +253,6 @@ steps:
         artifact_paths: ["*.log", "ci_results_*/long_doc_qa/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / long_doc_qa_l2 / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa_l2
         matrix: *common-matrix
         env:
@@ -274,7 +268,6 @@ steps:
         artifact_paths: ["*.log", "ci_results_*/long_doc_qa_l2/*.txt"]
 
       - label: ":compression: {{matrix.inference_engine}} / deadlock / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
         matrix: *common-matrix
         env:
@@ -286,7 +279,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: {{matrix.inference_engine}} / mp_autostart_tp2 / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh mp_autostart_tp2
         matrix: *vllm-matrix
         env:
@@ -301,7 +293,6 @@ steps:
       # single 2-GPU pod (localhost). Verifies engine B serves a long prompt's
       # KV from engine A over P2P.
       - label: ":compression: {{matrix.inference_engine}} / p2p / {{matrix.p2p_rpc_port_mode}} / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh p2p
         matrix:
           setup:
@@ -329,7 +320,6 @@ steps:
       # non-zero ranks rank 0's recurrent-state shard and diverges the output.
       # The 48B model load needs the long timeout on a cold node.
       - label: ":compression: {{matrix.inference_engine}} / kimi_linear_tp / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh kimi_linear_tp
         matrix: *common-matrix
         env:
@@ -347,7 +337,6 @@ steps:
       # Correctness coverage for both transfer modes. engine_driven requires
       # SHM transport, so both matrix jobs use the existing dshm pod spec.
       - label: ":compression: {{matrix.inference_engine}} / lm_eval_{{matrix.mode}} / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -394,7 +383,6 @@ steps:
       # command; env vars select the transfer mode. Checks: no crash, score
       # drift < 0.01, preemption actually occurred, score >= SCORE_MIN.
       - label: ":compression: {{matrix.inference_engine}} / lm_eval_preemption / {{matrix.mode}} / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -432,7 +420,6 @@ steps:
       # the rungs that isolate a failure (see the workload script's header).
       # lmcache-driven only: that is the transfer path this covers.
       - label: ":compression: preemption_correctness / async={{matrix.async_scheduling}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
         matrix:
           setup:
@@ -460,7 +447,6 @@ steps:
       # Temporarily disabled: hma_lm_eval_gemma4.
 
       - label: ":compression: {{matrix.inference_engine}} / fault_tolerance / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
         matrix: *vllm-matrix
         env:
@@ -472,7 +458,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: {{matrix.inference_engine}} / restart_recovery / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
         matrix: *common-matrix
         env:
@@ -484,7 +469,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: {{matrix.inference_engine}} / cache_stats / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
         matrix: *vllm-matrix
         env:
@@ -501,7 +485,6 @@ steps:
       # must stay local, later ones must land on the peer, and every prompt
       # must be served from LMCache on replay.
       - label: ":compression: {{matrix.inference_engine}} / p2p_write / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh p2p_write
         matrix: *vllm-matrix
         env:
@@ -516,7 +499,6 @@ steps:
       # (threshold=2, select_count=1). Three requests verify that the first
       # two remain pending and the third drains the first request.
       - label: ":compression: {{matrix.inference_engine}} / lazy_offload / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh lazy_offload
         matrix: *vllm-matrix
         env:
@@ -532,7 +514,6 @@ steps:
       # An idle engine must hold every store; a workload twice the pool must
       # drain them.
       - label: ":compression: {{matrix.inference_engine}} / eviction_aware_lazy_offload / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh eviction_aware_lazy_offload
         matrix: *vllm-matrix
         env:
@@ -544,7 +525,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: {{matrix.inference_engine}} / sleep_mode / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh sleep_mode
         matrix: *vllm-matrix
         env:
@@ -556,7 +536,6 @@ steps:
         artifact_paths: ["*.log", "ci_results_*/sleep_mode/**/*"]
 
       - label: ":compression: {{matrix.inference_engine}} / http_api / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh http_api
         matrix: *common-matrix
         env:
@@ -568,7 +547,6 @@ steps:
         artifact_paths: ["*.log"]
 
       - label: ":compression: {{matrix.inference_engine}} / gds_smoke / {{matrix.request_transport}}"
-        cancel_on_build_failing: true
         command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke
         matrix: *vllm-matrix
         env:
@@ -603,7 +581,6 @@ steps:
       # runner script, so an empty string ("") is meaningful and differs
       # from unset. `__default__` is the sentinel meaning "shm mode".
       - label: ":compression: cpu_e2e_validation ({{matrix.mode}} / {{matrix.request_transport}})"
-        cancel_on_build_failing: true
         # matrix.adjustments does not support `env:` in Buildkite. Instead
         # we branch on {{matrix.mode}} inside the command to set the
         # per-mode env before invoking the shared runner script.
