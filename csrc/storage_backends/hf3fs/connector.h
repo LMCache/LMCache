@@ -149,7 +149,8 @@ class Hf3fsConnector : public ConnectorBase<WorkerHf3fsConn> {
                  bool shard_dirs = false,
                  WorkerPoolConfig worker_pool_config = {});
 
-  ~Hf3fsConnector() override = default;
+  // Join workers while the paths and key buffer they use are still alive.
+  ~Hf3fsConnector() override { close(); }
 
  protected:
   WorkerHf3fsConn create_connection() override;
