@@ -268,6 +268,7 @@ source .venv/bin/activate
 uv pip install vllm/sglang/other engines
 
 # Install LMCache. Requires nvcc. Use --no-build-isolation to ensure torch compatibility.
+uv pip install -r requirements/build.txt
 uv pip install -e . --no-build-isolation
 
 # For ROCm build

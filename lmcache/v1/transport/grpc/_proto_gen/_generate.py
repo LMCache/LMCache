@@ -3,7 +3,10 @@
 
 Each ``_proto_gen`` package is generated from the ``protos`` directory next to
 it. Without arguments this builds every package in ``GENERATED_PACKAGES``; pass
-package names to build only those.
+package names to build only those. Run it as a file from the repository root,
+the way ``setup.py`` and CI do::
+
+    python lmcache/v1/transport/grpc/_proto_gen/_generate.py
 """
 
 # Standard

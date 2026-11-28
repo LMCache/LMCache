@@ -1,15 +1,64 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from pathlib import Path
+from unittest.mock import patch
 import argparse
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.cli.commands import memory
 from lmcache.cli.commands.memory import MemoryCommand
 from lmcache.v1.memory_orchestrator.server import OrchestratorConfig, parse_args
+
+_FailingImport = Callable[[str, ImportError], AbstractContextManager[None]]
+
+
+def _missing_orchestrator_binding() -> ModuleNotFoundError:
+    return ModuleNotFoundError(
+        "No module named 'lmcache.v1.memory_orchestrator._proto_gen."
+        "memory_orchestrator_pb2_grpc'",
+        name="lmcache.v1.memory_orchestrator._proto_gen.memory_orchestrator_pb2_grpc",
+    )
+
+
+def test_memory_command_reports_ungenerated_bindings_at_registration(
+    failing_import: _FailingImport,
+) -> None:
+    """A build that skipped the gRPC generator names it, not a reinstall."""
+    with (
+        failing_import(
+            "lmcache.v1.memory_orchestrator.server", _missing_orchestrator_binding()
+        ),
+        patch.object(memory.logger, "warning") as mock_warning,
+    ):
+        MemoryCommand().add_arguments(argparse.ArgumentParser())
+
+    template, *values = mock_warning.call_args.args
+    assert (template % tuple(values)).endswith("_generate.py")
+
+
+def test_memory_command_explains_ungenerated_bindings(
+    failing_import: _FailingImport, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A build that skipped the gRPC generator points at the generator."""
+    command = MemoryCommand()
+    command.register(argparse.ArgumentParser().add_subparsers())
+    with (
+        failing_import(
+            "lmcache.v1.memory_orchestrator.server", _missing_orchestrator_binding()
+        ),
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        command.execute(argparse.Namespace())
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "_generate.py" in err
 
 
 def test_memory_command_serves_the_parsed_config(

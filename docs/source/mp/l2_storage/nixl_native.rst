@@ -53,6 +53,7 @@ public C++ headers as well as ``libnixl``. Build LMCache with:
    export BUILD_WITH_NIXL=1
    export NIXL_INCLUDE_DIR=/opt/nixl/include
    export NIXL_LIBRARY_DIR=/opt/nixl/lib
+   uv pip install -r requirements/build.txt
    uv pip install -e . --no-build-isolation
 
 ``NIXL_PREFIX=/opt/nixl`` can replace the two directory variables when the

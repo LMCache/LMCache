@@ -5,7 +5,7 @@
 import argparse
 
 # First Party
-from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.base import BaseCommand, missing_grpc_bindings_hint
 from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
@@ -35,9 +35,10 @@ class ServerCommand(BaseCommand):
 
         Composes argument groups from the multiprocess, storage manager,
         HTTP frontend, Prometheus, and telemetry config modules.
-        Silently skips argument registration when server dependencies
-        (e.g. CUDA extensions) are not installed; ``execute`` will then
-        print an actionable error.
+        When the server runtime cannot be imported, logs the remedy and skips
+        argument registration; ``execute`` then prints the same remedy: an
+        editable build that skipped the gRPC generator is pointed at it, a
+        lightweight ``lmcache-cli`` install at ``pip install lmcache``.
 
         Args:
             parser: The ``ArgumentParser`` for this subcommand.
@@ -60,11 +61,10 @@ class ServerCommand(BaseCommand):
             add_observability_args(parser)
             add_coordinator_args(parser)
         except ImportError as e:
-            logger.warning(
-                "lmcache-cli (lightweight) detected (%s); install the full "
-                "lmcache package to use 'server' and 'bench'.",
-                e,
+            advice = missing_grpc_bindings_hint(e) or (
+                "install the full lmcache package to use 'server' and 'bench'."
             )
+            logger.warning("Cannot load the 'server' runtime (%s); %s", e, advice)
             return
 
     def execute(self, args: argparse.Namespace) -> None:
@@ -92,11 +92,12 @@ class ServerCommand(BaseCommand):
             )
             from lmcache.v1.multiprocess.http_auth import HTTPAuthenticationConfig
             from lmcache.v1.multiprocess.http_server import run_http_server
-        except ImportError:
+        except ImportError as e:
             print(
-                "The 'lmcache server' command requires the full lmcache "
-                "installation with CUDA extensions.\n"
-                "Install with: pip install lmcache",
+                f"The 'lmcache server' command cannot load its runtime: {e}",
+                missing_grpc_bindings_hint(e)
+                or "Install the full lmcache package with: pip install lmcache",
+                sep="\n",
                 file=sys.stderr,
             )
             sys.exit(1)

@@ -6,7 +6,7 @@ import argparse
 import sys
 
 # First Party
-from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.base import BaseCommand, missing_grpc_bindings_hint
 from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
@@ -30,9 +30,10 @@ class MemoryCommand(BaseCommand):
         """Add the orchestrator flags, shared with
         ``python -m lmcache.v1.memory_orchestrator``.
 
-        Skips registration when the orchestrator dependencies (gRPC and its
-        generated bindings) are not installed; ``execute`` then prints an
-        actionable error.
+        When the orchestrator runtime cannot be imported, logs the remedy and
+        skips registration; ``execute`` then prints the same remedy: an
+        editable build that skipped the gRPC generator is pointed at it, a
+        lightweight ``lmcache-cli`` install at ``pip install lmcache``.
 
         Args:
             parser: The ``ArgumentParser`` for this subcommand.
@@ -41,11 +42,10 @@ class MemoryCommand(BaseCommand):
             # First Party
             from lmcache.v1.memory_orchestrator.server import add_orchestrator_args
         except ImportError as e:
-            logger.warning(
-                "Memory orchestrator dependencies are missing (%s); install the "
-                "full lmcache package to use 'memory'.",
-                e,
+            advice = missing_grpc_bindings_hint(e) or (
+                "install the full lmcache package to use 'memory'."
             )
+            logger.warning("Cannot load the memory orchestrator (%s); %s", e, advice)
             return
         add_orchestrator_args(parser)
 
@@ -67,10 +67,12 @@ class MemoryCommand(BaseCommand):
                 parse_args_to_orchestrator_config,
                 serve,
             )
-        except ImportError:
+        except ImportError as e:
             print(
-                "The 'lmcache memory' command requires the full lmcache "
-                "installation.\nInstall with: pip install lmcache",
+                f"The 'lmcache memory' command cannot load its runtime: {e}",
+                missing_grpc_bindings_hint(e)
+                or "Install the full lmcache package with: pip install lmcache",
+                sep="\n",
                 file=sys.stderr,
             )
             sys.exit(1)

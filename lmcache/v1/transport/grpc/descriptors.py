@@ -60,8 +60,8 @@ def get_service_bindings(rpc_client: type | None = None) -> dict[str, ServiceBin
             bindings[descriptor.name] = ServiceBinding(descriptor, grpc_module)
     if not bindings:
         raise RuntimeError(
-            "No generated gRPC services found. Run "
-            "`python -m lmcache.v1.transport.grpc._proto_gen._generate`."
+            "No generated gRPC services found. From the repository root run "
+            "`python lmcache/v1/transport/grpc/_proto_gen/_generate.py`."
         )
     return bindings
 

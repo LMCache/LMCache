@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from pathlib import Path
 import abc
 import argparse
 import sys
@@ -58,6 +59,52 @@ def nonnegative_int(value: str) -> int:
     if count < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
     return count
+
+
+def missing_grpc_bindings_hint(error: ImportError) -> str | None:
+    """Return how to produce the binding *error* shows as missing, or ``None``.
+
+    An editable ``pip install -e .`` runs the generator from ``build_py``, but
+    setuptools downgrades a failing custom ``build_py`` to a warning, so a
+    missing ``grpcio-tools`` leaves a package that imports without the
+    bindings and the commands that need them fail with an import error that
+    hides the cause. The failing import itself names what is missing, so the
+    remedy is tied to it and offered for nothing else. It runs the generator
+    from the repository, so it is only offered for a package installed from a
+    source checkout, where ``requirements/proto.txt`` sits next to it; the
+    ``lmcache-cli`` wheel ships without the bindings too, and its users get
+    ``None`` so that the caller's reinstall advice stands.
+
+    Args:
+        error: The ``ImportError`` raised while loading the command's runtime.
+
+    Returns:
+        The remedy, or ``None`` when *error* does not report a missing binding
+        or the package is not installed from a source checkout.
+    """
+    # <repository>/lmcache/cli/commands/base.py
+    repository_root = Path(__file__).resolve().parents[3]
+    if not (repository_root / "requirements" / "proto.txt").is_file():
+        return None
+    name = error.name
+    if name is None:
+        return None
+    if error.path is None:
+        # "No module named <package>.<binding>": the binding is the leaf.
+        package, _, binding = name.rpartition(".")
+        if not binding.endswith(("_pb2", "_pb2_grpc")):
+            return None
+    else:
+        # "cannot import name <binding> from <package>": the name is the package.
+        package = name
+    if not package.endswith("._proto_gen"):
+        return None
+    return (
+        "This installation is missing LMCache's generated gRPC bindings. "
+        "From the repository root, regenerate them with:\n"
+        "  pip install -r requirements/proto.txt\n"
+        "  python lmcache/v1/transport/grpc/_proto_gen/_generate.py"
+    )
 
 
 def _route_head(tokens: Sequence[str]) -> tuple[str | None, list[str]]:

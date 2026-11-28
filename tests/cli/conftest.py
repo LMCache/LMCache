@@ -8,7 +8,10 @@ stub into ``sys.modules`` for the duration of each CLI test only.
 """
 
 # Standard
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
+from importlib.machinery import ModuleSpec
+from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock
 import importlib
@@ -20,6 +23,47 @@ import types
 import pytest
 
 _MOD_NAME = "lmcache.lmcache_native"
+
+
+class _FailingImportFinder:
+    """Meta-path finder that fails the import of one module with an error."""
+
+    def __init__(self, module: str, error: ImportError) -> None:
+        self._module = module
+        self._error = error
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None = None,
+        target: ModuleType | None = None,
+    ) -> ModuleSpec | None:
+        if fullname == self._module:
+            raise self._error
+        return None
+
+
+@pytest.fixture
+def failing_import() -> Callable[[str, ImportError], AbstractContextManager[None]]:
+    """Make ``import <module>`` raise the given error inside the block.
+
+    The module is dropped from ``sys.modules`` so the import system consults
+    the meta path again; both the entry and the finder are restored afterwards.
+    """
+
+    @contextmanager
+    def fail(module: str, error: ImportError) -> Iterator[None]:
+        finder = _FailingImportFinder(module, error)
+        saved = sys.modules.pop(module, None)
+        sys.meta_path.insert(0, finder)
+        try:
+            yield
+        finally:
+            sys.meta_path.remove(finder)
+            if saved is not None:
+                sys.modules[module] = saved
+
+    return fail
 
 
 @pytest.fixture(autouse=True)

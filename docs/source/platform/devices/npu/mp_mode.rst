@@ -6,7 +6,7 @@ MP Mode on Ascend NPU
 MP mode is the multiprocess deployment architecture of LMCache: the KV cache
 is owned by a standalone ``lmcache server`` process, and vLLM attaches to it
 through the ``LMCacheMPConnector``. The server owns L1/L2 storage, eviction,
-and lookup; the engine talks to it over the MP protocol (ZMQ control plane +
+and lookup; the engine talks to it over the MP protocol (gRPC control plane +
 shared-memory / device-handle data plane). Compared with running LMCache inside
 the vLLM process, this keeps cache work out of the engine loop and allows one
 cache to be shared by several engines.

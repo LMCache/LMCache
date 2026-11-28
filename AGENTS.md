@@ -57,6 +57,7 @@ source .venv/bin/activate
 
 # Install dependencies
 uv pip install torch               # pre-requisite for CUDA extensions
+uv pip install -r requirements/build.txt
 uv pip install -e . --no-build-isolation
 ```
 

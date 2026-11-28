@@ -48,13 +48,23 @@ environment:
 
    git clone https://github.com/LMCache/LMCache.git
    cd LMCache
-   pip install -v --no-build-isolation -e .
+   pip install -r requirements/build.txt
+   TORCH_DEVICE_BACKEND_AUTOLOAD=0 pip install -v --no-build-isolation -e .
    cd ..
 
    git clone --recurse-submodules \
        https://github.com/LMCache/LMCache-Ascend.git
    cd LMCache-Ascend
    pip install -v --no-build-isolation -e .
+
+``--no-build-isolation`` builds inside the current environment, so the LMCache
+step needs ``requirements/build.txt`` installed first: its ``grpcio-tools``
+generates the gRPC bindings that ``lmcache server`` needs, and an editable
+build only warns when it has to skip them, leaving ``lmcache server`` unable
+to load its runtime. ``TORCH_DEVICE_BACKEND_AUTOLOAD=0`` keeps ``torch_npu``
+out of the build: ``setup.py`` imports torch to detect the device, and with
+the CANN runtime loaded the protoc embedded in ``grpcio-tools`` crashes
+inside ``build_py``.
 
 The ``third_party/hcomm`` submodule must match the container's CANN version.
 Check the installed CANN version, switch the submodule to the matching tag

@@ -125,7 +125,7 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 3
 
    platform/index
 
