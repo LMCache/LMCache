@@ -1526,6 +1526,7 @@ _NOT_RACED_L1_CALLS = frozenset(
         "get_memory_usage",
         "get_staging_memory_usage",
         "get_prefetch_locked_bytes",
+        "prefetch_locked_bytes_exceed",
     }
 )
 

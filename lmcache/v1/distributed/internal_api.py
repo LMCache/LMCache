@@ -361,6 +361,10 @@ class L1ManagerInterface(Protocol):
         """Track resident, read-locked objects a prefetch holds for a request."""
         ...
 
+    def prefetch_locked_bytes_exceed(self, budget: float) -> bool:
+        """Whether the bytes still read-locked by prefetch exceed the budget."""
+        return self.get_prefetch_locked_bytes() > budget
+
     def get_prefetch_locked_bytes(self) -> int:
         """Return bytes of tracked objects that are still read-locked."""
         ...

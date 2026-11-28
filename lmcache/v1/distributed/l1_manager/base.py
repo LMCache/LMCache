@@ -222,6 +222,7 @@ class BaseL1Manager(L1ManagerInterface):
         # Objects a prefetch read-locked for a request that has not consumed
         # them yet.
         self._prefetch_locked: dict[ObjectKey, L1ObjectState] = {}
+        self._max_prefetch_allocation = 0
 
         self._memory_manager = memory_manager
 
@@ -337,6 +338,9 @@ class BaseL1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
+            # An ordinary reader cannot inherit an expired prefetch charge.
+            if self._prefetch_locked and not entry.read_lock.is_locked():
+                self._prefetch_locked.pop(key, None)
             # TODO(perf): support a count argument in
             # TTLLock.lock() to avoid Python for-loop
             # overhead (TTLLock is C++ std::atomic).
@@ -744,6 +748,8 @@ class BaseL1Manager(L1ManagerInterface):
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
+            if self._prefetch_locked and not entry.read_lock.is_locked():
+                self._prefetch_locked.pop(key, None)
             for _ in range(total):
                 entry.read_lock.lock()
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
@@ -1047,10 +1053,25 @@ class BaseL1Manager(L1ManagerInterface):
             keys: Keys of the locked objects. Keys that are not resident or
                 not read-locked are skipped.
         """
+        largest = self._max_prefetch_allocation if self._prefetch_locked else 0
         for key in keys:
             entry = self._objects.get(key, None)
             if entry is not None and entry.read_lock.is_locked():
                 self._prefetch_locked[key] = entry
+                size = entry.memory_obj.get_physical_size()
+                if size > largest:
+                    largest = size
+        self._max_prefetch_allocation = largest
+
+    @l1_mgr_synchronized
+    def prefetch_locked_bytes_exceed(self, budget: float) -> bool:
+        """Check the exact budget, skipping a TTL scan when even the
+        largest tracked allocation per key fits. Expired locks, padding
+        and mixed object sizes can only inflate this bound.
+        """
+        if len(self._prefetch_locked) * self._max_prefetch_allocation <= budget:
+            return False
+        return self._count_prefetch_locked_bytes() > budget
 
     @l1_mgr_synchronized
     def get_prefetch_locked_bytes(self) -> int:
@@ -1062,6 +1083,9 @@ class BaseL1Manager(L1ManagerInterface):
             read-locked. Part of :meth:`get_memory_usage`'s used bytes, and
             disjoint from :meth:`get_staging_memory_usage`.
         """
+        return self._count_prefetch_locked_bytes()
+
+    def _count_prefetch_locked_bytes(self) -> int:
         self._prefetch_locked = {
             key: entry
             for key, entry in self._prefetch_locked.items()

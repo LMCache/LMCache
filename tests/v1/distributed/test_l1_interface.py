@@ -242,3 +242,19 @@ def test_prefetch_locked_ends_with_the_prefetch_read(l1: L1ManagerInterface) -> 
     assert l1.reserve_read([key(5)])[key(5)][0] is L1Error.SUCCESS
     assert l1.get_prefetch_locked_bytes() == 0
     l1.finish_read([key(5)])
+
+
+def test_prefetch_budget_uses_logical_bytes_for_mixed_objects(
+    l1: L1ManagerInterface,
+) -> None:
+    keys = [key(6), key(7)]
+    large = MemoryLayoutDesc([torch.Size([2 * ALIGN])], [torch.uint8])
+    l1.reserve_write(keys[:1], [False], large)
+    _, obj = l1.reserve_write(keys[1:], [False], LAYOUT)[keys[1]]
+    assert isinstance(obj, memory_management.TensorMemoryObj)
+    obj.set_used_size(17)
+    l1.finish_write_and_reserve_read(keys)
+    l1.track_prefetch_locked(keys)
+    assert not l1.prefetch_locked_bytes_exceed(2 * ALIGN + 17)
+    assert l1.prefetch_locked_bytes_exceed(2 * ALIGN + 16)
+    l1.finish_read(keys)
