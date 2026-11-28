@@ -113,6 +113,19 @@ Shared APIs used by the external in-process engine have contract tests under
 
 ### CPU-only connector import checks
 
+For an isolated x86 CPU Triton staging check, import
+`vllm.v1.worker.cpu.shm` before constructing
+`vllm.v1.worker.gpu.buffer_utils.StagedWriteTensor`. CPU workers install their
+CPU `UvaBuffer` through that import; skipping it can fail on pinned allocation
+before the kernel is reached. A `SIGILL` Python traceback identifies the launch
+site, not the failing native instruction. Preserve `lscpu`, exact installed
+versions, Triton's cache and a core/GDB instruction dump before diagnosing ISA
+compatibility. On disposable Linux CI runners, include file-backed private
+mappings in `coredump_filter` (`0x15`) so unlinked Triton libraries remain
+inspectable; do not change a shared host's global `kernel.core_pattern`.
+GitHub Actions does not allow the `runner` context in job-level `env`.
+Set runner-derived paths through a step's `GITHUB_ENV` or step-level `env`.
+
 CPU nightly wheels are produced by `LMCache/vllm-cpu`; this repository verifies
 them and writes `github_nightly_tested_vllm`. Compare the wheel's build time
 with `validated_at`: repeating a passing test does not make an old build fresh.

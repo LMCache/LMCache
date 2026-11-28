@@ -214,10 +214,17 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
-      - name: Install FFmpeg (Linux)
+      - name: Install FFmpeg and GDB (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+          sudo apt-get update -qq && sudo apt-get install -y ffmpeg gdb
+
+      - name: Configure native crash diagnostics (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          lscpu | tee /tmp/cpu_device_hardware.log
+          echo "TRITON_CACHE_DIR=${RUNNER_TEMP}/cpu-device-triton" >> "$GITHUB_ENV"
+          sudo sysctl -w kernel.core_pattern="${RUNNER_TEMP}/cpu-device-core.%e.%p"
 
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
@@ -282,6 +289,15 @@ jobs:
         if: matrix.request_transport == 'grpc-native'
         run: pip install pygrpc-native==0.7.0
 
+      - name: Record installed CPU runtime
+        run: |
+          python -m pip freeze > /tmp/cpu_device_environment.log
+          python - <<'PY' >> /tmp/cpu_device_environment.log
+          import importlib.metadata as md
+          print("CPU wheel build manifest:")
+          print(md.distribution("vllm-cpu-nightly").read_text("cpu-nightly.json"))
+          PY
+
       # server_bench is model-agnostic (cpu_server_bench_test.sh never
       # touches any model — it only exercises the lmcache server's KV
       # transfer path via `lmcache bench server`). Gate it on the
@@ -325,6 +341,11 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.hf_token }}
         run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            ulimit -c unlimited
+            # Include file-backed code, including unlinked Triton libraries.
+            echo 0x15 > /proc/self/coredump_filter
+          fi
           LMCACHE_E2E_TRANSPORT_MODE=inline \
           LMCACHE_HTTP_PORT_E2E=18082 \
           LMCACHE_REQUEST_PORT_E2E=15557 \
@@ -340,6 +361,10 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.hf_token }}
         run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            ulimit -c unlimited
+            echo 0x15 > /proc/self/coredump_filter
+          fi
           LMCACHE_E2E_TRANSPORT_MODE=shm \
           LMCACHE_HTTP_PORT_E2E=18083 \
           LMCACHE_REQUEST_PORT_E2E=15558 \
@@ -356,11 +381,31 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.hf_token }}
         run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            ulimit -c unlimited
+            echo 0x15 > /proc/self/coredump_filter
+          fi
           LMCACHE_E2E_TRANSPORT_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_E2E=18084 \
           LMCACHE_REQUEST_PORT_E2E=15559 \
           VLLM_PORT_E2E=18002 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
+
+      - name: Inspect native crashes (Linux)
+        if: failure() && runner.os == 'Linux'
+        run: |
+          for core in "$RUNNER_TEMP"/cpu-device-core.*; do
+            [[ -f "$core" ]] || continue
+            # GDB expands $pc; the shell must leave it intact.
+            # shellcheck disable=SC2016
+            gdb -batch -quiet \
+              -ex 'set auto-load off' \
+              -ex 'info proc mappings' \
+              -ex 'x/16i $pc' \
+              -ex 'thread apply all bt 12' \
+              "$(command -v python)" "$core" \
+              > "/tmp/cpu_device_$(basename "$core").log" 2>&1 || true
+          done
 
       - name: Upload logs on failure
         if: failure()
@@ -369,6 +414,7 @@ jobs:
           name: cpu-device-logs-${{ matrix.os }}-${{ matrix.model.name }}-${{ matrix.request_transport }}
           path: |
             /tmp/cpu_device_*.log
+            ${{ runner.temp }}/cpu-device-triton/
           if-no-files-found: ignore
 
       # Nightly only: hand the pin/report job a machine-readable verdict
