@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Sequence
 import threading
 import time
@@ -12,7 +13,14 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.v1.common.custom_types import EngineType, IPCCacheServerKey, KVEventProfile
+from lmcache.v1.common.custom_types import (
+    EngineType,
+    IPCCacheServerKey,
+    KVEventProfile,
+    RetrieveCoverage,
+    RetrieveGroupCoverage,
+    RetrieveReply,
+)
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.common.logging import init_logger
@@ -860,13 +868,41 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
             null_block_id = self._ctx.null_block_id
-            skipped_chunks = all_null_chunk_masks(
+            manager = cache_context.kv_layer_groups_manager
+            kernel_nulls = all_null_chunk_masks(
                 gpu_block_ids,
-                cache_context.kv_layer_groups_manager.object_groups,
+                [
+                    ObjectGroupInfo(kernel_group_indices=[kg])
+                    for kg in range(manager.num_kernel_groups)
+                ],
                 blocks_per_chunk,
                 num_chunks,
                 null_block_id,
             )
+            skipped_chunks = []
+            for group in manager.object_groups:
+                mask = []
+                for chunk in range(num_chunks):
+                    component_nulls = {
+                        kernel_nulls[kg][chunk] for kg in group.kernel_group_indices
+                    }
+                    if len(component_nulls) > 1:
+                        # An external object is atomic: storing only some of
+                        # its components would replace healthy bytes with null
+                        # pages. Separated groups permit ordinary range STORE.
+                        logger.error(
+                            "Refusing partial-component STORE for request %s; "
+                            "use separated object groups",
+                            key.request_id,
+                        )
+                        event_backend.record_event(event, cache_context.stream)
+                        return (
+                            event_backend.export_event(event, cache_context.device),
+                            False,
+                            [],
+                        )
+                    mask.append(component_nulls == {True})
+                skipped_chunks.append(mask)
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
@@ -1124,7 +1160,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
-    ) -> tuple[bytes, bool]:
+    ) -> RetrieveReply:
         """Retrieve the CPU KV cache and put into GPU blocks.
 
         Args:
@@ -1142,7 +1178,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         Returns:
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
-            second element indicates whether the key was successfully retrieved.
+            second element is a boolean status or terminal chunk coverage when
+            requested by a coverage-aware client. Coverage is usable only after
+            the completion event; omitted chunks are never copied to the GPU.
             The event handle is empty when no device work was submitted.
 
         Raises:
@@ -1187,6 +1225,44 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             else []
         )
         num_chunks = len(obj_keys_per_obj_group[0])
+        coverage_enabled = bool((key.request_configs or {}).get("holemiss_coverage"))
+        omitted_chunks = (key.request_configs or {}).get("holemiss_omitted_chunks", [])
+        manager = cache_context.kv_layer_groups_manager
+        if coverage_enabled and (
+            unfull_obj_keys
+            or any(
+                len(
+                    {
+                        manager.kernel_groups[i].recurrent_state
+                        for i in group.kernel_group_indices
+                    }
+                )
+                > 1
+                for group in manager.object_groups
+            )
+        ):
+            raise ValueError(
+                "Partial delivery coverage requires full chunks and separated "
+                "attention/recurrent object groups"
+            )
+        if omitted_chunks and (
+            not coverage_enabled
+            or any(
+                not isinstance(c, int) or c < 0 or c >= num_chunks
+                for c in omitted_chunks
+            )
+        ):
+            raise ValueError("Invalid request-scoped omitted chunk")
+        omitted_groups = (key.request_configs or {}).get("holemiss_omitted_groups")
+        if omitted_groups is not None and (
+            not coverage_enabled
+            or any(
+                not isinstance(g, int) or not 0 <= g < num_object_groups
+                for g in omitted_groups
+            )
+        ):
+            raise ValueError("Invalid request-scoped omitted object group")
+        group_coverage: list[RetrieveGroupCoverage] = []
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
@@ -1320,15 +1396,61 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     found_keys, window_objs = self._ctx.storage_manager.unsafe_read(
                         in_window_keys, l1_owners=read_owners
                     )
-                    if not window_objs or found_keys != in_window_keys:
+                    if (
+                        not window_objs or found_keys != in_window_keys
+                    ) and not coverage_enabled:
                         logger.error("Some keys not found during retrieve!")
                         retrieve_succeeded = False
                         break
 
                     total_bytes += sum(mo.get_size() for mo in window_objs)
                     # None-pad the skipped prefix so block-id slicing is unchanged.
-                    memory_objs: list[MemoryObj | None] = [None] * skip + window_objs
-                    cache_context.transfer_object_group(
+                    found = dict(zip(found_keys, window_objs, strict=True))
+                    group_omitted = (
+                        omitted_chunks
+                        if omitted_chunks
+                        and (
+                            obj_group_id in omitted_groups
+                            if omitted_groups is not None
+                            else attn_desc.group_kinds[obj_group_id] == "attention"
+                        )
+                        else []
+                    )
+                    failed = [
+                        c
+                        for c in range(skip, num_chunks)
+                        if obj_keys_per_obj_group[obj_group_id][c] not in found
+                        or c in group_omitted
+                    ]
+                    memory_objs: list[MemoryObj | None] = [None] * skip + [
+                        found.get(obj_key) for obj_key in in_window_keys
+                    ]
+                    if coverage_enabled:
+                        group_coverage.append(
+                            RetrieveGroupCoverage(
+                                obj_group_id,
+                                sorted(
+                                    {
+                                        manager.kernel_groups[i].engine_group_idx
+                                        for i in manager.object_groups[
+                                            obj_group_id
+                                        ].kernel_group_indices
+                                    }
+                                ),
+                                attn_desc.group_kinds[obj_group_id],
+                                skip,
+                                [c for c in range(skip, num_chunks) if c not in failed],
+                                failed,
+                            )
+                        )
+                    transfer = cache_context.transfer_object_group
+                    if group_omitted:
+                        transfer = partial(
+                            transfer_kv_per_object_group,
+                            cache_context,
+                            omitted_chunks=group_omitted,
+                        )
+                    transfer(
                         block_ids_per_group_gpu,
                         memory_objs,
                         object_group_id=obj_group_id,
@@ -1338,7 +1460,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         transfer_key=transfer_key,
                         block_ids_host=gpu_block_ids,
                     )
-                    prefetched_keys.extend(in_window_keys)
+                    prefetched_keys.extend(found_keys)
                 if retrieve_succeeded and unfull_retained_keys:
                     total_bytes += self._retrieve_unfull_chunk_objects(
                         cache_context,
@@ -1396,9 +1518,17 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 ed - st,
             )
 
+        failures = sorted({c for group in group_coverage for c in group.failed_chunks})
         return (
             event_backend.export_event(event, cache_context.device),
-            retrieve_succeeded,
+            RetrieveCoverage(
+                num_chunks,
+                [c for c in range(num_chunks) if c not in failures],
+                failures,
+                group_coverage,
+            )
+            if coverage_enabled and retrieve_succeeded
+            else retrieve_succeeded,
         )
 
     def _publish_token_bindings(

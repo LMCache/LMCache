@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING, Any, Optional
 # Third Party
 import torch
 
+# First Party
+from lmcache.v1.common.custom_types import RetrieveCoverage
+from lmcache.v1.common.recomputed_writeback import WritebackTicket
+
 if TYPE_CHECKING:
     # Third Party
     from sglang.srt.managers.schedule_batch import Req
@@ -53,6 +57,7 @@ class LMCacheLoadOperation:
     future: Any
     lookup: LMCacheLookupOperation
     result: Optional[bool] = None
+    coverage: RetrieveCoverage | None = None
 
     def query(self) -> bool:
         return self.result is not None or bool(self.future.query())
@@ -65,6 +70,8 @@ class LMCacheStoreOperation:
     end: int
     future: Any
     result: Optional[bool] = None
+    writeback_ticket: WritebackTicket | None = None
+    additional_writeback_tickets: tuple[WritebackTicket, ...] = ()
 
     def query(self) -> bool:
         return self.result is not None or bool(self.future.query())
@@ -90,6 +97,7 @@ class LMCacheExternalFlow:
     load_completed: bool = False
     retire_requested: bool = False
     cancelled: bool = False
+    repair_restored_extent: Optional[int] = None
 
 
 @dataclass

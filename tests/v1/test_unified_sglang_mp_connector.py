@@ -39,11 +39,13 @@ import lmcache.lmcache_native as lmcache_native
 
 @contextmanager
 def _store_connector(
-    rank: int = 0, parallel_axis: str = "single"
+    rank: int = 0,
+    parallel_axis: str = "single",
+    component_groups: list[SGLangKVComponentGroup] | None = None,
 ) -> Iterator[tuple[UnifiedLMCacheMPConnector, Mock, Mock]]:
     """Construct a connector with mocked transfer and heartbeat dependencies."""
     adapter = Mock()
-    adapter.resolve_registered_groups.return_value = [
+    adapter.resolve_registered_groups.return_value = component_groups or [
         SGLangKVComponentGroup(
             "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
         )
@@ -235,6 +237,13 @@ def _new_connector() -> UnifiedLMCacheMPConnector:
     connector._needs_store_progress_reset = False
     connector._transfer_ctx_lock = threading.Lock()
     connector._closed = False
+    connector._writeback_supported = True
+    connector._kv_groups = (SGLangKVComponentGroup(
+        "full", (), tokens_per_block=1, slots_per_block=1,
+    ),)
+    connector._recomputed_writeback = {}
+    connector._writeback_backlog = {}
+    connector.chunk_size = 4
     connector.tp_size = 1
     connector.pp_size = 1
     connector.tp_group = None
@@ -1552,3 +1561,158 @@ class TestSGLangRecovery:
             nprocs=2,
             join=True,
         )
+
+
+@pytest.mark.parametrize("allow_partial", [False, True])
+@pytest.mark.parametrize("missing", [0, 1, 2])
+def test_terminal_partial_retrieve_is_available_to_engine_recovery(
+    allow_partial, missing
+):
+    """Engine opt-in preserves validated coverage after event completion."""
+    from lmcache.v1.common.custom_types import RetrieveCoverage
+    from lmcache.v1.transport.futures import MessagingFuture
+
+    coverage = RetrieveCoverage(3, [i for i in range(3) if i != missing], [missing])
+    raw = MessagingFuture()
+    backend = Mock()
+    backend.query_event.return_value = True
+    future = raw.to_device_future(device=0, event_backend=backend)
+    raw.set_result((b"event", coverage))
+    lookup = LMCacheLookupOperation(
+        "recover", list(range(24)), 0, "", total_hit_tokens=24
+    )
+    operation = LMCacheLoadOperation(
+        "recover", lookup.token_ids, 0, 24, 0, torch.arange(24), future, lookup
+    )
+    with _store_connector() as (connector, _, _):
+        assert (
+            connector.prepare_load_on_stream(
+                operation, "forward", allow_partial=allow_partial
+            )
+            is allow_partial
+        )
+        assert operation.coverage == coverage
+        assert connector.complete_load(operation) is allow_partial
+
+
+def test_missing_range_uses_ordinary_store_without_rewinding_frontier() -> None:
+    """Only the contradicted lookup range is resubmitted through normal STORE."""
+    from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
+
+    with _store_connector() as (connector, transfer, _):
+        ledger = RecomputedWriteback()
+        ledger.observe(8, 16)
+        connector._recomputed_writeback["request"] = ledger
+        connector._store_submitted_tokens["request"] = 24
+        operation = connector.submit_store(
+            "request",
+            list(range(16)),
+            torch.arange(12, 20),
+            device_indices_start=8,
+            cache_salt="",
+            writeback_range=(8, 16),
+        )
+        assert operation is not None
+        transfer.submit_store.assert_called_once()
+        key = transfer.submit_store.call_args.args[1]
+        assert (key.start, key.end) == (8, 16)
+        assert key.request_configs is None
+        assert connector._store_submitted_tokens["request"] == 24
+        assert connector.complete_store(operation)
+        assert not ledger.has_pending
+
+
+def test_failed_range_store_does_not_add_a_retry_policy() -> None:
+    """Failure leaves ordinary future store opportunities eligible, with no loop."""
+    from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
+
+    with _store_connector() as (connector, transfer, _):
+        ledger = RecomputedWriteback()
+        ledger.observe(8, 16)
+        connector._recomputed_writeback["request"] = ledger
+        connector._store_submitted_tokens["request"] = 24
+        transfer.submit_store.return_value.result.return_value = False
+        operation = connector.submit_store(
+            "request",
+            list(range(16)),
+            torch.arange(12, 20),
+            device_indices_start=8,
+            cache_salt="",
+            writeback_range=(8, 16),
+        )
+        assert operation is not None
+        assert not connector.complete_store(operation)
+        assert connector.pending_writeback_ranges("request", 24) == [(8, 16)]
+        assert connector._store_submitted_tokens["request"] == 24
+        transfer.submit_store.assert_called_once()
+
+
+@pytest.mark.parametrize("checkpoint_missing", [False, True])
+def test_hybrid_partial_load_and_store_preserve_recurrent_group(checkpoint_missing):
+    """Engine recovery accepts only healthy checkpoints; STORE excludes state."""
+    from lmcache.v1.common.custom_types import RetrieveCoverage, RetrieveGroupCoverage
+    from lmcache.v1.transport.futures import MessagingFuture
+
+    groups = [
+        SGLangKVComponentGroup(
+            "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
+        ),
+        SGLangKVComponentGroup(
+            "mamba",
+            (torch.empty(32, 1, 3),),
+            sliding_window_size=8,
+            tokens_per_block=8,
+            slots_per_block=1,
+            recurrent_state=True,
+        ),
+    ]
+    failed = [1, 2] if checkpoint_missing else [1]
+    coverage = RetrieveCoverage(
+        3,
+        [c for c in range(3) if c not in failed],
+        failed,
+        [
+            RetrieveGroupCoverage(0, [0], "attention", 0, [0, 2], [1]),
+            RetrieveGroupCoverage(
+                1,
+                [1],
+                "recurrent",
+                2,
+                [] if checkpoint_missing else [2],
+                [2] if checkpoint_missing else [],
+            ),
+        ],
+    )
+    raw = MessagingFuture()
+    backend = Mock()
+    backend.query_event.return_value = True
+    future = raw.to_device_future(device=0, event_backend=backend)
+    raw.set_result((b"event", coverage))
+    lookup = LMCacheLookupOperation(
+        "request", list(range(24)), 0, "", total_hit_tokens=24
+    )
+    load = LMCacheLoadOperation(
+        "request", lookup.token_ids, 0, 24, 0, torch.arange(24), future, lookup
+    )
+    with _store_connector(component_groups=groups) as (connector, transfer, _):
+        assert (
+            connector.prepare_load_on_stream(load, "forward", allow_partial=True)
+            is not checkpoint_missing
+        )
+        if checkpoint_missing:
+            return
+        assert connector.pending_writeback_ranges("request", 24) == [(8, 16)]
+        store = connector.submit_store(
+            "request",
+            lookup.token_ids,
+            [torch.arange(12, 20), torch.tensor([7])],
+            device_indices_start=8,
+            cache_salt="",
+            writeback_range=(8, 16),
+        )
+        assert store is not None
+        args = transfer.submit_store.call_args.args
+        assert (args[1].start, args[1].end) == (8, 16)
+        assert args[3] == [[3, 4], [0]]
+        assert connector.complete_store(store)
+        assert connector.pending_writeback_ranges("request", 24) == []

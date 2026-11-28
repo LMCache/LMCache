@@ -240,6 +240,9 @@ def _create_nixl_native_l2_adapter(
         l1_base=l1_memory_desc.ptr,
         l1_size=l1_memory_desc.size,
         l1_alignment=l1_memory_desc.align_bytes,
+        enable_reactor=True,
+        xfer_batch=8,
+        pipeline_depth=128,
     )
     try:
         if config.eviction_config is not None and not native_client.supports_delete:

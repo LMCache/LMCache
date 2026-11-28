@@ -17,6 +17,7 @@ from lmcache.v1.common.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    RetrieveReply,
 )
 from lmcache.v1.common.group_view import EngineGroupInfo
 from lmcache.v1.common.kv_format.types import LayoutHints
@@ -140,7 +141,7 @@ class RequestClient(Protocol):
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int,
-    ) -> MessagingFuture[tuple[bytes, bool]]: ...
+    ) -> MessagingFuture[RetrieveReply]: ...
 
     @rpc_method
     def lookup(self, key: IPCCacheServerKey, tp_size: int) -> MessagingFuture[None]: ...

@@ -227,13 +227,17 @@ def _synthetic_attention_page_view(
     num_blocks: int,
     block_size: int,
     page_size_bytes: int,
+    *,
+    heads_first: bool = False,
 ) -> torch.Tensor:
     """Re-view ``base`` as one opaque logical page per block.
 
     The result is ``(num_blocks, 2, block_size, 1, head_size)`` in ``base``'s
     dtype, starting at ``base``'s storage offset. Axis 1 holds two equal byte
     slabs of the page, not semantic K and V. A list of these tensors detects
-    as ``NL_X_NB_TWO_BS_NH_HS`` (format 2).
+    as ``NL_X_NB_TWO_BS_NH_HS`` (format 2). With ``heads_first``,
+    swap the synthetic NH/BS axes to match the resolved HND detector.
+    Both views cover exactly the same opaque bytes without copying.
 
     Raises:
         ValueError: If the page does not factor into the synthetic shape.
@@ -245,6 +249,8 @@ def _synthetic_attention_page_view(
         (elems_per_page, 1),
         storage_offset=int(base.storage_offset()),
     )
+    if heads_first:
+        return flat.reshape(num_blocks, 2, num_heads, block_size, head_size)
     return flat.reshape(num_blocks, 2, block_size, num_heads, head_size)
 
 
@@ -357,6 +363,7 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
             int(conv_state.shape[0]),
             int(spec.block_size),
             int(spec.page_size_bytes),
+            heads_first=_layout_hints.get("kv_layout") in ("HND", "BLHNC"),
         )
 
 
@@ -597,13 +604,8 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
                     f"count {num_kernel_pages}"
                 )
         else:
-            # Rank 5 deliberately keeps the stricter logical-order guard.
-            # Extending the rank-4 memory-order normalization to rank 5 would
-            # let a permuted tensor (vLLM <= 0.25.x under HND) re-view
-            # successfully and then be misread downstream: the edited view is
-            # NHD-shaped, so the HND detector branch reads its block size from
-            # the synthetic ``num_heads`` axis and resolves 1. Failing loudly
-            # here is strictly better than that silent corruption.
+            # Preserve the legacy rank-5 logical-contiguity contract. This
+            # layout fix does not broaden supported legacy registrations.
             ordered = kv_cache
             if not ordered.is_contiguous():
                 raise ValueError(
@@ -616,6 +618,7 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
             num_kernel_pages // ratio,
             logical_block_size,
             int(spec.page_size_bytes),
+            heads_first=_layout_hints.get("kv_layout") in ("HND", "BLHNC"),
         )
 
 
@@ -1045,6 +1048,7 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
             num_kernel_pages // ratio,
             logical_block_size,
             page_size_bytes,
+            heads_first=_layout_hints.get("kv_layout") in ("HND", "BLHNC"),
         )
 
 

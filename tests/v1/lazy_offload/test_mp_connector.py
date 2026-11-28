@@ -220,6 +220,11 @@ def _make_connector() -> _Harness:
     connector._role = KVConnectorRole.SCHEDULER
     connector.lazy_offload = True
     connector.request_trackers = {}
+    connector._writeback_backlog = {}
+    connector._pending_writebacks = {}
+    connector._queued_writebacks = []
+    connector._writeback_supported = False
+    connector._gpu_block_pool = None
     connector._delay_free_req_ids = set()
     connector._group_tokens_per_block = [TOKENS_PER_BLOCK]
     connector._hit_alignment_tokens = TOKENS_PER_BLOCK
@@ -491,7 +496,11 @@ def test_lazy_new_request_store_routes_to_manager_not_metadata() -> None:
     tracker = harness.connector.request_trackers["L-new"]
     tracker.allocated_block_ids = {0: [1, 2, 3, 4]}
     scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[SimpleNamespace(req_id="L-new", num_computed_tokens=0)],
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="L-new", num_computed_tokens=0, block_ids=([1, 2, 3, 4],)
+            )
+        ],
         num_scheduled_tokens={"L-new": 4 * TOKENS_PER_BLOCK},
     )
     connector_metadata = LMCacheMPConnectorMetadata()
@@ -570,7 +579,11 @@ def test_consumer_role_offers_no_new_request_store_to_the_manager() -> None:
 
     harness.connector._process_new_requests(
         SimpleNamespace(
-            scheduled_new_reqs=[SimpleNamespace(req_id="C-new", num_computed_tokens=0)],
+            scheduled_new_reqs=[
+                SimpleNamespace(
+                    req_id="C-new", num_computed_tokens=0, block_ids=([1, 2, 3, 4],)
+                )
+            ],
             num_scheduled_tokens={"C-new": 4 * TOKENS_PER_BLOCK},
         ),
         connector_metadata,  # type: ignore[arg-type]
@@ -698,3 +711,31 @@ def test_shutdown_delegates_final_log_before_adapter_shutdown() -> None:
         "manager.log_final_stats",
         "adapter.shutdown",
     ]
+
+
+def test_deferred_store_completion_closes_retired_request_session() -> None:
+    """A normal STORE dispatched after request retirement must close its session."""
+    from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
+
+    harness = _make_connector()
+    ledger = RecomputedWriteback()
+    ledger.observe(0, 32)
+    ticket = ledger.begin(0, 32)
+    metadata = _store_metadata()
+    harness.connector._pending_writebacks[ticket.identity] = SimpleNamespace(
+        ledger=ledger,
+        ticket=ticket,
+        metadata=metadata,
+    )
+    harness.connector.update_connector_output(
+        SimpleNamespace(
+            finished_sending=set(),
+            kv_connector_worker_meta=LMCacheMPWorkerMetadata(
+                completed_store_requests={},
+                writeback_results={ticket.identity: True},
+            ),
+        )
+    )
+    assert harness.adapter.ended_sessions == ["req"]
+    assert not harness.connector.has_pending_push_work()
+    assert not ledger.has_pending

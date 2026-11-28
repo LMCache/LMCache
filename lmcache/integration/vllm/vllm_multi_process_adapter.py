@@ -17,6 +17,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache.v1.common.custom_types import RetrieveCoverage
 from lmcache import torch_dev
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.experimental import dispatch
@@ -541,7 +542,7 @@ class LoadStoreOp:
 
 
 StoreResult = bool
-RetrieveResult = bool
+RetrieveResult = bool | RetrieveCoverage
 LookupResult = int
 
 
@@ -1433,6 +1434,13 @@ class LMCacheMPWorkerAdapter:
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
         # request_id -> (future, block_ids)
+        self._retrieve_completions: list[tuple[str, RetrieveCoverage]] = []
+        self._writeback_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        self._writeback_results: dict[str, bool] = {}
+        self._writeback_load_ops: dict[str, tuple[LoadStoreOp, str]] = {}
+        self._failed_load_ranges: dict[
+            str, list[tuple[int, int, str] | tuple[int, int, str, int]]
+        ] = {}
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
@@ -1919,6 +1927,10 @@ class LMCacheMPWorkerAdapter:
                 are unregistered or before they are registered.
         """
         self._ensure_heartbeat_started()
+        writeback_id = (request_configs or {}).get("recomputed_writeback_id")
+        if writeback_id and (not self.is_kv_writer or not self.is_healthy):
+            self._writeback_results[writeback_id] = not self.is_kv_writer
+            return
 
         if not self.is_kv_writer:
             # Every group this rank holds is written by another of its
@@ -1945,7 +1957,15 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
-            request_configs=request_configs,
+            request_configs=(
+                {
+                    name: value
+                    for name, value in request_configs.items()
+                    if name != "recomputed_writeback_id"
+                }
+                if writeback_id
+                else request_configs
+            ),
         )
         transfer_ctx = self._require_transfer_ctx("submitting store requests")
         future = transfer_ctx.submit_store(
@@ -1956,6 +1976,12 @@ class LMCacheMPWorkerAdapter:
             event,
             self.blocks_in_chunk,
         )
+        writeback_id = (request_configs or {}).get("recomputed_writeback_id")
+        if writeback_id:
+            if event is not None:
+                future.retain_reference(event)
+            self._writeback_futures[writeback_id] = future
+            return
         self.store_futures[request_id] = future
         if event is not None:
             self.store_events[request_id] = event
@@ -1991,7 +2017,12 @@ class LMCacheMPWorkerAdapter:
         """
         self._ensure_heartbeat_started()
 
+        self._writeback_load_ops[request_id] = (
+            op,
+            (request_configs or {}).get("recomputed_generation", ""),
+        )
         if not self.is_healthy:
+            self._record_writeback_failure(request_id, False)
             self.error_block_ids.update(op.flat_block_ids)
             self._failed_request_ids.add(request_id)
             self._dropped_retrieves.add(request_id)
@@ -2178,6 +2209,7 @@ class LMCacheMPWorkerAdapter:
                 r_block_ids,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
+                self._record_writeback_failure(request_id, False)
                 self.error_block_ids.update(r_block_ids)
                 self._failed_request_ids.add(request_id)
             self.store_futures.clear()
@@ -2228,15 +2260,36 @@ class LMCacheMPWorkerAdapter:
 
             finished_retrieves.add(request_id)
 
+            self._record_writeback_failure(request_id, r_result)
+            if isinstance(r_result, RetrieveCoverage):
+                r_result.validate()
+                self._retrieve_completions.append((request_id, r_result))
             if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                self._failed_request_ids.add(request_id)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
+                failed_ids = (
+                    r_result.failed_block_ids(
+                        r_block_ids, len(r_block_ids) // r_result.total_chunks
+                    )
+                    if isinstance(r_result, RetrieveCoverage)
+                    and (
+                        r_result.groups is None
+                        or {
+                            gid
+                            for group in r_result.groups
+                            for gid in group.engine_group_ids
+                        }
+                        == {0}
+                    )
+                    else r_block_ids
                 )
+                self.error_block_ids.update(failed_ids)
+                self._failed_request_ids.add(request_id)
+                if not isinstance(r_result, RetrieveCoverage):
+                    logger.error(
+                        "Something went wrong when processing the "
+                        "retrieve request for request_id=%s, result=%s",
+                        request_id,
+                        r_result,
+                    )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -2305,6 +2358,7 @@ class LMCacheMPWorkerAdapter:
                 r_block_ids,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
+                self._record_writeback_failure(request_id, False)
                 self.error_block_ids.update(r_block_ids)
                 self._failed_request_ids.add(request_id)
             self.store_futures.clear()
@@ -2352,15 +2406,36 @@ class LMCacheMPWorkerAdapter:
 
             finished_retrieves.add(request_id)
 
+            self._record_writeback_failure(request_id, r_result)
+            if isinstance(r_result, RetrieveCoverage):
+                r_result.validate()
+                self._retrieve_completions.append((request_id, r_result))
             if not r_result:
-                self.error_block_ids.update(r_block_ids)
-                self._failed_request_ids.add(request_id)
-                logger.error(
-                    "Something went wrong when processing the "
-                    "retrieve request for request_id=%s, result=%s",
-                    request_id,
-                    r_result,
+                failed_ids = (
+                    r_result.failed_block_ids(
+                        r_block_ids, len(r_block_ids) // r_result.total_chunks
+                    )
+                    if isinstance(r_result, RetrieveCoverage)
+                    and (
+                        r_result.groups is None
+                        or {
+                            gid
+                            for group in r_result.groups
+                            for gid in group.engine_group_ids
+                        }
+                        == {0}
+                    )
+                    else r_block_ids
                 )
+                self.error_block_ids.update(failed_ids)
+                self._failed_request_ids.add(request_id)
+                if not isinstance(r_result, RetrieveCoverage):
+                    logger.error(
+                        "Something went wrong when processing the "
+                        "retrieve request for request_id=%s, result=%s",
+                        request_id,
+                        r_result,
+                    )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
@@ -2427,6 +2502,74 @@ class LMCacheMPWorkerAdapter:
             The number of vllm blocks in a LMCache data chunk
         """
         return self.blocks_in_chunk
+
+    def _record_writeback_failure(
+        self, request_id: str, result: RetrieveResult
+    ) -> None:
+        saved = self._writeback_load_ops.pop(request_id, None)
+        if saved is None or bool(result):
+            return
+        op, generation = saved
+        count = (op.end - op.start) // self.lmcache_tokens_per_chunk
+        if isinstance(result, RetrieveCoverage) and result.groups is not None:
+            self._failed_load_ranges[request_id] = [
+                (
+                    op.start + index * self.lmcache_tokens_per_chunk,
+                    op.start + (index + 1) * self.lmcache_tokens_per_chunk,
+                    generation,
+                    gid,
+                )
+                for group in result.groups
+                if group.kind == "attention"
+                for gid in group.engine_group_ids
+                for index in group.failed_chunks
+            ]
+            return
+        failed = (
+            result.failed_chunks
+            if isinstance(result, RetrieveCoverage)
+            else range(count)
+        )
+        self._failed_load_ranges[request_id] = [
+            (
+                op.start + index * self.lmcache_tokens_per_chunk,
+                op.start + (index + 1) * self.lmcache_tokens_per_chunk,
+                generation,
+            )
+            for index in failed
+        ]
+
+    def get_writeback_results(
+        self,
+    ) -> tuple[
+        dict[str, list[tuple[int, int, str] | tuple[int, int, str, int]]],
+        dict[str, bool],
+    ]:
+        """Collect failed ranges and normal STORE outcomes for source-pin release.
+
+        Returns:
+            Request IDs mapped to missing ranges and transfer generations, and
+            store operation identities mapped to normal admission outcomes.
+            Both result queues are drained; no retry or L2 wait is introduced.
+        """
+        for identity, future in list(self._writeback_futures.items()):
+            done, result = _poll_transfer(identity, future)
+            if done:
+                self._writeback_results[identity] = bool(result)
+                del self._writeback_futures[identity]
+        loads, self._failed_load_ranges = self._failed_load_ranges, {}
+        stores, self._writeback_results = self._writeback_results, {}
+        return loads, stores
+
+    def get_retrieve_completions(self) -> list[tuple[str, RetrieveCoverage]]:
+        """Drain terminal chunk coverage after the GPU completion event.
+
+        Returns:
+            Request IDs and original-range chunk coverage, exactly once.
+            Legacy or unknown failures remain on the existing error channels.
+        """
+        completed, self._retrieve_completions = self._retrieve_completions, []
+        return completed
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain failed receive blocks for single-group or legacy recovery.
@@ -2549,6 +2692,7 @@ class LMCacheMPWorkerAdapter:
         """
         futures = [
             *self.store_futures.values(),
+            *self._writeback_futures.values(),
             *(future for future, _block_ids in self.retrieve_futures.values()),
         ]
         deadline = time.monotonic() + self._mq_timeout

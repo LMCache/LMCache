@@ -290,3 +290,30 @@ def test_worker_metadata_aggregate_unions_failed_stores() -> None:
     assert isinstance(merged, LMCacheMPWorkerMetadata)
     assert merged.failed_store_requests == {"r1"}
     assert second.failed_store_requests == set()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_partial_single_group_reports_only_hole_with_multiple_pages(grouped):
+    from lmcache.v1.common.custom_types import RetrieveCoverage, RetrieveGroupCoverage
+
+    adapter = _make_worker_adapter()
+    _prepare_for_get_finished(adapter)
+    adapter._writeback_load_ops = {}
+    adapter._retrieve_completions = []
+    adapter._failed_request_ids = set()
+    coverage = RetrieveCoverage(
+        3,
+        [0, 2],
+        [1],
+        groups=(
+            [RetrieveGroupCoverage(0, [0], "attention", 0, [0, 2], [1])]
+            if grouped
+            else None
+        ),
+    )
+    adapter.retrieve_futures["req"] = (
+        _FakeStoreFuture(True, coverage),
+        [10, 11, 12, 13, 14, 15],
+    )
+    assert adapter.get_finished_with_lazy_offload()[1] == {"req"}
+    assert adapter.get_block_ids_with_load_errors() == {12, 13}

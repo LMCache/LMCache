@@ -30,6 +30,8 @@ from lmcache.integration.sglang.lmcache_mp_metadata import (
     SGLangKVComponentGroup,
 )
 from lmcache.v1.client.heartbeat import HeartbeatThread
+from lmcache.v1.common.custom_types import RetrieveCoverage, RetrieveGroupCoverage
+from lmcache.v1.common.recomputed_writeback import RecomputedWriteback
 
 if TYPE_CHECKING:
     # First Party
@@ -296,6 +298,16 @@ class UnifiedLMCacheMPConnector:
         self._lookups: dict[str, LMCacheLookupOperation] = {}
         self._active_sessions: set[str] = set()
         self._store_submitted_tokens: dict[str, int] = {}
+        self._writeback_supported = (
+            self.tp_size == self.pp_size == 1
+            and any(not group.recurrent_state for group in self._kv_groups)
+            and all(
+                group.recurrent_state or group.sliding_window_size < 0
+                for group in self._kv_groups
+            )
+        )
+        self._recomputed_writeback: dict[str, RecomputedWriteback] = {}
+        self._writeback_backlog: dict[tuple[str, bytes], RecomputedWriteback] = {}
         self._control_futures: list[Any] = []
         self._heartbeat: Optional[HeartbeatThread] = None
         self._heartbeat_lock = threading.Lock()
@@ -777,6 +789,10 @@ class UnifiedLMCacheMPConnector:
             self._store_submitted_tokens[operation.request_id] = (
                 operation.total_hit_tokens
             )
+        if self._writeback_backlog:
+            saved = self._writeback_backlog.get(self._writeback_content_key(operation))
+            if saved is not None:
+                self._recomputed_writeback[operation.request_id] = saved
         return operation.total_hit_tokens
 
     def _slots_to_blocks(
@@ -941,7 +957,13 @@ class UnifiedLMCacheMPConnector:
         ]
         block_ids = self._expand_engine_group_block_ids(engine_group_block_ids)
         key = self._create_key(
-            operation, start=start, end=total_hit, worker_id=self.kv_worker_id
+            operation,
+            start=start,
+            end=total_hit,
+            worker_id=self.kv_worker_id,
+            request_configs={"holemiss_coverage": True}
+            if self._writeback_supported
+            else None,
         )
         if operation.lock_start != start:
             logger.warning(
@@ -993,14 +1015,93 @@ class UnifiedLMCacheMPConnector:
             lookup=operation,
         )
 
+    @staticmethod
+    def _writeback_content_key(lookup: LMCacheLookupOperation) -> tuple[str, bytes]:
+        return lookup.cache_salt, hashlib.sha256(
+            str(lookup.token_ids).encode()
+        ).digest()
+
+    def _observe_failed_writeback(
+        self,
+        operation: LMCacheLoadOperation,
+        failed: Sequence[int],
+        groups: Sequence[RetrieveGroupCoverage] | None = None,
+    ) -> None:
+        if not self._writeback_supported:
+            return
+        content = self._writeback_content_key(operation.lookup)
+        ledger = self._writeback_backlog.setdefault(content, RecomputedWriteback())
+        self._recomputed_writeback[operation.request_id] = ledger
+        failed_groups = (
+            [
+                (gid, group.failed_chunks)
+                for group in groups
+                if group.kind == "attention"
+                for gid in group.engine_group_ids
+            ]
+            if groups is not None
+            else [
+                (gid, failed)
+                for gid, group in enumerate(self._kv_groups)
+                if not group.recurrent_state
+            ]
+        )
+        for gid, missing in failed_groups:
+            if (
+                not 0 <= gid < len(self._kv_groups)
+                or self._kv_groups[gid].recurrent_state
+            ):
+                raise ValueError("Attention failure names an invalid engine group")
+            for index in missing:
+                start = operation.start + index * self.chunk_size
+                ledger.observe(
+                    start, min(start + self.chunk_size, operation.end), group_id=gid
+                )
+
+    def supports_attention_repair(self, coverage: RetrieveCoverage) -> bool:
+        """Validate terminal coverage for the registered attention/state groups.
+
+        A hybrid requires every registered group and healthy recurrent delivery.
+        Ungrouped legacy evidence is accepted only for one full-attention group.
+        This does not wait for GPU completion; callers must drain its event.
+        """
+        coverage.validate()
+        if not self._writeback_supported:
+            return False
+        if coverage.groups is None:
+            return len(self._kv_groups) == 1 and not self._kv_groups[0].recurrent_state
+        expected = set(range(len(self._kv_groups)))
+        described = [gid for group in coverage.groups for gid in group.engine_group_ids]
+        if set(described) != expected or len(described) != len(expected):
+            return False
+        for group in coverage.groups:
+            for gid in group.engine_group_ids:
+                registered = self._kv_groups[gid]
+                if (group.kind == "recurrent") != registered.recurrent_state:
+                    return False
+                if registered.recurrent_state:
+                    required = max(0, coverage.total_chunks - 1)
+                    if group.first_chunk > required or group.failed_chunks:
+                        return False
+                elif group.first_chunk != 0:
+                    return False
+        return coverage.attention_only_failure or not coverage.failed_chunks
+
     def prepare_load_on_stream(
-        self, operation: LMCacheLoadOperation, stream: Any
+        self,
+        operation: LMCacheLoadOperation,
+        stream: Any,
+        *,
+        allow_partial: bool = False,
     ) -> bool:
         """Order a consumer stream after an asynchronous retrieve.
 
         Args:
             operation: Retrieve operation returned by :meth:`submit_load`.
             stream: SGLang forward stream that consumes the loaded KV cache.
+            allow_partial: Accept validated partial coverage for an engine-owned
+                recovery path. Such a response is drained to GPU completion
+                before returning; the caller must partition its allocations.
 
         Returns:
             ``True`` when every TP/PP rank successfully submitted its retrieve;
@@ -1015,15 +1116,40 @@ class UnifiedLMCacheMPConnector:
         """
         local_success = False
         try:
-            local_success = bool(
-                operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
-            )
+            outcome = operation.future.wait_on_stream(stream, timeout=self._mq_timeout)
+            if isinstance(outcome, RetrieveCoverage):
+                outcome.validate()
+                operation.coverage = outcome
+                if outcome.failed_chunks:
+                    self._observe_failed_writeback(
+                        operation, outcome.failed_chunks, outcome.groups
+                    )
+            local_success = bool(outcome)
+            if (
+                allow_partial
+                and isinstance(outcome, RetrieveCoverage)
+                and outcome.failed_chunks
+                and self.supports_attention_repair(outcome)
+            ):
+                # Recovery may immediately free missing destinations. A stream
+                # wait alone does not permit the host allocator to reuse them.
+                terminal = operation.future.result(timeout=self._mq_timeout)
+                if terminal != outcome:
+                    raise ValueError("Retrieve coverage changed before GPU completion")
+                local_success = True
+                operation.result = True
+                operation.lookup.locks_held = False
+                self._cleanup_lookup_result(operation.lookup)
         except Exception:
             logger.exception(
                 "LMCache retrieve preparation failed for %s", operation.request_id
             )
 
         success = self._sync_success(local_success)
+        if not success and operation.coverage is None:
+            self._observe_failed_writeback(
+                operation, range((operation.end - operation.start) // self.chunk_size)
+            )
         if success:
             return True
 
@@ -1052,7 +1178,20 @@ class UnifiedLMCacheMPConnector:
             return operation.result
         success = False
         try:
-            success = bool(operation.future.result(timeout=0))
+            outcome = operation.future.result(timeout=0)
+            if isinstance(outcome, RetrieveCoverage):
+                outcome.validate()
+                operation.coverage = outcome
+                if outcome.failed_chunks:
+                    self._observe_failed_writeback(
+                        operation, outcome.failed_chunks, outcome.groups
+                    )
+            elif not outcome:
+                self._observe_failed_writeback(
+                    operation,
+                    range((operation.end - operation.start) // self.chunk_size),
+                )
+            success = bool(outcome)
         except Exception:
             logger.exception("LMCache retrieve failed for %s", operation.request_id)
         if synchronize:
@@ -1094,6 +1233,31 @@ class UnifiedLMCacheMPConnector:
         start = min(self._store_submitted_tokens.get(request_id, 0), aligned_end)
         return start // self.chunk_size * self.chunk_size
 
+    def pending_writeback_ranges(
+        self, request_id: str, committed_tokens: int
+    ) -> list[tuple[int, int]]:
+        """Return missing chunks covered by successfully committed engine KV.
+
+        Args:
+            request_id: Engine request owning the cache delivery.
+            committed_tokens: Completed prefix; never include planned work.
+
+        Returns:
+            Exact aligned ranges eligible for the ordinary STORE path.
+        """
+        ledger = self._recomputed_writeback.get(request_id)
+        return (
+            []
+            if ledger is None
+            else sorted(
+                {
+                    span
+                    for gid in ledger.group_ids
+                    for span in ledger.ready(committed_tokens, group_id=gid)
+                }
+            )
+        )
+
     def submit_store(
         self,
         request_id: str,
@@ -1102,11 +1266,41 @@ class UnifiedLMCacheMPConnector:
         *,
         device_indices_start: int,
         cache_salt: str,
+        writeback_range: tuple[int, int] | None = None,
     ) -> Optional[LMCacheStoreOperation]:
+        """Submit normal asynchronous STORE for a suffix or a regenerated range.
+
+        Args:
+            request_id: Owner used for session and completion bookkeeping.
+            token_ids: Logical tokens through the committed source boundary.
+            device_indices: GPU slots for each registered engine group.
+            device_indices_start: Logical position of the first supplied slot.
+            cache_salt: Cache identity namespace shared with lookup.
+            writeback_range: Optional missing chunk range. Bypasses the normal
+                stored-prefix cursor without changing transport or store policy.
+
+        Returns:
+            An operation whose future covers ordinary GPU-to-L1 completion,
+            or None when this range cannot currently be submitted. CMX offload
+            remains asynchronous under the normal server policy.
+        """
         self._ensure_heartbeat_started()
 
         aligned_end = len(token_ids) // self.chunk_size * self.chunk_size
         start = self.get_store_start(request_id, aligned_end)
+        target_groups = set(range(len(self._kv_groups)))
+        if writeback_range is not None:
+            start, aligned_end = writeback_range
+            if writeback_range not in self.pending_writeback_ranges(
+                request_id, len(token_ids)
+            ):
+                return None
+            ledger = self._recomputed_writeback[request_id]
+            target_groups = {
+                gid
+                for gid in ledger.group_ids
+                if writeback_range in ledger.ready(len(token_ids), group_id=gid)
+            }
         if aligned_end <= start:
             return None
         lookup = LMCacheLookupOperation(
@@ -1128,7 +1322,9 @@ class UnifiedLMCacheMPConnector:
             )
         group_indices = self._normalize_group_indices(device_indices)
         store_group_indices = []
-        for group, indices in zip(self._kv_groups, group_indices, strict=True):
+        for gid, (group, indices) in enumerate(
+            zip(self._kv_groups, group_indices, strict=True)
+        ):
             group_covered_tokens = (
                 int(indices.numel()) * group.tokens_per_block // group.slots_per_block
             )
@@ -1150,7 +1346,10 @@ class UnifiedLMCacheMPConnector:
                 * group.slots_per_block
                 // group.tokens_per_block
             )
-            store_group_indices.append(indices[start_slot:end_slot])
+            selected = indices[start_slot:end_slot]
+            store_group_indices.append(
+                selected if gid in target_groups else torch.zeros_like(selected)
+            )
         engine_group_blocks = [
             self._slots_to_blocks(
                 indices,
@@ -1167,7 +1366,10 @@ class UnifiedLMCacheMPConnector:
         locally_healthy = self.is_healthy
         can_submit = locally_healthy and all(
             self._store_group_blocks_are_valid(group, blocks)
-            for group, blocks in zip(self._kv_groups, engine_group_blocks, strict=True)
+            for gid, (group, blocks) in enumerate(
+                zip(self._kv_groups, engine_group_blocks, strict=True)
+            )
+            if gid in target_groups
         )
         if not self._sync_success(can_submit):
             if locally_healthy and not can_submit:
@@ -1177,6 +1379,16 @@ class UnifiedLMCacheMPConnector:
                     request_id,
                 )
             return None
+        ticket = None
+        tickets = ()
+        if writeback_range is not None:
+            tickets = tuple(
+                self._recomputed_writeback[request_id].begin(
+                    *writeback_range, group_id=gid
+                )
+                for gid in sorted(target_groups)
+            )
+            ticket = tickets[0]
         submitted = False
         event = None
         future: MessagingFuture[Any] | _ImmediateFuture
@@ -1216,8 +1428,25 @@ class UnifiedLMCacheMPConnector:
             self._active_sessions.add(request_id)
         if event is not None:
             future.retain_reference(event)
-        self._store_submitted_tokens[request_id] = aligned_end
-        return LMCacheStoreOperation(request_id, start, aligned_end, future)
+        if ticket is None:
+            self._store_submitted_tokens[request_id] = aligned_end
+        operation = LMCacheStoreOperation(
+            request_id,
+            start,
+            aligned_end,
+            future,
+            writeback_ticket=ticket,
+            additional_writeback_tickets=tickets[1:],
+        )
+        if ticket is not None:
+            logger.info(
+                "KV_WRITEBACK_QUEUED id=%s request=%s range=%d:%d",
+                ticket.identity,
+                request_id,
+                start,
+                aligned_end,
+            )
+        return operation
 
     def complete_store(
         self, operation: LMCacheStoreOperation, *, synchronize: bool = True
@@ -1229,9 +1458,11 @@ class UnifiedLMCacheMPConnector:
             synchronize: Whether to reduce success across TP and PP ranks.
 
         Returns:
-            Whether the store succeeded. On failure, the next store starts no
-            later than this range, even if later stores have been submitted.
-            Repeated completion calls return the cached result.
+            Whether ordinary STORE admission succeeded. A failed normal suffix
+            rolls back its submitted cursor; a failed missing range remains
+            separately eligible without moving that cursor. Completion never
+            adds a retry loop or waits for external persistence. Repeated calls
+            return the cached result.
         """
         if operation.result is not None:
             return operation.result
@@ -1241,6 +1472,27 @@ class UnifiedLMCacheMPConnector:
         except Exception:
             logger.exception("LMCache store failed for %s", operation.request_id)
         operation.result = self._sync_success(success) if synchronize else success
+        if operation.writeback_ticket is not None:
+            ledger = self._recomputed_writeback.get(operation.request_id)
+            if ledger is not None:
+                for ticket in (
+                    operation.writeback_ticket,
+                    *operation.additional_writeback_tickets,
+                ):
+                    ledger.complete(ticket, bool(operation.result))
+                if not ledger.has_pending:
+                    for content, saved in list(self._writeback_backlog.items()):
+                        if saved is ledger:
+                            del self._writeback_backlog[content]
+            logger.info(
+                "KV_WRITEBACK_ACK id=%s request=%s range=%d:%d success=%s",
+                operation.writeback_ticket.identity,
+                operation.request_id,
+                operation.start,
+                operation.end,
+                operation.result,
+            )
+            return operation.result
         if (
             not operation.result
             and self._store_submitted_tokens.get(operation.request_id, 0)
@@ -1300,6 +1552,7 @@ class UnifiedLMCacheMPConnector:
     def finish_request(self, request_id: str) -> None:
         self.end_session(request_id)
         self._store_submitted_tokens.pop(request_id, None)
+        self._recomputed_writeback.pop(request_id, None)
 
     def end_all_sessions(self) -> None:
         for request_id in list(self._active_sessions):

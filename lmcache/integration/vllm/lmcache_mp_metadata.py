@@ -5,6 +5,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
+import uuid
 
 # Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -32,6 +33,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
 from lmcache.v1.common.group_view import slice_block_ids_per_group
+from lmcache.v1.common.recomputed_writeback import RecomputedWriteback, WritebackTicket
 from lmcache.v1.common.token_codec import (
     TOKEN_STRIDE,
     num_packed_tokens,
@@ -98,6 +100,10 @@ class LMCacheMPRequestTracker:
     # chunk size; unfull chunks are tracked in ``unfull_chunk_boundaries``.
     num_stored_tokens: int = 0
 
+    # A terminal, validated attention-only delivery failure can rewind engine
+    # computation without invalidating the healthy external stored prefix.
+    preserved_store_frontier: int = 0
+
     # Whether a STORE was sent to the workers since this tracker was created.
     store_scheduled: bool = False
 
@@ -141,6 +147,8 @@ class LMCacheMPRequestTracker:
 
     def __init__(self, request: "Request"):
         self._request = request
+        self.writeback = RecomputedWriteback()
+        self.writeback_generation = uuid.uuid4().hex
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.request_configs = apply_lora_tag(
@@ -155,6 +163,7 @@ class LMCacheMPRequestTracker:
         self.allocated_block_ids = {}
         self.num_engine_computed_tokens = 0
         self.num_stored_tokens = 0
+        self.preserved_store_frontier = 0
         self.store_scheduled = False
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
@@ -260,6 +269,15 @@ class LMCacheMPRequestTracker:
                             break
                 block_ids.append(block_id)
 
+    def replace_block_ids(self, block_ids: tuple[list[int], ...]) -> None:
+        """Refresh the engine's authoritative mapping after private KV adoption."""
+        self.allocated_block_ids = {gid: list(ids) for gid, ids in enumerate(block_ids)}
+
+    @property
+    def internal_replay(self) -> bool:
+        """Whether this tracker belongs to private engine replay, never storage."""
+        return bool(getattr(self._request, "is_internal_kv_repair", False))
+
     def num_allocated_blocks(self) -> dict[int, int]:
         return {
             engine_group_idx: len(blocks)
@@ -338,6 +356,15 @@ class LMCacheMPRequestTracker:
     def __str__(self) -> str:
         return self.__repr__()
 
+    @property
+    def committed_tokens(self) -> int:
+        """Engine-completed position, excluding the currently planned forward."""
+        return max(
+            0,
+            self._request.num_computed_tokens
+            - getattr(self._request, "num_in_flight_tokens", 0),
+        )
+
 
 @dataclass
 class LMCacheMPRequestMetadata:
@@ -346,6 +373,52 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    transfer_generation: int | None = None
+
+    @staticmethod
+    def GetWritebackMetadata(
+        tracker: LMCacheMPRequestTracker,
+        span: tuple[int, int],
+        group_tokens_per_block: list[int],
+        *,
+        group_id: int = 0,
+    ) -> tuple["LMCacheMPRequestMetadata", WritebackTicket]:
+        """Snapshot committed missing KV for ordinary STORE, preserving the cursor.
+
+        Args:
+            tracker: Owner whose completed forward made this range valid.
+            span: Exact chunk-aligned token range below the committed boundary.
+            group_tokens_per_block: Engine group block geometry.
+            group_id: Attention engine group to store; other groups use null
+                source blocks and are skipped by ordinary STORE.
+
+        Returns:
+            Normal STORE metadata and its revisioned bookkeeping ticket.
+        """
+        start, end = span
+        ticket = tracker.writeback.begin(start, end, group_id=group_id)
+        blocks = slice_block_ids_per_group(
+            tracker.allocated_block_ids, group_tokens_per_block, start, end
+        )
+        blocks = [
+            ids if gid == group_id else [0] * len(ids) for gid, ids in enumerate(blocks)
+        ]
+        metadata = LMCacheMPRequestMetadata(
+            request_id=tracker.request_id,
+            direction="STORE",
+            op=LoadStoreOp(
+                token_bytes=tracker.packed_token_ids(),
+                block_ids=blocks,
+                start=start,
+                end=end,
+            ),
+            cache_salt=tracker.cache_salt,
+            request_configs={
+                **(tracker.request_configs or {}),
+                "recomputed_writeback_id": ticket.identity,
+            },
+        )
+        return metadata, ticket
 
     @staticmethod
     def GetStoreMetadata(
@@ -659,7 +732,10 @@ class LMCacheMPRequestMetadata:
                 direction="RETRIEVE",
                 op=op,
                 cache_salt=tracker.cache_salt,
-                request_configs=tracker.request_configs,
+                request_configs={
+                    **(tracker.request_configs or {}),
+                    "recomputed_generation": tracker.writeback_generation,
+                },
             )
             return ret
 
@@ -706,7 +782,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
 @dataclass
 class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
-    """Worker -> Scheduler metadata for completed store events.
+    """Worker -> Scheduler load contradictions and ordinary STORE outcomes.
 
     Attributes:
         completed_store_requests: Newly completed stores of this worker, as
@@ -721,10 +797,31 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
             breaks the request's stored-prefix chain so later chunks are not
             stored unreachable. ``aggregate()`` unions the sets: one rank's
             failure breaks the chain even when the other ranks succeeded.
+        failed_load_ranges: Exact token ranges and transfer generation whose
+            delivery contradicted a previous lookup. Independent of the
+            stored-prefix frontier.
+        preserved_store_frontiers: Terminally covered external prefixes, keyed
+            by request with storage generation and end position. Healthy
+            recurrent delivery is required for hybrids. Dirty attention ranges
+            remain independent; this does not acknowledge storage persistence.
+        writeback_results: Missing-range operation identities mapped to normal
+            STORE admission outcomes. These do not acknowledge L2 persistence.
     """
 
     completed_store_requests: dict[str, int]
     failed_store_requests: set[str] = field(default_factory=set)
+    failed_load_ranges: dict[str, list[tuple[int, int, str]]] = field(
+        default_factory=dict
+    )
+    writeback_results: dict[str, bool] = field(default_factory=dict)
+    failed_group_load_ranges: dict[str, list[tuple[int, int, int, str]]] = field(
+        default_factory=dict
+    )
+
+    # Request -> (storage-bookkeeping generation, covered external frontier).
+    # Sent only after validating complete registered groups and healthy state;
+    # dirty attention ranges still override this normal stored-prefix cursor.
+    preserved_store_frontiers: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -742,7 +839,31 @@ class LMCacheMPWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_requests)
         for k, v in other.completed_store_requests.items():
             merged[k] = merged.get(k, 0) + v
+        loads = {rid: list(spans) for rid, spans in self.failed_load_ranges.items()}
+        for rid, spans in other.failed_load_ranges.items():
+            loads.setdefault(rid, []).extend(spans)
+        grouped = {
+            rid: list(spans) for rid, spans in self.failed_group_load_ranges.items()
+        }
+        for rid, spans in other.failed_group_load_ranges.items():
+            grouped.setdefault(rid, []).extend(spans)
+        frontiers = dict(self.preserved_store_frontiers)
+        for rid, (generation, end) in other.preserved_store_frontiers.items():
+            previous = frontiers.get(rid)
+            if previous is None:
+                frontiers[rid] = (generation, end)
+            elif previous[0] == generation:
+                frontiers[rid] = (generation, min(previous[1], end))
+            else:
+                frontiers[rid] = ("", 0)
+        results = dict(self.writeback_results)
+        for identity, success in other.writeback_results.items():
+            results[identity] = results.get(identity, True) and success
         return LMCacheMPWorkerMetadata(
+            failed_load_ranges=loads,
+            failed_group_load_ranges=grouped,
+            preserved_store_frontiers=frontiers,
+            writeback_results=results,
             completed_store_requests=merged,
             failed_store_requests=(
                 self.failed_store_requests | other.failed_store_requests
