@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "lmcache-rust-core"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+name = "lmcache_rust_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
