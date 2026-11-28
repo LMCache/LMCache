@@ -1,23 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retrieve steps, and the two ways an engine runs one.
+"""Retrieve steps and when their kernels run.
 
-A retrieve moves a group's chunks in steps: one kernel batch of full
-chunks, or the unfull chunk. Each is a :class:`TransferStep`: the objects,
-where they land in a staging, and the kernels that copy the landed bytes
-into the paged KV cache.
+A retrieve copies chunks into a staging buffer, then runs kernels that move
+them into the paged KV cache. One copy with its kernels is a
+:class:`TransferStep`.
 
-- An **on-stream** engine queues its copy on the context's stream, so the
-  step is staged and its kernels are queued right away: the stream orders
-  the kernels after the copy.
-- An **off-stream** engine's bytes arrive by a path the stream does not wait
-  for (a NIC writing into GPU memory), so the kernels cannot be queued yet.
-  The step is handed to the retrieve's :class:`RetrieveTransfer`, which
-  gives it to the :class:`OffStreamEngine` that stages it and queues its
-  kernels once the bytes landed.
+When the kernels can be queued depends on how the bytes reach the staging:
 
-``engines.run_step`` picks between the two, and a caller treats both alike:
-it runs its transfers inside :func:`retrieve_transfer` and asks the
-:class:`RetrieveTransfer` to call it back once everything is queued.
+- **On-stream**: the copy is queued on the GPU stream, so the kernels are
+  queued right behind it.
+- **Off-stream**: the bytes arrive in GPU memory outside the stream, so the
+  kernels wait until an :class:`OffStreamEngine` says the bytes landed.
+
+A caller does not tell the two apart: it runs its transfers inside
+:func:`retrieve_transfer` and gets one callback when everything is queued.
 """
 
 # Standard
