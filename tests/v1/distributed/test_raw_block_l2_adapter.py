@@ -19,6 +19,7 @@ from lmcache.v1.distributed.l2_adapters.raw_block import encode_object_key
 from lmcache.v1.distributed.l2_adapters.raw_block.io_engine import (
     IoUringBlockIO,
     IoUringBlockIOConfig,
+    PosixBlockIO,
     RawBlockIOConfig,
 )
 from lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter import (
@@ -36,6 +37,7 @@ from lmcache.v1.memory_management import (
 )
 from tests.v1.distributed.raw_block.test_utils import _RecordingRawDevice
 import lmcache.v1.distributed.l2_adapters.raw_block.core as raw_block_core
+import lmcache.v1.distributed.l2_adapters.raw_block_l2_adapter as raw_block_l2_adapter
 
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -144,7 +146,6 @@ def _wait_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 def _make_config(
     device_path: str,
     *,
-    slot_bytes: int = 64 * 1024,
     capacity_bytes: int = 0,
     io_engine: str = "posix",
     use_uring_cmd: bool = False,
@@ -152,7 +153,6 @@ def _make_config(
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
         device_path=device_path,
-        slot_bytes=slot_bytes,
         capacity_bytes=capacity_bytes,
         use_odirect=False,
         io_engine=io_engine,
@@ -171,7 +171,6 @@ def _make_config(
 def _config_dict(**overrides) -> dict[str, object]:
     config: dict[str, object] = {
         "device_path": "/tmp/raw-block-test-device",
-        "slot_bytes": 64 * 1024,
         "use_odirect": False,
     }
     config.update(overrides)
@@ -205,7 +204,7 @@ def test_raw_block_l2_adapter_buffered_iouring_accepts_unaligned_l1() -> None:
         autospec=True,
     ) as core_cls:
         core_cls.return_value.report_status.return_value = {}
-        core_cls.return_value.snapshot_indexed_keys.return_value = []
+        core_cls.return_value.snapshot_indexed_allocations.return_value = []
         adapter = RawBlockL2Adapter(config, descriptor)
         adapter.close()
 
@@ -380,18 +379,97 @@ def test_raw_block_l2_adapter_delete_respects_lock_until_unlock():
 
 
 @requires_raw_block_ext
+def test_raw_block_l2_adapter_charges_a_key_repeated_in_a_batch_once():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+        adapter = RawBlockL2Adapter(_make_config(dev_path))
+        listener = _RecordingListener()
+        adapter.register_listener(listener)
+        try:
+            key = _create_object_key(31)
+            obj = _create_memory_obj(fill_value=31.0)
+            assert _run_store(adapter, [key, key], [obj, obj]) is True
+            used = adapter.get_usage().total_bytes_used
+            assert used == adapter.report_status()["core"]["allocated_bytes"]
+            adapter.delete([key])
+            assert adapter.get_usage().total_bytes_used == 0
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_capacity_drops_when_deleted_space_is_retired():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+        adapter = RawBlockL2Adapter(_make_config(dev_path, io_engine="posix"))
+        real_write = PosixBlockIO.write_buffers
+
+        def failing_header_write(self, offsets, *args, **kwargs):
+            if len(offsets) == 1:
+                raise OSError("injected")
+            return real_write(self, offsets, *args, **kwargs)
+
+        try:
+            key = _create_object_key(41)
+            assert _run_store(adapter, [key], [_create_memory_obj(fill_value=41.0)])
+            before = adapter.get_usage()
+            with patch.object(PosixBlockIO, "write_buffers", failing_header_write):
+                adapter.delete([key])
+            after = adapter.get_usage()
+            assert after.total_bytes_used == 0
+            assert after.total_capacity_bytes == (
+                before.total_capacity_bytes - before.total_bytes_used
+            )
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_usage_stays_truthful_while_stores_find_no_range():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+        # Room for four default objects (8 KiB each) after the marker block.
+        capacity_bytes = (1 * 1024 * 1024) + 4096 + 4 * 8 * 1024
+        adapter = RawBlockL2Adapter(
+            _make_config(dev_path, capacity_bytes=capacity_bytes)
+        )
+        try:
+            keys = [_create_object_key(50 + i) for i in range(4)]
+            for i, key in enumerate(keys):
+                assert _run_store(adapter, [key], [_create_memory_obj(fill_value=i)])
+            adapter.delete([keys[0], keys[2]])
+            assert adapter.get_usage().usage_fraction == 0.5
+            # More than the free bytes, even split across the two holes.
+            big = _create_memory_obj(size=5 * 1024, fill_value=9.0)  # 24 KiB object
+            assert _run_store(adapter, [_create_object_key(60)], [big]) is False
+            # Usage stays truthful although the store found no range.
+            assert adapter.get_usage().usage_fraction == 0.5
+            adapter.delete([keys[1]])
+            assert adapter.get_usage().usage_fraction == 0.25
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
 def test_raw_block_l2_adapter_uses_global_eviction_accounting():
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dev.bin")
         with open(dev_path, "wb") as f:
             f.truncate(8 * 1024 * 1024)
 
-        slot_bytes = 64 * 1024
-        capacity_bytes = (1 * 1024 * 1024) + slot_bytes
+        # Room for exactly one default object (a 4 KiB header and 4 KiB
+        # payload) after the 4 KiB format-marker block.
+        object_bytes = 8 * 1024
+        capacity_bytes = (1 * 1024 * 1024) + 4096 + object_bytes
         adapter = RawBlockL2Adapter(
             _make_config(
                 dev_path,
-                slot_bytes=slot_bytes,
                 capacity_bytes=capacity_bytes,
             )
         )
@@ -411,15 +489,15 @@ def test_raw_block_l2_adapter_uses_global_eviction_accounting():
             assert listener.deleted == []
 
             usage = adapter.get_usage()
-            assert usage.total_bytes_used == slot_bytes
-            assert usage.total_capacity_bytes == slot_bytes
+            assert usage.total_bytes_used == object_bytes
+            assert usage.total_capacity_bytes == object_bytes
             assert 0.0 < usage.usage_fraction <= 1.0
             assert adapter.supports_global_eviction is True
 
             status = adapter.report_status()
             assert status["is_healthy"] is True
             assert status["type"] == "RawBlockL2Adapter"
-            assert status["core"]["usable_capacity_bytes"] == slot_bytes
+            assert status["core"]["usable_capacity_bytes"] == object_bytes
 
             _, bitmap1 = _run_lookup(adapter, [key1])
             assert bitmap1 is not None
@@ -538,8 +616,8 @@ def test_raw_block_l2_adapter_recovery_seeds_usage_by_cache_salt():
         with open(dev_path, "wb") as f:
             f.truncate(8 * 1024 * 1024)
 
-        slot_bytes = 64 * 1024
-        config = _make_config(dev_path, slot_bytes=slot_bytes)
+        object_bytes = 8 * 1024  # 4 KiB header + 4 KiB payload
+        config = _make_config(dev_path)
         key = _create_object_key(33, cache_salt="u1")
         obj = _create_memory_obj(fill_value=33.0)
 
@@ -552,8 +630,8 @@ def test_raw_block_l2_adapter_recovery_seeds_usage_by_cache_salt():
         adapter2 = RawBlockL2Adapter(config)
         try:
             usage = adapter2.get_usage()
-            assert usage.total_bytes_used == slot_bytes
-            assert dict(usage.bytes_by_cache_salt) == {"u1": slot_bytes}
+            assert usage.total_bytes_used == object_bytes
+            assert dict(usage.bytes_by_cache_salt) == {"u1": object_bytes}
 
             adapter2.delete([key])
             usage = adapter2.get_usage()
@@ -726,8 +804,9 @@ def test_raw_block_l2_adapter_uecc_preserves_healthy_slots(
             if not uecc:
                 assert listener.deleted == []
                 fake.fail_completion_entries.clear()
+        # Each key is charged its header plus payload: 20 KiB and 8 KiB.
         assert listener.deleted == [[keys[0]]]
-        assert adapter.get_usage().total_bytes_used == core.slot_bytes
+        assert adapter.get_usage().total_bytes_used == 8 * 1024
         lookup_id, hits = _run_lookup(adapter, keys)
         assert str(hits) == "01"
         assert adapter.query_lookup_and_lock_result(lookup_id) is None
@@ -737,8 +816,45 @@ def test_raw_block_l2_adapter_uecc_preserves_healthy_slots(
         adapter.submit_unlock(keys[1:])
         assert _run_store(adapter, keys[:1], objects[:1])
         assert core.entry_offset(encoded[0]) not in (None, entry_offset)
-        assert adapter.get_usage().total_bytes_used == 2 * core.slot_bytes
+        assert adapter.get_usage().total_bytes_used == 28 * 1024
         _, restored = _run_load(adapter, keys, destinations)
         assert str(restored) == "11"
     finally:
         adapter.close()
+
+
+def test_raw_block_l2_adapter_config_accepts_and_ignores_slot_bytes():
+    """Configs written for fixed slots keep parsing; slot_bytes no longer
+    limits object size."""
+    with patch.object(raw_block_l2_adapter.logger, "warning") as warn:
+        config = RawBlockL2AdapterConfig.from_dict(_config_dict(slot_bytes=4096))
+    assert "slot_bytes is deprecated" in warn.call_args.args[0]
+    assert not hasattr(config, "slot_bytes")
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_stores_objects_larger_than_a_legacy_slot():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+        config = RawBlockL2AdapterConfig.from_dict(
+            _config_dict(
+                device_path=dev_path,
+                slot_bytes=64 * 1024,
+                meta_total_bytes=1024 * 1024,
+                meta_enable_periodic=False,
+            )
+        )
+        adapter = RawBlockL2Adapter(config)
+        try:
+            key = _create_object_key(70)
+            obj = _create_memory_obj(size=64 * 1024, fill_value=7.0)  # 256 KiB
+            assert _run_store(adapter, [key], [obj]) is True
+            assert adapter.get_usage().total_bytes_used == 4096 + 256 * 1024
+            dest = _create_memory_obj(size=64 * 1024)
+            _, loaded = _run_load(adapter, [key], [dest])
+            assert str(loaded) == "1"
+            assert torch.equal(dest.tensor, obj.tensor)
+        finally:
+            adapter.close()
