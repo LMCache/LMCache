@@ -91,6 +91,49 @@ def format_storage_key(
     return result
 
 
+def encode_native_storage_keys(keys: list[ObjectKey]) -> list[str]:
+    """Reuse a common suffix until the first salt or tag change."""
+    if len(keys) < 2:
+        return _encode_native_keys_scalar(keys)
+    first = keys[0].identity
+    second = keys[1].identity
+    if second.cache_salt != first.cache_salt or second.tags != first.tags:
+        return _encode_native_keys_scalar(keys)
+    token = encode_tags(first.tags)
+    salt = first.cache_salt
+    suffix = f"@{salt}@{token}" if token else (f"@{salt}" if salt else "")
+    prefixes: dict[tuple[str, int, int], str] = {}
+    result = []
+    for index, key in enumerate(keys):
+        ident = key.identity
+        if ident.cache_salt != salt or ident.tags != first.tags:
+            result.extend(_encode_native_keys_scalar(keys[index:]))
+            break
+        fields = (ident.model_name, ident.kv_rank, ident.object_group_id)
+        prefix = prefixes.get(fields)
+        if prefix is None:
+            prefix = (
+                f"{ident.model_name}@{ident.kv_rank:08x}@{ident.object_group_id:x}@"
+            )
+            prefixes[fields] = prefix
+        result.append(prefix + ident.chunk_hash.hex() + suffix)
+    return result
+
+
+def _encode_native_keys_scalar(keys: list[ObjectKey]) -> list[str]:
+    """Encode the fixed native wire format for arbitrary identities."""
+    out = []
+    for k in keys:
+        identity = k.identity
+        token = encode_tags(identity.tags)
+        salt = identity.cache_salt
+        suffix = f"@{salt}@{token}" if token else (f"@{salt}" if salt else "")
+        out.append(
+            f"{identity.model_name}@{identity.kv_rank:08x}@{identity.object_group_id:x}@{identity.chunk_hash.hex()}{suffix}"
+        )
+    return out
+
+
 def encode_fs_filename(key: ObjectKey) -> str:
     """Return the Python/native FS filename, preserving legacy untagged names."""
     return format_storage_key(

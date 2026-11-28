@@ -33,7 +33,10 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, MemoryTags, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
-from lmcache.v1.distributed.key_codec import encode_storage_key
+from lmcache.v1.distributed.key_codec import (
+    encode_native_storage_keys,
+    encode_storage_key,
+)
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -245,7 +248,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = encode_native_storage_keys(keys)
         memviews = [
             _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
         ]
@@ -287,7 +290,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         group_layout_descs: dict[int, MemoryLayoutDesc],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = encode_native_storage_keys(keys)
 
         with self._lock:
             task_id = self._get_next_task_id()
@@ -324,7 +327,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = encode_native_storage_keys(keys)
         memviews = [
             _obj_to_memoryview(obj, self._pad_buffers_to_alignment) for obj in objects
         ]
@@ -363,7 +366,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         if not keys or not self._has_delete:
             return
 
-        key_strings = [_object_key_to_string(k) for k in keys]
+        key_strings = encode_native_storage_keys(keys)
         done_event = threading.Event()
 
         with self._lock:
