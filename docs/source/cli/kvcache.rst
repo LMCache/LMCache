@@ -11,12 +11,13 @@ server.
 .. code-block:: text
 
    $ lmcache kvcache -h
-   usage: lmcache kvcache [-h] [--format FORMAT] [--output PATH] [-q] {clear} ...
+   usage: lmcache kvcache [-h] [--format FORMAT] [--output PATH] [-q] {clear,delete} ...
 
    Manage KV cache state.
 
    subcommands:
      clear          Clear all cached KV data in L1 (CPU)
+  delete         Delete specific cached objects by key (L1, L2, or both)
 
    options:
      -h, --help       show this help message and exit
@@ -59,7 +60,7 @@ Clear all cached KV data in **L1 (CPU memory)** on the target LMCache server.
 
 .. code-block:: bash
 
-   $ lmcache kvcache clear -q --url http://localhost:8000
+   $ lmcache kvcache -q clear --url http://localhost:8000
    $ echo $?
    0
 
@@ -100,6 +101,69 @@ Exit Codes
    * - ``1``
      - Error (connection failure, server error, bad arguments).
 
+delete
+------
+
+Delete specific cached objects by key, from L1, an L2 adapter, or both. Unlike
+``clear``, which drops everything, the caller names the objects.
+
+Keys are object keys: ``chunk_hash_hex`` and ``model_name`` are required,
+``kv_rank`` defaults to 0, and ``object_group_id``, ``cache_salt`` and ``tags``
+are optional. An L2 adapter lookup needs the same fields the writer used, so a
+key copied from a store trace round-trips unchanged.
+
+.. code-block:: bash
+
+   lmcache kvcache delete --url <MP_HTTP_URL> --key '<KEY_JSON>'
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 14 52
+
+   * - Option
+     - Default
+     - Description
+   * - ``--url``
+     - (required)
+     - Target MP HTTP endpoint.
+   * - ``--key JSON``
+     - (required)
+     - Object key as JSON. Repeat for several keys.
+   * - ``--keys-file PATH``
+     - (required)
+     - JSON file with an array of keys, or an object holding a ``keys`` array.
+       Mutually exclusive with ``--key``.
+   * - ``--tier {l1,l2,all}``
+     - ``l1``
+     - Tier to delete from.
+   * - ``--adapter NAME``
+     - primary adapter
+     - L2 adapter name. Ignored for ``tier=l1``.
+   * - ``--force``
+     - off
+     - Delete L1 keys even while they are read- or write-locked.
+
+The command does not prompt: the keys already have to be spelled out, and the
+sibling commands (``clear``, ``quota delete``) do not ask either. Run it from a
+script without a stdin dance.
+
+**Example:**
+
+.. code-block:: bash
+
+   KEY='{"chunk_hash_hex":"00...","model_name":"org/model","kv_rank":0}'
+   lmcache kvcache delete --url http://localhost:8000 --key "$KEY"
+
+**Delete from every tier and require success:**
+
+.. code-block:: bash
+
+   lmcache kvcache -q delete --url http://localhost:8000 \
+       --keys-file /tmp/keys.json --tier all --force
+
+A response with ``ok: false`` (an adapter rejected part of the batch) exits
+``1``, so ``delete ... && next-step`` cannot mistake it for success.
+
 Common Patterns
 ---------------
 
@@ -111,7 +175,7 @@ to diagnose.
 
 .. code-block:: bash
 
-   if lmcache kvcache clear -q --url http://localhost:8000; then
+   if lmcache kvcache -q clear --url http://localhost:8000; then
        echo "Cache cleared"
    else
        echo "Clear failed — server temporarily unreachable, retrying later"
