@@ -255,6 +255,9 @@ def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
     [
         ({"device_path": "/dev/daxX.X", "size_bytes": 1024}, 422),
         ({"device_path": "/dev/daxX.X", "size": "many"}, 400),
+        # Superscript digits pass ``str.isdigit`` but not ``Decimal``.
+        ({"device_path": "/dev/daxX.X", "size": "\u00b2GiB"}, 400),
+        ({"device_path": "/dev/daxX.X", "size": "1.\u00b2GiB"}, 400),
     ],
 )
 def test_add_rejects_invalid_size_payloads(
