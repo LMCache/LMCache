@@ -4,6 +4,7 @@
 # Standard
 from unittest.mock import MagicMock, patch
 import argparse
+import json
 import sys
 
 # Inject a fake openai module so that the auto-discovery of
@@ -59,6 +60,175 @@ class TestQuotaCommandMetadata:
 
 
 class TestQuotaCommandExecute:
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {
+                "cache_salt": "tenant1",
+                "limit_gb": 2.5,
+                "current_usage_gb": 0.125,
+                "exists": True,
+            },
+            {
+                "cache_salt": "tenant1",
+                "quota_limit_gb": 2.5,
+                "usage_gb": 0.125,
+                "quota_exists": True,
+            },
+        ],
+    )
+    @patch("lmcache.cli.commands.quota.get_command.http_request")
+    def test_get_response_schemas(
+        self,
+        mock_http: MagicMock,
+        parser: argparse.ArgumentParser,
+        cmd: QuotaCommand,
+        capsys: pytest.CaptureFixture[str],
+        response: dict[str, object],
+    ) -> None:
+        """Server and coordinator responses expose the same CLI metrics."""
+        mock_http.return_value = response
+        args = parser.parse_args(["quota", "get", "tenant1", "--format", "json"])
+        cmd.execute(args)
+
+        assert json.loads(capsys.readouterr().out)["metrics"] == {
+            "cache_salt": "tenant1",
+            "limit_gb": 2.5,
+            "current_usage_gb": 0.125,
+            "exists": True,
+        }
+
+    @pytest.mark.parametrize("usage_gb", [0.0, 0.125])
+    @patch("lmcache.cli.commands.quota.get_command.http_request")
+    def test_get_coordinator_without_explicit_quota(
+        self,
+        mock_http: MagicMock,
+        parser: argparse.ArgumentParser,
+        cmd: QuotaCommand,
+        capsys: pytest.CaptureFixture[str],
+        usage_gb: float,
+    ) -> None:
+        """An absent explicit quota retains zero and false from the API."""
+        mock_http.return_value = {
+            "cache_salt": "tenant1",
+            "quota_limit_gb": 0.0,
+            "usage_gb": usage_gb,
+            "quota_exists": False,
+        }
+        args = parser.parse_args(["quota", "get", "tenant1", "--format", "json"])
+        cmd.execute(args)
+
+        assert json.loads(capsys.readouterr().out)["metrics"] == {
+            "cache_salt": "tenant1",
+            "limit_gb": 0.0,
+            "current_usage_gb": usage_gb,
+            "exists": False,
+        }
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"users": {"tenant1": {"limit_gb": 2.5, "current_usage_gb": 0.125}}},
+            {
+                "total_gb": 0.625,
+                "by_cache_salt": [
+                    {
+                        "cache_salt": "tenant1",
+                        "quota_limit_gb": 2.5,
+                        "usage_gb": 0.125,
+                        "quota_exists": True,
+                    },
+                    {
+                        "cache_salt": "usage-only",
+                        "quota_limit_gb": 0.0,
+                        "usage_gb": 0.5,
+                        "quota_exists": False,
+                    },
+                ],
+            },
+        ],
+    )
+    @patch("lmcache.cli.commands.quota.list_command.http_request")
+    def test_list_response_schemas(
+        self,
+        mock_http: MagicMock,
+        parser: argparse.ArgumentParser,
+        cmd: QuotaCommand,
+        capsys: pytest.CaptureFixture[str],
+        response: dict[str, object],
+    ) -> None:
+        """List registered quotas for either endpoint, excluding usage-only rows."""
+        mock_http.return_value = response
+        args = parser.parse_args(["quota", "list", "--format", "json"])
+        cmd.execute(args)
+
+        assert json.loads(capsys.readouterr().out)["metrics"]["quotas"] == [
+            {
+                "cache_salt": "tenant1",
+                "limit_gb": 2.5,
+                "current_usage_gb": 0.125,
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "entries",
+        [
+            [],
+            [
+                {
+                    "cache_salt": "usage-only",
+                    "quota_limit_gb": 0.0,
+                    "usage_gb": 0.5,
+                    "quota_exists": False,
+                }
+            ],
+        ],
+    )
+    @patch("lmcache.cli.commands.quota.list_command.http_request")
+    def test_list_coordinator_without_explicit_quotas(
+        self,
+        mock_http: MagicMock,
+        parser: argparse.ArgumentParser,
+        cmd: QuotaCommand,
+        capsys: pytest.CaptureFixture[str],
+        entries: list[dict[str, object]],
+    ) -> None:
+        """An empty quota registry stays empty even when the API reports usage."""
+        mock_http.return_value = {"total_gb": 0.5, "by_cache_salt": entries}
+        args = parser.parse_args(["quota", "list", "--format", "json"])
+        cmd.execute(args)
+
+        assert json.loads(capsys.readouterr().out)["metrics"] == {
+            "info": "No quotas configured"
+        }
+
+    @patch("lmcache.cli.commands.quota.list_command.http_request")
+    def test_list_coordinator_explicit_zero_quota(
+        self,
+        mock_http: MagicMock,
+        parser: argparse.ArgumentParser,
+        cmd: QuotaCommand,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A registered zero limit stays listed even when usage is also zero."""
+        mock_http.return_value = {
+            "total_gb": 0.0,
+            "by_cache_salt": [
+                {
+                    "cache_salt": "tenant1",
+                    "quota_limit_gb": 0.0,
+                    "usage_gb": 0.0,
+                    "quota_exists": True,
+                }
+            ],
+        }
+        args = parser.parse_args(["quota", "list", "--format", "json"])
+        cmd.execute(args)
+
+        assert json.loads(capsys.readouterr().out)["metrics"]["quotas"] == [
+            {"cache_salt": "tenant1", "limit_gb": 0.0, "current_usage_gb": 0.0}
+        ]
+
     @patch("lmcache.cli.commands.quota.set_command.http_request")
     def test_set(
         self,
