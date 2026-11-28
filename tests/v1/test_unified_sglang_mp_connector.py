@@ -39,7 +39,11 @@ import lmcache.lmcache_native as lmcache_native
 
 @contextmanager
 def _store_connector(
-    rank: int = 0, parallel_axis: str = "single"
+    rank: int = 0,
+    parallel_axis: str = "single",
+    *,
+    client: Mock | None = None,
+    hybrid: bool = False,
 ) -> Iterator[tuple[UnifiedLMCacheMPConnector, Mock, Mock]]:
     """Construct a connector with mocked transfer and heartbeat dependencies."""
     adapter = Mock()
@@ -48,13 +52,24 @@ def _store_connector(
             "full", (torch.empty(32, 2, 3),), tokens_per_block=4, slots_per_block=4
         )
     ]
+    if hybrid:
+        adapter.resolve_registered_groups.return_value.append(
+            SGLangKVComponentGroup(
+                "swa",
+                (torch.empty(32, 2, 3),),
+                sliding_window_size=8,
+                tokens_per_block=4,
+                slots_per_block=4,
+            )
+        )
     adapter.is_mla_enabled.return_value = False
     adapter_name = "lmcache.integration.sglang.unified_kv_adapter"
     adapter_module = ModuleType(adapter_name)
     vars(adapter_module)["SGLangUnifiedKVAdapter"] = Mock(return_value=adapter)
     config = SimpleNamespace(mp_host="127.0.0.1", mp_port=5555)
     config.get_extra_config_value = lambda _key, default: default
-    client = Mock()
+    if client is None:
+        client = Mock()
     client.get_chunk_size.return_value.result.return_value = 8
     transfer = Mock()
     transfer.submit_store.return_value.query.return_value = True
@@ -115,6 +130,42 @@ def _submit_store(
     )
     assert operation is not None
     return operation
+
+
+def _run_parallel_lookup(rank: int, rendezvous: str, parallel_axis: str) -> None:
+    """Verify lookup decisions on two ranks with FULL and SWA groups."""
+    dist.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=20),
+    )
+    try:
+        client = Mock()
+        client.lookup.return_value = _ResultFuture(True, None)
+        client.query_prefetch_status.return_value = _ResultFuture(True, 16)
+        with _store_connector(rank, parallel_axis, client=client, hybrid=True) as (
+            connector,
+            _,
+            _,
+        ):
+            covered = connector.submit_lookup(
+                "covered", list(range(20)), local_hit_tokens=16, cache_salt=""
+            )
+            assert connector.poll_lookup(covered) == 0
+            connector.finish_request("covered")
+            client.lookup.assert_not_called()
+
+            mixed = connector.submit_lookup(
+                "mixed", list(range(20)), local_hit_tokens=16 - 4 * rank, cache_salt=""
+            )
+            assert connector.poll_lookup(mixed) is None
+            assert connector.poll_lookup(mixed) == 16
+            assert client.lookup.call_count == int(rank == 0)
+            connector.finish_request("mixed")
+    finally:
+        dist.destroy_process_group()
 
 
 def _run_staggered_recovery(rank: int, rendezvous: str, parallel_axis: str) -> None:
@@ -1513,6 +1564,50 @@ class TestSGLangStoreRetry(unittest.TestCase):
         future.result.return_value = success
         self.transfer.submit_store.return_value = future
         return _submit_store(self.connector, end, request_id)
+
+
+class TestSGLangLocallyCoveredLookup:
+    """Exercise local coverage through the lookup and store entry points."""
+
+    @pytest.mark.skipif(
+        not dist.is_available() or not dist.is_gloo_available(),
+        reason="requires CPU Gloo process groups",
+    )
+    @pytest.mark.parametrize("parallel_axis", ["tp", "pp"])
+    def test_parallel_hybrid_lookup_agrees_on_coverage(
+        self, tmp_path: Path, parallel_axis: str
+    ) -> None:
+        """All ranks agree whether to skip the lookup or use the leader's result."""
+        mp.spawn(
+            _run_parallel_lookup,
+            args=((tmp_path / "lookup").as_uri(), parallel_axis),
+            nprocs=2,
+            join=True,
+        )
+
+    def test_fully_covered_chunks_need_no_external_lookup(self) -> None:
+        """A partial trailing chunk needs no query or remote session."""
+        client = Mock()
+        with _store_connector(client=client) as (connector, _, _):
+            lookup = connector.submit_lookup(
+                "warm", list(range(20)), local_hit_tokens=16, cache_salt=""
+            )
+            assert connector.poll_lookup(lookup) == 0
+            connector.finish_request("warm")
+
+        client.lookup.assert_not_called()
+        client.query_prefetch_status.assert_not_called()
+        client.end_session.assert_not_called()
+
+    def test_skipped_lookup_leaves_prefix_eligible_for_store(self) -> None:
+        """A GPU prefix hit alone cannot advance LMCache's store cursor."""
+        with _store_connector() as (connector, _, _):
+            lookup = connector.submit_lookup(
+                "warm", list(range(20)), local_hit_tokens=16, cache_salt=""
+            )
+            assert connector.poll_lookup(lookup) == 0
+            store = _submit_store(connector, 20, request_id="warm")
+            assert (store.start, store.end) == (0, 16)
 
 
 class TestSGLangRecovery:
