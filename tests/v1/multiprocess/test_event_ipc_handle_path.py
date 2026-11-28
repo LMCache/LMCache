@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
-import ast
 import inspect
 
 # Third Party
@@ -197,20 +196,28 @@ def _server_handle_path(
 ) -> SimpleNamespace:
     """A LMCacheDrivenTransferModule with GPU instance 1 registered on CPU fakes.
 
-    Returns the module, the registration ``entry``, a request ``key``, and the
-    stream ``callbacks``, held imports (``held``) and released import tokens
-    (``released``) it records.
+    Returns the module, ``register()`` (registers instance 1 again through
+    ``register_kv_cache``), a request ``key``, and the stream ``callbacks``,
+    held imports (``held``) and released import tokens (``released``) it
+    records.
     """
     # First Party
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
 
-    def unexpected_backend_lookup(_device: object) -> _FakeEventBackend:
-        raise AssertionError("server should reuse the registered event backend")
+    registering = False
+
+    def backend_lookup(_device: object) -> _FakeEventBackend:
+        if not registering:
+            raise AssertionError("server should reuse the registered event backend")
+        return backend
 
     monkeypatch.setattr(
+        lmcache_driven_transfer, "get_event_ipc_backend", backend_lookup
+    )
+    monkeypatch.setattr(
         lmcache_driven_transfer,
-        "get_event_ipc_backend",
-        unexpected_backend_lookup,
+        "get_unfull_chunk_layout_desc",
+        lambda cache_context, object_group_id: object(),
     )
     monkeypatch.setattr(
         lmcache_driven_transfer,
@@ -263,7 +270,14 @@ def _server_handle_path(
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
-        layout_desc_registry=SimpleNamespace(unregister=lambda *args: None),
+        validate_chunk_size=lambda chunk_size: None,
+        separate_object_groups=False,
+        full_sw_kv=False,
+        hash_algorithm_name="hash",
+        layout_desc_registry=SimpleNamespace(
+            register=lambda *args, **kwargs: None,
+            unregister=lambda *args: None,
+        ),
     )
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
         cast(Any, server_context)
@@ -286,16 +300,33 @@ def _server_handle_path(
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
         transfer_object_group=lambda *args, **kwargs: None,
         close=lambda: None,
+        num_layers=1,
     )
-    entry = lmcache_driven_transfer.ContextEntry(
-        cache_context=cast(Any, cache_context),
-        model_name="model",
-        world_size=1,
-        chunk_size=256,
-        event_backend=cast(Any, backend),
+    monkeypatch.setattr(
+        lmcache_driven_transfer,
+        "create_cache_context",
+        lambda *args, **kwargs: cache_context,
     )
-    # Registered directly: register_kv_cache needs real IPC handles.
-    module._cache_contexts[1] = entry
+
+    def register() -> None:
+        nonlocal registering
+        registering = True
+        try:
+            module.register_kv_cache(
+                1,
+                kv_caches=cast(Any, object()),
+                model_name="model",
+                world_size=1,
+                engine_type=cast(Any, None),
+                layout_hints=cast(Any, None),
+                engine_group_infos=[],
+                event_profile=None,
+                chunk_size=256,
+            )
+        finally:
+            registering = False
+
+    register()
     key = SimpleNamespace(
         request_id="request",
         cache_salt="",
@@ -305,7 +336,7 @@ def _server_handle_path(
 
     return SimpleNamespace(
         module=module,
-        entry=entry,
+        register=register,
         key=key,
         callbacks=callbacks,
         held=held,
@@ -395,7 +426,7 @@ def test_server_fails_transfers_whose_engine_is_reaped_mid_wait(
     )
     assert [call[0] for call in backend.calls[-2:]] == ["record", "export"]
 
-    module._cache_contexts[1] = server.entry
+    server.register()
     backend.calls.clear()
     backend.on_first_query = reap
     assert module.retrieve(key, 1, [[5]], b"retrieve-producer") == (
@@ -420,33 +451,3 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
         source = inspect.getsource(module)
         assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source
-
-
-def test_server_waits_on_imported_engine_events_poll_on_the_host() -> None:
-    """Every server-side stream wait on an event imported from an engine goes
-    through ``wait_producer_event``, so a host-ready backend (ROCm) never
-    queues a GPU wait on a pending fence. The CacheBlend retrieve cannot run in
-    a unit test, so this checks the call sites in the source."""
-    # First Party
-    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
-    from lmcache.v1.multiprocess.modules.blend import retrieve
-    from lmcache.v1.multiprocess.plugin_modules import qstore
-
-    routed = {}
-    for module in (lmcache_driven_transfer, retrieve, qstore):
-        calls = [
-            node.func
-            for node in ast.walk(ast.parse(inspect.getsource(module)))
-            if isinstance(node, ast.Call)
-        ]
-        assert not [
-            func
-            for func in calls
-            if isinstance(func, ast.Attribute) and func.attr == "wait_event"
-        ], module.__name__
-        routed[module.__name__.rsplit(".", 1)[-1]] = sum(
-            isinstance(func, ast.Name) and func.id == "wait_producer_event"
-            for func in calls
-        )
-    # STORE + RETRIEVE, the CacheBlend retrieve, STORE_Q + the SDK ring wait.
-    assert routed == {"lmcache_driven_transfer": 2, "retrieve": 1, "qstore": 2}

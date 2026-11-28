@@ -179,12 +179,17 @@ _PRODUCER_SLOW_AFTER_S = 0.1
 _PRODUCER_WARN_AFTER_S = 10.0
 _PRODUCER_WARN_EVERY_S = 60.0
 # Deadline for a producer fence, over 100x the longest engine step. It is half
-# the engine adapters' default mq_timeout (300 s), the longest an engine waits
-# for a store before it reuses that store's KV blocks (flush_inflight_stores).
-# The poll runs on the server's GPU affinity worker, which clients share when
-# there are fewer workers than clients (the default is one), so a fence that
-# never completes gives that worker back, failing only its own transfer, before
-# an engine gives up on the requests queued behind it.
+# the engine adapters' default mq_timeout (DEFAULT_MQ_TIMEOUT, 300 s, in
+# integration/vllm/vllm_multi_process_adapter.py and
+# integration/atom/multi_process_adapter.py), the longest an engine waits for a
+# store before it reuses that store's KV blocks (flush_inflight_stores). The
+# poll runs on the server's GPU affinity worker, which clients share when there
+# are fewer workers than clients (the default is one), so a fence that never
+# completes gives that worker back, failing only its own transfer, before an
+# engine gives up on the requests queued behind it. The server does not learn a
+# client's mq_timeout, so that ordering holds only while every client keeps
+# mq_timeout above this deadline; one below it can stop waiting on a store that
+# is still queued behind a pending fence and reuse its blocks.
 _PRODUCER_WAIT_TIMEOUT_S = 150.0
 
 

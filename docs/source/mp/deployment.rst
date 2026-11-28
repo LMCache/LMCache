@@ -304,10 +304,22 @@ Production Best Practices
 
 **Worker count (``--max-workers``, ``--max-gpu-workers``, ``--max-cpu-workers``):**
 ``--max-workers`` sets both the GPU affinity pool and CPU normal pool sizes
-(default 1).  Use ``--max-gpu-workers`` to override the GPU pool independently
---- set it to at least the number of vLLM instances sharing the cache server so
-each instance gets its own dedicated thread.  Use ``--max-cpu-workers`` to
-override the CPU pool for lookup and other non-GPU operations.
+(default 1).  Use ``--max-gpu-workers`` to override the GPU pool independently.
+The GPU pool binds each client connection to one thread, and every worker
+process (TP rank) of a vLLM instance is its own client connection.  Set
+``--max-gpu-workers`` to at least the total number of worker processes
+connected to the cache server (instances × TP size) so each gets a dedicated
+thread; with fewer threads, connections share a thread in FIFO order.  Use
+``--max-cpu-workers`` to override the CPU pool for lookup and other non-GPU
+operations.
+
+**ROCm:** a STORE or RETRIEVE first waits on the host until the engine's
+producer event completes, which takes up to one engine step (and is given up
+after 150 seconds).  That wait blocks its GPU worker thread, so on ROCm a
+shared thread makes every connection on it wait for the others' events.  Set
+``--max-gpu-workers`` to at least the number of worker processes as above, and
+keep the connector's ``lmcache.mp.mq_timeout`` (default 300 seconds) above 150
+seconds.
 
 **L1 memory sizing (``--l1-size-gb``):**
 Allocate as much CPU memory as available after accounting for the OS and vLLM.

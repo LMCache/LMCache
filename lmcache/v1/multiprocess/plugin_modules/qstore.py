@@ -648,6 +648,14 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             committed (logged at WARNING); a subsequent retrieve simply misses
             and the engine recomputes. The boolean result reports whether the
             store completed without such a failure.
+
+            On a backend with ``host_ready_before_imported_wait`` (ROCm), the
+            call blocks this GPU affinity worker until the producer fence
+            completes (see ``wait_producer_event``); clients that share the
+            worker wait behind it. If the fence is given up on -- the Q ring
+            was unregistered or reaped, or it is still pending after the
+            deadline -- the store is skipped: nothing is reserved, and the
+            boolean result is False.
         """
         st = time.perf_counter()
 

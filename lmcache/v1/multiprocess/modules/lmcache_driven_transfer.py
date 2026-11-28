@@ -790,6 +790,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A key addressing an unfull chunk (``key.has_unfull_chunk``) also
             stores that chunk in the same transaction; its block IDs follow
             the full chunks' in every group, and its mask entry comes last.
+
+            On a backend with ``host_ready_before_imported_wait`` (ROCm), the
+            call blocks this GPU affinity worker until the producer fence
+            completes (see ``wait_producer_event``); clients that share the
+            worker wait behind it. If the fence is given up on -- the instance
+            was unregistered or reaped, or it is still pending after the
+            deadline -- the store is skipped like the failures above: nothing
+            is reserved or committed, and the boolean result is False.
         """
         st = time.perf_counter()
 
@@ -1192,6 +1200,14 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             ``skip_first_n_tokens`` counts from ``key.start``, so it reaches
             the unfull chunk only when the range has no full chunk (the
             engine's prefix cache already holds part of the unfull chunk).
+
+            On a backend with ``host_ready_before_imported_wait`` (ROCm), the
+            call blocks this GPU affinity worker until the producer fence
+            completes (see ``wait_producer_event``); clients that share the
+            worker wait behind it. If the fence is given up on -- the instance
+            was unregistered or reaped, or it is still pending after the
+            deadline -- nothing is read or copied, the range's read locks are
+            released, and the second element is False.
         """
         st = time.perf_counter()
 

@@ -245,7 +245,9 @@ def stub_device(monkeypatch):
     monkeypatch.setattr(
         qstore_mod,
         "torch_dev",
-        SimpleNamespace(device=_null, stream=_null, Event=_FakeEvent),
+        SimpleNamespace(
+            device=_null, stream=_null, Event=_FakeEvent, empty_cache=lambda: None
+        ),
     )
     monkeypatch.setattr(qstore_mod, "get_event_ipc_backend", lambda device: backend)
     return backend
@@ -810,19 +812,15 @@ def test_store_q_fails_when_the_ring_is_reaped_mid_wait(
     monkeypatch.setattr(
         qstore_mod, "downsample_and_stage_block_ids", lambda _c, ids: ids
     )
-    module = _module(ctx)
-    cache_context = MagicMock()
+    create = _stub_registration(monkeypatch)
+    monkeypatch.setattr(qstore_mod, "get_event_ipc_backend", lambda d: stub_device)
+    cache_context = create.return_value
     cache_context.kv_layer_groups_manager.num_object_groups = 1
     cache_context.kv_layer_groups_manager.num_kernel_groups = 1
     cache_context.calculate_num_blocks.return_value = 2
-    module._q_contexts[1] = ContextEntry(
-        cache_context,
-        *REGISTER_ARGS,
-        256,
-        time.monotonic(),
-        event_backend=stub_device,
-    )
-    waits = _abandon_fences(stub_device, lambda: module._q_contexts.pop(1))
+    module = _module(ctx)
+    _register(module)
+    waits = _abandon_fences(stub_device, lambda: module.unregister_q_cache(1))
 
     handle, ok = module.store_q(MagicMock(), 1, [[0, 1]], b"peer-handle")
 
@@ -840,7 +838,7 @@ def test_sdk_transfers_fail_when_the_ring_is_reaped_mid_wait(
     transfer fails without touching the pieces or L1, and a retrieve still
     releases its read locks."""
     module, ctx, _, callbacks = _sdk_module(stub_device, monkeypatch)
-    waits = _abandon_fences(stub_device, lambda: module._q_contexts.pop(1))
+    waits = _abandon_fences(stub_device, lambda: module.unregister_q_cache(1))
 
     handle, ok = getattr(module, op)(_sdk_key(), 1, [0], [0, 1, 2, 3, 4, 5], b"h")
 

@@ -26,7 +26,8 @@ interface; `DeviceSpec` selects the implementation for the requested device.
 - Keep the `lmcache_driven` handle path free of backend-specific imports and
   device-type branches.
 - Preserve `CUDAMessagingFuture` and `to_cuda_future` compatibility aliases.
-- Provide CUDA-style/default and MUSA event backends behind one interface.
+- Provide CUDA-style/default, ROCm and MUSA event backends behind one
+  interface.
 - Fail before cross-process memory access when event IPC is unavailable.
 - Require each concrete `DeviceSpec` to declare its event IPC capability; do
   not select an unrelated backend through an implicit fallback.
@@ -36,8 +37,6 @@ interface; `DeviceSpec` selects the implementation for the requested device.
 - The `STORE` and `RETRIEVE` wire formats do not change; event handles remain
   serialized `bytes` values.
 - Tensor memory IPC remains owned by `DeviceIPCWrapper` implementations.
-- CacheBlend modules are not migrated in this change; they remain a separate
-  CUDA-only integration until a follow-up adopts the same interface.
 - Worker adapters continue to construct and initially record their producer
   events. The abstraction covers export from the worker and all server/future
   event operations.
@@ -88,6 +87,55 @@ If a device cannot support cross-process event import, it must fail
 `check_event_support` so the caller falls back to a transfer mode that does not
 depend on cross-process ordering, rather than silently degrading correctness.
 
+### Waiting on an imported producer event
+
+Server code never calls `wait_event` on an event imported from an engine
+directly. It calls:
+
+```python
+def wait_producer_event(
+    backend: EventIPCBackend,
+    event: object,
+    stream: object,
+    *,
+    is_alive: Callable[[], bool] | None = None,
+    timeout_s: float = _PRODUCER_WAIT_TIMEOUT_S,  # 150 s
+) -> None: ...
+```
+
+On most backends this is `backend.wait_event(event, stream)`. A backend whose
+GPU wait on an *imported* event occupies a compute unit while it waits sets the
+class attribute `host_ready_before_imported_wait = True`. There the host polls
+`query_event` (0.5 ms, then 2 ms after the first 100 ms) until the fence has
+completed, and only then queues `wait_event`, which returns at once.
+
+Why: on ROCm, a stream wait on an imported IPC event is not a command-processor
+barrier. HIP launches a one-work-item kernel that spins on a CU until the
+event's signal is written. If the producer queued a persistent kernel that
+needs every CU resident at once ahead of its fence, the spinner takes a CU that
+kernel needs, the kernel never finishes, and the fence never signals.
+
+The poll gives up, without queueing the wait, and raises
+`ProducerEventWaitError`:
+
+- when `is_alive()` returns False (checked once the poll has slowed down). The
+  server modules pass `is_current_entry(instance_id, entry)`, which turns False
+  once the instance is unregistered or reaped;
+- after `timeout_s` (150 s), which is half the engine adapters' default
+  `mq_timeout` (300 s). `mq_timeout` is the longest an engine waits for a store
+  before it reuses that store's KV blocks.
+
+The caller must then fail the transfer without touching the engine's buffers:
+a store reserves and commits nothing, and a retrieve reads nothing but still
+releases its read locks. The deadline matters because the poll blocks the
+server's GPU affinity worker, which clients share in FIFO order when there are
+fewer workers than client connections (`--max-gpu-workers` defaults to 1).
+
+The server does not learn a client's `mq_timeout`. The ordering above, where the
+server gives up on a stuck fence before an engine gives up on a store queued
+behind it, holds only while every client keeps `mq_timeout` above the 150 s
+deadline.
+
 The lookup entry point is:
 
 ```python
@@ -110,6 +158,8 @@ lmcache/v1/platform/base/event_ipc.py     # protocol, lookup, default backend
 lmcache/v1/platform/base/device_spec.py  # optional DeviceSpec capability
 lmcache/v1/platform/devices/cpu/__init__.py      # CPU stub backend registration
 lmcache/v1/platform/devices/cuda/__init__.py     # CUDA backend registration
+lmcache/v1/platform/devices/rocm/__init__.py     # ROCm backend registration
+lmcache/v1/platform/devices/rocm/event_ipc.py    # ROCm host-ready backend
 lmcache/v1/platform/devices/musa/event_ipc.py    # MUSA capability gate and adapter
 lmcache/v1/platform/devices/musa/ipc_wrapper.py  # MUSA availability and torch.musa loader
 ```
@@ -134,6 +184,14 @@ it to `torch.cuda`. Other accelerators must explicitly register a compatible
 backend before the multiprocess handle path can use them. This prevents an
 unsupported or misspelled device type from silently selecting the active
 accelerator's event implementation.
+
+### ROCm backend
+
+`RocmEventIPCBackend` (`lmcache/v1/platform/devices/rocm/event_ipc.py`) is
+`DefaultEventIPCBackend` over `torch.cuda` (HIP) with
+`host_ready_before_imported_wait = True`. `RocmDeviceSpec.event_ipc_backend`
+returns it when isolated IPC is off. With isolated IPC, the CUDA selection (the
+timeline-semaphore backend) applies unchanged.
 
 ### MUSA backend
 
@@ -172,6 +230,12 @@ class CudaDeviceSpec(DeviceSpec):
         # (the default), else DefaultEventIPCBackend(event_module=torch.cuda)
         return _select_event_ipc_backend(self.device_type)
 
+class RocmDeviceSpec(CudaDeviceSpec):
+    @property
+    def event_ipc_backend(self) -> EventIPCBackend:
+        # The CUDA selection under isolated IPC, else RocmEventIPCBackend()
+        ...
+
 class MusaDeviceSpec(DeviceSpec):
     @property
     def event_ipc_backend(self) -> EventIPCBackend:
@@ -200,9 +264,9 @@ Worker adapter
   event_backend.create_event / record_event / export_event
   send event handle in STORE/RETRIEVE
 
-Server: lmcache_driven_transfer.py
+Server: lmcache_driven_transfer.py (and blend/retrieve.py, plugin_modules/qstore.py)
   at KV registration: resolve, validate, and cache event_backend in ContextEntry
-  event_backend.import_event / wait_event
+  event_backend.import_event; wait_producer_event (fail the transfer on give-up)
   enqueue KV transfer
   event_backend.create_event / record_event / export_event
 
@@ -219,6 +283,8 @@ or support probing for each event operation.
 The following generic modules use only the platform API:
 
 - `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
+- `lmcache/v1/multiprocess/modules/blend/retrieve.py`
+- `lmcache/v1/multiprocess/plugin_modules/qstore.py`
 - `lmcache/v1/transport/futures.py`
 - `lmcache/v1/client/worker_transfer.py`
 
@@ -251,7 +317,9 @@ that CUDA is required when a non-CUDA backend has its own implementation.
 4. Route `DeviceMessagingFuture` import/query/wait/synchronize through the
    platform API while preserving the CUDA aliases.
 5. Route worker-side producer-event export through the platform API.
-6. Keep CacheBlend and other out-of-scope CUDA-only integrations unchanged.
+6. Route every server-side wait on an imported engine event (lmcache_driven
+   STORE / RETRIEVE, the CacheBlend retrieve, the Q store's `store_q` and SDK
+   ring wait) through `wait_producer_event`, and register the ROCm backend.
 
 ## Testing
 
@@ -263,7 +331,14 @@ Tests cover:
 - MUSA capability failure and missing-module failure;
 - MUSA delegation to the TorchMUSA event API using a fake module;
 - future compatibility aliases and device-aware event behavior;
-- structural absence of direct MUSA imports in the generic handle-path modules.
+- structural absence of direct MUSA imports in the generic handle-path modules;
+- `wait_producer_event`: poll-before-wait on a host-ready backend, no polling
+  elsewhere, slow-down and warning, give-up at the deadline and when the
+  engine is gone, no liveness check on the fast path;
+- ROCm backend selection with and without isolated IPC;
+- server transfers (lmcache_driven STORE / RETRIEVE, CacheBlend retrieve,
+  `store_q`, SDK transfers) failing without a stream wait when the engine is
+  reaped mid-wait.
 
 Real MUSA hardware tests remain capability-gated. The platform tests do not
 need MUSA hardware because they validate the public backend contract using
@@ -279,3 +354,5 @@ injected event modules.
 - [ ] MUSA event behavior is isolated under `platform/devices/musa`.
 - [ ] Unsupported event IPC fails before unsafe memory access.
 - [ ] Platform and future tests cover import/export and stream ordering.
+- [ ] Server code waits on imported engine events only through
+      `wait_producer_event` and fails the transfer on `ProducerEventWaitError`.
