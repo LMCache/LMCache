@@ -13,6 +13,9 @@ from abc import ABC, abstractmethod
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
+from lmcache.v1.distributed.storage_controllers.policy_loader import (
+    resolve_external_policy,
+)
 from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
 
 
@@ -28,11 +31,12 @@ class StorePolicy(ABC):
     Args:
         l1_managers: Every L1 manager of the storage manager, in
             write-placement order. A policy may read their memory tags,
-            memory usage or configuration to decide.
+            memory usage or configuration to decide. External policies
+            are constructed without manager handles.
     """
 
-    def __init__(self, l1_managers: list[L1ManagerInterface]) -> None:
-        self._l1_managers = l1_managers
+    def __init__(self, l1_managers: list[L1ManagerInterface] | None = None) -> None:
+        self._l1_managers = l1_managers if l1_managers is not None else []
 
     @abstractmethod
     def select_store_targets(
@@ -106,22 +110,33 @@ def create_store_policy(
     name: str, l1_managers: list[L1ManagerInterface]
 ) -> StorePolicy:
     """
-    Create a store policy instance by name.
+    Create a registered or explicitly selected external store policy.
 
     Args:
-        name: Registered policy name.
+        name: Registered policy name or ``package.module:Class`` path to a
+            concrete StorePolicy subclass with a no-argument constructor.
         l1_managers: Every L1 manager of the storage manager, in
-            write-placement order.
+            write-placement order, passed to registered policies.
 
     Returns:
         A new StorePolicy instance.
 
     Raises:
-        ValueError: If no policy is registered under the given name.
+        ValueError: The name is unknown or the external class is invalid.
+        ImportError: The selected external module cannot be imported.
+        AttributeError: The selected module does not define the named class.
+        Exception: The selected policy constructor raises.
     """
     if name not in _STORE_POLICY_REGISTRY:
+        if ":" in name:
+            return resolve_external_policy(
+                name,
+                StorePolicy,  # type: ignore[type-abstract]
+            )()
         known = ", ".join(sorted(_STORE_POLICY_REGISTRY)) or "(none)"
-        raise ValueError(f"Unknown store policy {name!r}. Known: {known}")
+        raise ValueError(
+            f"Unknown store policy {name!r}. Known: {known}, or 'package.module:Class'"
+        )
     return _STORE_POLICY_REGISTRY[name](l1_managers)
 
 

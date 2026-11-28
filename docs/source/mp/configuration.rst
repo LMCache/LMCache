@@ -796,7 +796,8 @@ Source: ``lmcache/v1/distributed/config.py``
        ``--p2p-write-l1-usage-threshold``, then stores new keys into one P2P
        peer and deletes them from L1; ``--enable-p2p-write`` selects it
        automatically (see :doc:`p2p_deployment`).
-       Choices: ``default``, ``skip_l1``, ``p2p``.
+       Built-ins are ``default``, ``skip_l1``, and ``p2p``. An installed
+       policy class can be selected with ``package.module:Class``.
    * - ``--l2-prefetch-policy``
      - ``default``
      - L2 prefetch policy.  Determines which adapter loads each key
@@ -806,8 +807,9 @@ Source: ``lmcache/v1/distributed/config.py``
        The ``skip_l1`` policy uses the same load plan, but prefetched keys
        are temporary (deleted after the reader finishes);
        ``--enable-p2p-write`` selects it automatically.
-       Choices: ``default``, ``skip_l1``.  ``retain`` is a deprecated alias
-       of ``default``.
+       Built-ins are ``default`` and ``skip_l1``. The deprecated alias
+       ``retain`` selects ``default``. An installed policy class can be
+       selected with ``package.module:Class``.
    * - ``--l2-prefetch-inflight-watermark``
      - ``0.5``
      - Fraction of L1 capacity, in (0, 1], that in-flight prefetch

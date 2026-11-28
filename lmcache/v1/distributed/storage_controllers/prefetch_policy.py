@@ -29,6 +29,9 @@ from lmcache.v1.distributed.bitmap_ops.fold import (
     all_grouped,
     fold_unfold_grouped,
 )
+from lmcache.v1.distributed.storage_controllers.policy_loader import (
+    resolve_external_policy,
+)
 from lmcache.v1.distributed.storage_controllers.utils import (
     Bitmap2D,
     L1ManagerDescriptor,
@@ -375,20 +378,36 @@ def get_registered_prefetch_policies() -> list[str]:
 
 def create_prefetch_policy(name: str) -> PrefetchPolicy:
     """
-    Create a prefetch policy instance by name.
+    Create a registered or explicitly selected external prefetch policy.
 
     Args:
-        name: Registered policy name.
+        name: Registered policy name or ``package.module:Class`` path to a
+            concrete PrefetchPolicy subclass with a no-argument constructor.
 
     Returns:
         A new PrefetchPolicy instance.
 
     Raises:
-        ValueError: If no policy is registered under the given name.
+        ValueError: The name is unknown or the external class is invalid.
+        ImportError: The selected external module cannot be imported.
+        AttributeError: The selected module does not define the named class.
+        Exception: The selected policy constructor raises.
     """
     if name not in _PREFETCH_POLICY_REGISTRY:
+        if ":" in name:
+            policy_cls = resolve_external_policy(
+                name,
+                PrefetchPolicy,  # type: ignore[type-abstract]
+            )
+            retention = policy_cls.plan_l1_retention
+            if retention is PrefetchPolicy.plan_l1_retention or not callable(retention):
+                raise ValueError(f"Policy {name!r} must implement plan_l1_retention")
+            return policy_cls()
         known = ", ".join(sorted(_PREFETCH_POLICY_REGISTRY)) or "(none)"
-        raise ValueError(f"Unknown prefetch policy {name!r}. Known: {known}")
+        raise ValueError(
+            f"Unknown prefetch policy {name!r}. Known: {known}, "
+            "or 'package.module:Class'"
+        )
     return _PREFETCH_POLICY_REGISTRY[name]()
 
 

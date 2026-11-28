@@ -1106,19 +1106,23 @@ def add_storage_manager_args(
     policy_group.add_argument(
         "--l2-store-policy",
         type=str,
-        choices=get_registered_store_policies(),
+        metavar="POLICY",
         default="default",
         help="L2 store policy. Determines which adapters receive each key "
         "and whether keys are deleted from L1 after L2 store. "
+        "Use a registered name "
+        f"({', '.join(get_registered_store_policies())}) or package.module:Class. "
         "Default is 'default' (store all keys to all adapters, keep L1).",
     )
     policy_group.add_argument(
         "--l2-prefetch-policy",
         type=str,
-        choices=get_registered_prefetch_policies(),
+        metavar="POLICY",
         default="default",
         help="L2 prefetch policy. Determines which adapter loads each key "
         "when multiple adapters have it, and whether loaded keys stay in L1. "
+        "Use a registered name "
+        f"({', '.join(get_registered_prefetch_policies())}) or package.module:Class. "
         "Default is 'default' (pick the first adapter by index, keep loaded "
         "keys in L1). 'skip_l1' deletes them after the read. 'retain' is a "
         "deprecated alias of 'default'.",

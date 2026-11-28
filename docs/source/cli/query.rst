@@ -458,8 +458,15 @@ to it.
    lmcache query coordinator --api metrics | promtool check metrics
    lmcache query coordinator --api metrics | grep lmcache_coordinator
 
-Options
-~~~~~~~
+Coordinator query options
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. Preserve fragment links generated before the section titles were unique.
+
+.. container::
+   :name: id1
+
+   .. Legacy section fragment.
 
 .. list-table::
    :header-rows: 1

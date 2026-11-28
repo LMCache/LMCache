@@ -307,6 +307,9 @@ def run_cache_server(
 ) -> tuple[RequestServer, MPCacheServer] | None:
     """Run the LMCache cache server with the selected request transport.
 
+    Startup errors propagate after stopping the initialized EventBus and GC
+    monitor, including trace subscribers owned by the bus.
+
     Args:
         mp_config: Configuration for the multiprocess server.
         storage_manager_config: Configuration for the storage manager.
@@ -378,79 +381,86 @@ def _start_cache_server(
             mp_config.transport,
         )
 
-    event_bus = init_observability(
-        obs_config, start_prometheus_http_server=start_prometheus_http_server
-    )
+    with ExitStack() as startup_resources:
+        event_bus = init_observability(
+            obs_config, start_prometheus_http_server=start_prometheus_http_server
+        )
 
-    init_gc_monitor(obs_config.gc_monitor)
+        startup_resources.callback(event_bus.stop)
 
-    maybe_initialize_trace_recorder(
-        event_bus, obs_config, storage_manager_config, instance_id=mp_config.instance_id
-    )
+        init_gc_monitor(obs_config.gc_monitor)
+        startup_resources.callback(shutdown_gc_monitor)
 
-    # When the engine-driven path is loaded (auto or engine_driven):
-    # apply shm_name from mp_config and verify capacity.
-    if (
-        mp_config.supported_transfer_mode != "lmcache_driven"
-        and len(storage_manager_config.l1_manager_configs) == 1
-    ):
-        mem_cfg = storage_manager_config.l1_manager_config.memory_config
-        if mp_config.shm_name is not None:
-            mem_cfg.shm_name = mp_config.shm_name
-        if mem_cfg.shm_name and (mem_cfg.use_lazy or mem_cfg.devdax_path):
-            # _compute_shm_pool_info advertises an empty pool for these
-            # combinations; warn here where the operator's explicit
-            # --shm-name intent is still visible.
-            logger.warning(
-                "--shm-name %r is set but SHM transfer is disabled: %s. "
-                "Engine-driven workers will fall back to pickle transfers.",
-                mem_cfg.shm_name,
-                "lazy L1 allocation cannot back a named SHM segment "
-                "(--l1-use-lazy defaults to on; pass --no-l1-use-lazy)"
-                if mem_cfg.use_lazy
-                else "a devdax-backed L1 cannot back a named SHM segment "
-                "(unset --l1-devdax-path)",
-            )
-        elif mem_cfg.shm_name and sys.platform.startswith("linux"):
-            logger.info("Checking if shm capacity is larger than L1 request")
-            try:
-                free_bytes = shutil.disk_usage("/dev/shm").free
-                if free_bytes < mem_cfg.size_in_bytes:
+        maybe_initialize_trace_recorder(
+            event_bus,
+            obs_config,
+            storage_manager_config,
+            instance_id=mp_config.instance_id,
+        )
+
+        # When the engine-driven path is loaded (auto or engine_driven):
+        # apply shm_name from mp_config and verify capacity.
+        if (
+            mp_config.supported_transfer_mode != "lmcache_driven"
+            and len(storage_manager_config.l1_manager_configs) == 1
+        ):
+            mem_cfg = storage_manager_config.l1_manager_config.memory_config
+            if mp_config.shm_name is not None:
+                mem_cfg.shm_name = mp_config.shm_name
+            if mem_cfg.shm_name and (mem_cfg.use_lazy or mem_cfg.devdax_path):
+                # _compute_shm_pool_info advertises an empty pool for these
+                # combinations; warn here where the operator's explicit
+                # --shm-name intent is still visible.
+                logger.warning(
+                    "--shm-name %r is set but SHM transfer is disabled: %s. "
+                    "Engine-driven workers will fall back to pickle transfers.",
+                    mem_cfg.shm_name,
+                    "lazy L1 allocation cannot back a named SHM segment "
+                    "(--l1-use-lazy defaults to on; pass --no-l1-use-lazy)"
+                    if mem_cfg.use_lazy
+                    else "a devdax-backed L1 cannot back a named SHM segment "
+                    "(unset --l1-devdax-path)",
+                )
+            elif mem_cfg.shm_name and sys.platform.startswith("linux"):
+                logger.info("Checking if shm capacity is larger than L1 request")
+                try:
+                    free_bytes = shutil.disk_usage("/dev/shm").free
+                    if free_bytes < mem_cfg.size_in_bytes:
+                        logger.warning(
+                            "Insufficient /dev/shm capacity: need %d bytes, "
+                            "have %d bytes. "
+                            "Disabling SHM, falling back to safe inline transfer.",
+                            mem_cfg.size_in_bytes,
+                            free_bytes,
+                        )
+                        mem_cfg.shm_name = ""
+                except OSError:
                     logger.warning(
-                        "Insufficient /dev/shm capacity: need %d bytes, have %d bytes. "
-                        "Disabling SHM, falling back to safe inline transfer.",
-                        mem_cfg.size_in_bytes,
-                        free_bytes,
+                        "Cannot verify /dev/shm capacity; disabling SHM.",
+                        exc_info=True,
                     )
                     mem_cfg.shm_name = ""
-            except OSError:
-                logger.warning(
-                    "Cannot verify /dev/shm capacity; disabling SHM.",
-                    exc_info=True,
-                )
-                mem_cfg.shm_name = ""
 
-    # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
-    # positions). full_sw_kv widens attention groups only; recurrent groups
-    # keep their one-block restore window, so a blend server also serves
-    # stock hybrid clients.
-    is_blend = mp_config.engine_type == "blend"
+        # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
+        # positions). full_sw_kv widens attention groups only; recurrent groups
+        # keep their one-block restore window, so a blend server also serves
+        # stock hybrid clients.
+        is_blend = mp_config.engine_type == "blend"
 
-    # TODO(chunxiaozheng): Support multiple chunk sizes in CacheBlend and
-    # Coordinator, then remove this compatibility guard.
-    ctx = MPCacheServerContext(
-        storage_manager_config=storage_manager_config,
-        chunk_size=mp_config.chunk_size,
-        hash_algorithm=mp_config.hash_algorithm,
-        null_block_id=mp_config.null_block_id,
-        separate_object_groups=mp_config.separate_object_groups,
-        full_sw_kv=is_blend,
-        session_ttl_seconds=mp_config.session_ttl_seconds,
-        requires_global_chunk_size=is_blend or bool(coordinator_config.url),
-    )
+        # TODO(chunxiaozheng): Support multiple chunk sizes in CacheBlend and
+        # Coordinator, then remove this compatibility guard.
+        ctx = MPCacheServerContext(
+            storage_manager_config=storage_manager_config,
+            chunk_size=mp_config.chunk_size,
+            hash_algorithm=mp_config.hash_algorithm,
+            null_block_id=mp_config.null_block_id,
+            separate_object_groups=mp_config.separate_object_groups,
+            full_sw_kv=is_blend,
+            session_ttl_seconds=mp_config.session_ttl_seconds,
+            requires_global_chunk_size=is_blend or bool(coordinator_config.url),
+        )
 
-    components = _build_server_components(ctx, mp_config, coordinator_config)
-    with ExitStack() as startup_resources:
+        components = _build_server_components(ctx, mp_config, coordinator_config)
         # Registered before the peer listener is built, so a bind failure still
         # releases the modules and the context.
         engine = MPCacheServer(ctx, components.modules)
