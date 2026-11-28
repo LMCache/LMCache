@@ -146,6 +146,46 @@ jobs:
     secrets:
       hf_token: ${{ secrets.HF_TOKEN }}
 
+  # When Check code quality (pre-commit) fails on a non-fork PR, cancel
+  # sibling PR workflows and Buildkite builds on the same commit immediately.
+  fast-fail-on-pre-commit-failure:
+    name: Fast-fail sibling CI (Code quality failed)
+    needs: pre-commit
+    if: >-
+      failure() &&
+      needs.pre-commit.result == 'failure' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          disable-sudo-and-containers: true
+          egress-policy: audit
+
+      - name: Checkout fast-fail script
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          sparse-checkout: .buildkite/scripts/fast_fail_cancel.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Cancel sibling CI runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILD_KITE_API_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .buildkite/scripts/fast_fail_cancel.py \
+            --commit "${{ github.event.pull_request.head.sha }}" \
+            --pr-number "${PR_NUMBER}" \
+            --current-run-id "${{ github.run_id }}" \
+            --reason "Fast-fail: Check code quality failed"
+
   # When the CPU unit tests fail, cancel this run so the CPU device legs free
   # their runners. Not the other way round: CPU device failures are often lost
   # runners that cpu_device_rerun.yml reruns, which needs the rest of the run
@@ -159,6 +199,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       actions: write
     steps:
       - name: Harden Runner

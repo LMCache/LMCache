@@ -3,8 +3,13 @@
 
 steps:
   - label: ":test_tube: Unit Tests"
+    key: "unit_tests"
     command: .buildkite/k3_tests/unit/run.sh
     timeout_in_minutes: 60
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 1
     agents: { queue: "k8s" }
     plugins:
       - kubernetes:
@@ -37,3 +42,40 @@ steps:
       - "coverage-test.xml"
       - "coverage-test/**/*"
       - "junit-unit.xml"
+
+  - wait: ~
+    continue_on_failure: true
+    if: build.pull_request.id != null
+
+  - label: ":octagonal_sign: Fast-fail cancel sibling CI"
+    if: build.pull_request.id != null
+    soft_fail: true
+    timeout_in_minutes: 5
+    agents: { queue: "k8s" }
+    command: |
+      set -euo pipefail
+      outcome="$(buildkite-agent step get outcome --step unit_tests || echo unknown)"
+      echo "unit_tests outcome=${outcome}"
+      if [[ "${outcome}" == "hard_failed" ]]; then
+        python3 .buildkite/scripts/fast_fail_cancel.py \
+          --reason "Fast-fail: Buildkite k3-unit-tests (${outcome})"
+      fi
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - name: container-0
+                image: lmcache/ci-base:latest
+                imagePullPolicy: Never
+                env:
+                  - name: GITHUB_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-git-creds
+                        key: GITHUB_TOKEN
+                  - name: BUILDKITE_API_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: buildkite-api-token
+                        key: BUILDKITE_API_TOKEN
+                        optional: true

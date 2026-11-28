@@ -104,4 +104,30 @@ if [[ "${PIPELINE_FILE}" == */rbln/pipeline.yml ]]; then
 fi
 
 echo "--- :pipeline: Uploading ${PIPELINE_FILE}"
+# Enable intra-build fast-fail only for PR builds (never dev or weekly-full).
+if [[ ( "${PIPELINE_FILE}" == *k3_tests/multiprocess/pipeline.yml || "${PIPELINE_FILE}" == *k3_tests/multiprocess/smoke-pipeline.yml ) && \
+      "${BUILDKITE_PULL_REQUEST:-false}" != "false" && "${CI_WEEKLY_FULL:-0}" != "1" ]]; then
+    tmp_pipeline="$(mktemp)"
+    trap 'rm -f "${tmp_pipeline}"' EXIT
+    python3 - "${PIPELINE_FILE}" "${tmp_pipeline}" <<'PY'
+import sys
+from pathlib import Path
+
+src, dst = Path(sys.argv[1]), Path(sys.argv[2])
+lines = src.read_text(encoding="utf-8").splitlines(keepends=True)
+out = []
+stopped = False
+for i, line in enumerate(lines):
+    if "Canary path for VERIFY_AND_PIN_VLLM" in line:
+        stopped = True
+    out.append(line)
+    if not stopped and line.lstrip().startswith("- label: "):
+        indent = " " * (len(line) - len(line.lstrip()) + 2)
+        out.append(f"{indent}cancel_on_build_failing: true\n")
+dst.write_text("".join(out), encoding="utf-8")
+PY
+    buildkite-agent pipeline upload "${tmp_pipeline}"
+    exit 0
+fi
+
 exec buildkite-agent pipeline upload "${PIPELINE_FILE}"
