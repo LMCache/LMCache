@@ -343,6 +343,7 @@ lmcache/cli/
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
 │   ├── coordinator.py   # lmcache coordinator
+│   ├── memory.py        # lmcache memory (memory orchestrator)
 │   ├── describe.py      # lmcache describe {kvcache}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── kvcache.py       # lmcache kvcache {clear,end-session}
