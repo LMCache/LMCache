@@ -94,6 +94,7 @@ from lmcache.integration.vllm.utils import (
 )
 from lmcache.v1.client.worker_transfer import LMCacheDrivenTransferContext
 from lmcache.v1.common.banner import print_banner_once
+from lmcache.v1.common.custom_types import RequestSnapshotEntry
 from lmcache.v1.common.logging import init_logger as lmcache_init_logger
 from lmcache.v1.common.utils import CacheRemoveEvent
 
@@ -612,6 +613,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.request_snapshot: report observed active requests for
+      best-effort policy hints. Disabled by default.
+    - lmcache.mp.request_snapshot_interval_ms: nonnegative integer milliseconds
+      between snapshots. Defaults to 0 (every step).
     - lmcache.mp.save_decode_cache: also store chunks containing generated
       tokens. Defaults to False; only complete prompt chunks are stored.
     - lmcache.mp.save_unfull_chunk: also store the prompt's unfull chunk, with
@@ -642,8 +647,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_cache_config: Resolved cache groups, if supplied by vLLM.
 
         Raises:
-            ValueError: If cache geometry or auto-start configuration is invalid,
-                including auto-start with multiple server endpoints.
+            ValueError: If cache geometry, auto-start, or snapshot configuration
+                is invalid, including auto-start with multiple server endpoints.
             ConnectionError: If the configured MP server cannot be reached.
         """
         # Older supported vLLM releases allow connectors to omit this value,
@@ -729,6 +734,28 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.eager_prefetch", False
             )
         )
+        self._request_snapshot_enabled: bool = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.request_snapshot", False
+            )
+        )
+        if not isinstance(self._request_snapshot_enabled, bool):
+            raise ValueError("lmcache.mp.request_snapshot must be a boolean")
+        snapshot_interval_ms = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.request_snapshot_interval_ms", 0
+        )
+        if (
+            not isinstance(snapshot_interval_ms, int)
+            or isinstance(snapshot_interval_ms, bool)
+            or snapshot_interval_ms < 0
+        ):
+            raise ValueError(
+                "lmcache.mp.request_snapshot_interval_ms must be a nonnegative integer"
+            )
+        self._request_snapshot_interval_seconds = snapshot_interval_ms / 1000.0
+        self._request_snapshot_next_report_time = 0.0
+        # Allow the final empty report to clear server state.
+        self._request_snapshot_was_active = False
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the single-server lmcache.mp.host / lmcache.mp.port.
@@ -849,6 +876,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 enable_kv_events=self._enable_kv_events,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            # Scheduler-thread-only references, removed on finish or shutdown.
+            # Transfer trackers do not cover requests still waiting for lookup.
+            self._observed_requests: dict[str, Request] = {}
             # Requests whose request_finished returned True, sent to the
             # workers with the next step's metadata.
             self._delay_free_req_ids: set[str] = set()
@@ -1339,6 +1369,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()
         if hasattr(self, "scheduler_adapter"):
+            self._observed_requests.clear()
             if self.lazy_offload:
                 self._lazy_offload_manager.log_final_stats()
             self.scheduler_adapter.shutdown()
@@ -1589,11 +1620,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
 
+        Also track the request when snapshots are enabled.
+
         Args:
             request (Request): The request object.
         """
         if self.role != KVConnectorRole.SCHEDULER:
             return
+        if self._request_snapshot_enabled:
+            self._observed_requests[request.request_id] = request
         if not self._eager_prefetch or request.resumable:
             return
 
@@ -1711,6 +1746,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This function should NOT modify fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
+        Report request snapshots, if enabled, without waiting for a response.
+        Only submitted snapshots advance the reporting interval.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
@@ -1736,6 +1773,33 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Report block allocation deltas to LMCache for observability
         self._report_block_allocation_deltas(scheduler_output)
+
+        if self._request_snapshot_enabled:
+            now = time.monotonic()
+            clears_previous = (
+                self._request_snapshot_was_active and not self._observed_requests
+            )
+            if now < self._request_snapshot_next_report_time and not clears_previous:
+                return metadata
+            # The transport may serialize later; copy while the scheduler owns
+            # these live requests so each payload describes this step only.
+            requests = tuple(
+                RequestSnapshotEntry(
+                    request_id=request.request_id,
+                    token_ids=tuple(request.all_token_ids),
+                    priority=request.priority,
+                    arrival_time=request.arrival_time,
+                    status=request.status.name,
+                )
+                for request in self._observed_requests.values()
+            )
+            if self.scheduler_adapter.report_request_snapshot(
+                requests, self._vllm_config.scheduler_config.policy
+            ):
+                self._request_snapshot_next_report_time = (
+                    now + self._request_snapshot_interval_seconds
+                )
+                self._request_snapshot_was_active = bool(requests)
 
         return metadata
 
@@ -1775,6 +1839,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
+        Remove completed or cancelled requests from the next snapshot.
+
         Returns:
             True if the request is being saved/sent asynchronously and blocks
             should not be freed until the request_id is returned from
@@ -1782,6 +1848,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+
+        if self._request_snapshot_enabled:
+            self._observed_requests.pop(request.request_id, None)
 
         params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None

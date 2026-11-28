@@ -41,6 +41,8 @@ from lmcache.v1.common.custom_types import (
     IPCCacheServerKey,
     KVEventBatch,
     KVEventRecord,
+    RequestSnapshot,
+    RequestSnapshotEntry,
 )
 from lmcache.v1.common.group_view import (
     EngineGroupInfo,
@@ -671,6 +673,8 @@ class LMCacheMPSchedulerAdapter:
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        self._snapshot_scheduler_id = uuid.uuid4().hex
+        self._snapshot_sequence = 0
 
         # Read chunk size from lmcache
         chunk_sizes: dict[str, int] = {}
@@ -1129,6 +1133,35 @@ class LMCacheMPSchedulerAdapter:
             self.req_clients[url].report_block_allocation(
                 os.getpid(), self.model_name, records
             )
+
+    def report_request_snapshot(
+        self,
+        requests: tuple[RequestSnapshotEntry, ...],
+        scheduling_policy: str,
+    ) -> bool:
+        """Submit a snapshot to every backing server without waiting for replies.
+
+        Args:
+            requests: Copied request records; their order is not scheduling order.
+            scheduling_policy: vLLM scheduling policy name, such as ``fcfs``.
+
+        Returns:
+            True if submitted, False if skipped because the adapter is unhealthy.
+        """
+        if not self.is_healthy:
+            return False
+
+        self._snapshot_sequence += 1
+        snapshot = RequestSnapshot(
+            scheduler_id=self._snapshot_scheduler_id,
+            sequence=self._snapshot_sequence,
+            model_name=self.model_name,
+            scheduling_policy=scheduling_policy,
+            requests=requests,
+        )
+        for client in self.req_clients.values():
+            client.report_request_snapshot(snapshot)
+        return True
 
     # Helper functions
     def _buffer_kv_events(self, events: Sequence[CacheEvent]) -> None:

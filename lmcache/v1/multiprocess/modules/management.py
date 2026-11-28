@@ -6,7 +6,7 @@ from collections.abc import Sequence
 import threading
 
 # First Party
-from lmcache.v1.common.custom_types import BlockAllocationRecord
+from lmcache.v1.common.custom_types import BlockAllocationRecord, RequestSnapshot
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.periodic_thread import (
     PeriodicThread,
@@ -221,3 +221,21 @@ class ManagementModule(DiscoverableModule):
                 },
             )
         )
+
+    @request_handler()
+    def report_request_snapshot(self, snapshot: RequestSnapshot) -> None:
+        """Publish request observations to interested event-bus subscribers.
+
+        Args:
+            snapshot: Immutable scheduler observations, including empty updates.
+
+        Returns:
+            None. Completion does not acknowledge subscriber delivery.
+        """
+        if self._ctx.event_bus.has_subscribers(EventType.MP_REQUEST_SNAPSHOT):
+            self._ctx.event_bus.publish(
+                Event(
+                    event_type=EventType.MP_REQUEST_SNAPSHOT,
+                    metadata={"snapshot": snapshot},
+                )
+            )
