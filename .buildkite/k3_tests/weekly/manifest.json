@@ -45,6 +45,7 @@
         " / lm_eval_preemption / ",
         "preemption_correctness / ",
         " / fault_tolerance / ",
+        " / multi_chunk_size / ",
         " / restart_recovery / ",
         " / cache_stats / ",
         " / p2p_write / ",

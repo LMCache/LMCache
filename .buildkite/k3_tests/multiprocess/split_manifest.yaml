@@ -140,6 +140,13 @@ workloads:
     coverage_objective: Fault tolerance under simulated worker failures on vLLM.
     acceptance_check: vllm / fault_tolerance / grpc passes in pipeline.yml.
 
+  - workload: multi_chunk_size
+    gpu_requirement: 2-GPU
+    tier: heavy
+    trigger: schedule | PR with force-ci | MP_FULL_ON_PR=true | shared CI deps | heavy-only paths (sglang, long_doc_qa)
+    coverage_objective: Verify two concurrent vLLM or SGLang services register different model-scoped chunk sizes on one MP server and independently store and retrieve KV.
+    acceptance_check: vllm & sglang multi_chunk_size pass on gRPC in pipeline.yml.
+
   - workload: gds_smoke
     gpu_requirement: 1-GPU
     tier: heavy

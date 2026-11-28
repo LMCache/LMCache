@@ -35,7 +35,11 @@ fi
 # (safety net in case PIDs weren't recorded)
 for port in "${ENGINE_PORT:-${VLLM_PORT:-8000}}" \
     "${ENGINE_BASELINE_PORT:-${VLLM_BASELINE_PORT:-9000}}" \
+    "${SECOND_ENGINE_PORT:-}" \
     "${LMCACHE_PORT:-6555}"; do
+    if [[ -z "$port" ]]; then
+        continue
+    fi
     fuser -k "${port}/tcp" 2>/dev/null || true
 done
 if declare -F engine_cleanup_processes >/dev/null; then

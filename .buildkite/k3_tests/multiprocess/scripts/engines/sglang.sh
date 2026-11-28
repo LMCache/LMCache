@@ -134,6 +134,11 @@ engine_add_lmcache_server_environment() {
     : "$environment_name"
 }
 
+engine_prepare_additional_instance() {
+    local instance_name="$1"
+    export SGLANG_LMCACHE_CONFIG_FILE="/tmp/lmcache_sglang_${BUILD_ID:-local_$$}_${instance_name}.yaml"
+}
+
 engine_write_lmcache_config() {
     cat > "$SGLANG_LMCACHE_CONFIG_FILE" <<EOF
 mp_host: ${LMCACHE_REQUEST_SCHEME}://127.0.0.1
@@ -142,6 +147,10 @@ extra_config:
   lmcache.mp.mq_timeout: ${LMCACHE_MP_MQ_TIMEOUT:-60}
   lmcache.mp.mp_transfer_mode: ${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}
 EOF
+    if [[ -n "${CLIENT_CHUNK_SIZE:-}" ]]; then
+        printf '  lmcache.mp.chunk_size: %s\n' "$CLIENT_CHUNK_SIZE" \
+            >> "$SGLANG_LMCACHE_CONFIG_FILE"
+    fi
 }
 
 engine_launch() {

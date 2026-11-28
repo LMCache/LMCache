@@ -16,6 +16,9 @@ a workload owns its requests and assertions.
   `/metrics` snapshot and a per-check summary in `RESULTS_DIR`, and it runs
   on CPU with stub inputs (`tests/tools/test_long_doc_qa_l2_verify.py`).
 - `restart-recovery.sh`: LMCache server restart and worker re-registration.
+- `multi-chunk-size.sh`: two engines connected to one MP server register
+  different model-scoped chunk sizes and independently complete an L1
+  store/retrieve round trip.
 - `http-api.sh`: LMCache HTTP API and CLI coverage with a live engine.
 
 `verification/` contains shared assertions and request helpers that are sourced
