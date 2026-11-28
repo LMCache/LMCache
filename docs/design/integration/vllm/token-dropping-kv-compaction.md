@@ -114,13 +114,11 @@ is out of scope.
 
 The MVP does not use the SDK QRingBuffer or send Q through the LMCache server.
 
-Two small vLLM connector-context hooks expose data that already exists in the
-worker:
+Some token dropping algorithms need post-RoPE Q tensors to determine which KV tokens to keep.
 
-1. after the worker has condensed/reordered its batch, its request IDs are
-   passed to `start_load_kv(..., request_ids=...)`;
-2. the attention wrapper passes its post-RoPE `query` tensor through the
-   existing `save_kv_layer(..., **kwargs)` layer-I/O hook.
+The existing [`save_kv_layer` hook](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/model_executor/layers/attention/kv_transfer_utils.py#L50-L59) handles KV transfer and does not receive Q. Query capture is a separate concern, and we don't want to extend the KV connector's data contract just to support token dropping.
+
+Instead, we capture Q directly where it is already available, through a reversible, instance-level hook on [`impl.forward`](https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/vllm/model_executor/layers/attention/attention.py#L828-L840).
 
 The attention metadata already contains `query_start_loc`, physical
 `seq_lens`, and the current `block_table`. LMCache therefore slices query
@@ -206,8 +204,8 @@ integration pieces:
    remain logical;
 5. worker-order request IDs are exposed through the existing
    `start_load_kv(..., **kwargs)` hook;
-6. post-RoPE Q is exposed through the existing
-   `save_kv_layer(..., **kwargs)` hook.
+6. post-RoPE Q is exposed through a reversible, instance-level
+   `impl.forward` hook.
 
 These are generic connector/allocator semantics. vLLM does not know R-KV's
 budget, trigger, scoring rule, or retained positions.
@@ -233,7 +231,9 @@ The MVP supports:
 
 - one GPU;
 - classic vLLM model runner;
-- eager execution;
+- The vLLM model runner excludes FULL CUDA Graph replay for batches
+  containing token-dropping requests. Normal-only batches retain native
+  CUDA Graph behavior.
 - synchronous scheduling;
 - full prefill followed by decode;
 - one ordinary full-attention KV cache group;
