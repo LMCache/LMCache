@@ -67,15 +67,15 @@ def _bytes() -> torch.Tensor:
 def _bind(obj: BorrowedMemoryObj, lease: "Lease", address: int = 0) -> None:
     """Bind a placeholder as a borrower's load does: the lease and a read of
     the peer's bytes at ``address``."""
-    obj.bind(lease.pair, read_into=_Read(), address=address, source="peer")
+    obj.bind(lease.pair, read_many=_Read().read_many, address=address, source="peer")
 
 
 class _Read:
     def __init__(self) -> None:
         self.started: list[tuple[int, int]] = []
 
-    def __call__(self, region_id: int, offset: int) -> "_Read":
-        self.started.append((region_id, offset))
+    def read_many(self, region_id: int, targets: list) -> "_Read":
+        self.started.extend((region_id, offset) for _, offset in targets)
         return self
 
     def is_finished(self) -> bool:
@@ -157,9 +157,9 @@ def test_placeholder_is_invalid_until_bound_once() -> None:
     with pytest.raises(RuntimeError, match="not bound"):
         _ = obj.lease
     with pytest.raises(ValueError, match="address and source"):
-        obj.bind(Lease().pair, read_into=_Read(), address=0, source="")
+        obj.bind(Lease().pair, read_many=_Read().read_many, address=0, source="")
     with pytest.raises(ValueError, match="address and source"):
-        obj.bind(Lease().pair, read_into=_Read(), address=-1, source="peer")
+        obj.bind(Lease().pair, read_many=_Read().read_many, address=-1, source="peer")
     lease = Lease()
     _bind(obj, lease)
     assert obj.is_bound and obj.is_valid() and obj.is_remote
@@ -180,18 +180,21 @@ def _placeholders(count: int) -> list[BorrowedMemoryObj]:
 def test_a_borrowed_object_reads_into_a_region_and_has_no_local_bytes() -> None:
     first, same, other, other_peer = _placeholders(4)
     read = _Read()
-    first.bind(Lease().pair, read_into=read, address=0x1000, source="a")
-    same.bind(Lease().pair, read_into=_Read(), address=0x1000, source="a")
-    other.bind(Lease().pair, read_into=_Read(), address=0x2000, source="a")
-    other_peer.bind(Lease().pair, read_into=_Read(), address=0x1000, source="b")
-    assert first.read_into(3, 64) is read and read.started == [(3, 64)]
+    first.bind(Lease().pair, read_many=read.read_many, address=0x1000, source="a")
+    for obj, address, source in ((same, 0x1000, "a"), (other, 0x2000, "a")):
+        obj.bind(Lease().pair, read_many=read.read_many, address=address, source=source)
+    other_peer.bind(
+        Lease().pair, read_many=_Read().read_many, address=0x1000, source="b"
+    )
+    assert first.read_many(3, [(first, 64)]) is read and read.started == [(3, 64)]
+    assert (first.source, other_peer.source) == ("a", "b")
     assert first.same_bytes(same) and not first.same_bytes(other)
     assert not first.same_bytes(other_peer)  # same offset, another peer
     (unbound,) = _placeholders(1)
     assert not first.same_bytes(unbound) and not unbound.same_bytes(first)
     with pytest.raises(RuntimeError, match="not bound"):
-        unbound.read_into(0, 0)
-    # A SHADOW object carries no tensor: every reader goes through read_into.
+        unbound.read_many(0, [])
+    # A SHADOW object carries no tensor: its bytes are read with read_many.
     assert first.raw_tensor is None and first.tensor is None
     with pytest.raises(RuntimeError, match="no local bytes"):
         _ = first.data_ptr

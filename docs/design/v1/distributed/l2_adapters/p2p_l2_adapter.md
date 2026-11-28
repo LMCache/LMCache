@@ -32,9 +32,11 @@ the full system context.
 ## Class layout
 
 ```
-PeerL2AdapterBase   lookup/unlock RPCs, event fds, no-op stores, close
-└── P2PL2Adapter    import the peer region; RDMA load and, when enabled,
-                    RDMA store over the transfer channel
+PeerL2AdapterBase             lookup/unlock RPCs, event fds, no-op stores, close
+├── P2PL2Adapter              import the peer region; RDMA load and, when enabled,
+│                             RDMA store over the transfer channel
+└── BorrowingPeerL2AdapterBase  keep the owner's lock as a lease; no copy
+    └── GdrPeerL2Adapter      see [gdr_peer_l2_adapter.md](gdr_peer_l2_adapter.md)
 ```
 
 The base holds the RPC control plane so another way of reading a peer can
@@ -58,7 +60,12 @@ means, while the polling, timeout and failure handling around it stay shared:
 | Strategy | What `_process_lookup_result` does with a hit |
 |---|---|
 | Copy (`P2PL2Adapter`) | records the address; a later load copies the bytes into local L1 |
-| Lend (a follow-up subclass, e.g. GPU-direct or CXL in place) | keeps the reservation and hands L1 a borrowed view; no copy, no local capacity |
+| Borrow (`BorrowingPeerL2AdapterBase`) | keeps the reservation; the load binds it into the shadow L1's placeholder; no copy, no local capacity |
+
+`BorrowingPeerL2AdapterBase` wants a `SHADOW` L1. Its `submit_load_task`
+binds each placeholder to the key's reservation through the
+`_bind_borrowed_object` hook, and `close` refuses while a lease is live. See
+[gdr_peer_l2_adapter.md](gdr_peer_l2_adapter.md).
 
 ## Lifecycle
 

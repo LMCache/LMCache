@@ -57,7 +57,7 @@ and can be put in sets.
 
 `LOCAL` and `REMOTE` objects carry an accessible tensor; a `SHADOW` object
 does not. Its bytes stay with the owner, and a reader reads them with
-`read_into` into a device region it registered, so code that handles L1
+its `read_many` into a device region it registered, so code that handles L1
 objects generically must not assume a tensor (`raw_tensor` is `None`).
 
 There is deliberately no free-form `extra_attrs` field. Neither use case reads
@@ -100,6 +100,8 @@ L1 managers that own payload are `LOCAL`. The segment names the primary pool:
 | `DEVDAX` (pure Device-DAX) | `(CXL, LOCAL)` |
 | `GDS` slab | `(GDS, LOCAL)` |
 | `SHADOW` (for borrowing L2 adapters) | the borrowed segment, `SHADOW` |
+
+The `p2p_gdr` adapter wants `((DRAM, SHADOW),)`.
 
 ### L2 own tags
 

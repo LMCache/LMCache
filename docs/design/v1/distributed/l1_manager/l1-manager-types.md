@@ -119,10 +119,13 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   the engine's writes). No size, no eviction; idle, it costs nothing. A
   borrower wants `(segment, SHADOW)` first, so tag affinity binds it there.
 - **`BorrowedMemoryObj`** (`lmcache/v1/memory_management.py`, with the other
-  memory objects) is a `MemoryObj` with no tensor: a placeholder until the
-  borrower's load binds it to a lease and a `read_into(region, offset)` that
-  reads the bytes into a device region at retrieve time. `Lease` and
-  `PendingRead`, defined beside it, are the borrower's contract types.
+  memory objects) is a placeholder until the borrower's load binds it to a
+  lease and to the borrower's batch read (`read_many`), so every borrowing
+  adapter shares it. The
+  bytes are not addressable here (a peer's DRAM) and are read into a device
+  region at retrieve time; the object has no tensor.
+  `Lease` and `PendingRead`, defined beside it, are the borrower's contract
+  types.
 - **No capacity check** in `reserve_write`; every placeholder is temporary.
   The shadow calls no listener and publishes no L1 event, so its store and
   eviction controllers are inert, and prefetch admission skips an L1 without
@@ -137,6 +140,8 @@ finish_write_and_reserve_read ──► resident, read-locked ──► readers
   `delete_l2_adapter` keeps a failed close for a retry as for any adapter. The
   storage manager knows no borrower; the prefetch controller excludes `SHADOW`
   affinity from `NO_LOCK`.
+- **Borrowers**: the GPU-direct peer adapter (`p2p_gdr`,
+  [../l2_adapters/gdr_peer_l2_adapter.md](../l2_adapters/gdr_peer_l2_adapter.md)).
 
 ## Addressing one L1
 

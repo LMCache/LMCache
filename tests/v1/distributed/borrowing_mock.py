@@ -72,6 +72,13 @@ class _DoneRead:
         return True
 
 
+class _DoneReader:
+    """Reads the fake owner's bytes; every read has already landed."""
+
+    def read_many(self, region_id: int, targets: list) -> _DoneRead:
+        return _DoneRead()
+
+
 class _FakeOwner:
     """The peer's request server: stores tensors, counts read locks."""
 
@@ -178,7 +185,10 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
         self._lookup_efd.notify()
 
     def _process_lookup_result(
-        self, keys: list[ObjectKey], addresses: list[TransferChannelAddress]
+        self,
+        keys: list[ObjectKey],
+        addresses: list[TransferChannelAddress],
+        started_at: float,
     ) -> Bitmap:
         bitmap = Bitmap(len(keys))
         for i, (key, address) in enumerate(zip(keys, addresses, strict=True)):
@@ -224,7 +234,7 @@ class BorrowingMockL2Adapter(PeerL2AdapterBase):
 
             cast(BorrowedMemoryObj, obj).bind(
                 (lease_is_valid, end_lease),
-                read_into=lambda region_id, offset: _DoneRead(),
+                read_many=_DoneReader().read_many,
                 # The owner's slot of the key: two borrows of a key are views
                 # of the same bytes.
                 address=list(self._owner.objects).index(key),
