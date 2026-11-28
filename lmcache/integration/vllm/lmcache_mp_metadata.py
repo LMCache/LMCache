@@ -354,6 +354,7 @@ class LMCacheMPRequestMetadata:
         group_tokens_per_block: list[int],
         *,
         save_decode_cache: bool = False,
+        lookahead_tokens: int = 0,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -369,6 +370,8 @@ class LMCacheMPRequestMetadata:
             save_decode_cache: Whether to store chunks containing generated
                 tokens. Defaults to storing only complete chunks within the
                 initial prompt, including when decode fills its partial tail.
+            lookahead_tokens: How many tokens vLLM needs after a block before
+                it can hash it (speculative decoding). A chunk waits for them.
 
         Returns:
             Metadata for newly storable chunks, or None when no complete
@@ -419,7 +422,7 @@ class LMCacheMPRequestMetadata:
             default=0,
         )
         min_available_tokens = min(
-            len(tracker.all_token_ids),
+            len(tracker.all_token_ids) - lookahead_tokens,
             allocated_tokens,
             computed_tokens,
         )
@@ -469,6 +472,8 @@ class LMCacheMPRequestMetadata:
         tail_grid_tokens: int,
         boundary_state_blocks: Mapping[int, Mapping[int, int]],
         boundary_state_groups: Collection[int],
+        *,
+        num_speculative_tokens: int = 0,
     ) -> list[tuple["LMCacheMPRequestMetadata", list[int]]]:
         """Generate store metadata for the prompt's newly storable unfull chunks.
 
@@ -485,7 +490,9 @@ class LMCacheMPRequestMetadata:
           once computed.
         - Exact, ``B = P``, for a request that ends at its prompt
           (``tracker.ends_at_prompt``, e.g. a disaggregated prefill) once the
-          prompt is computed. Skipped when ``P`` is a multiple of ``C``.
+          prompt is computed. Skipped when ``P`` is a multiple of ``C``, and
+          for Mamba models with speculative decoding (guessed tokens change
+          that state).
 
         Notes:
             The stored blocks are never rewritten after ``B``: attention rows
@@ -506,6 +513,8 @@ class LMCacheMPRequestMetadata:
                 ``{boundary token: {engine group: block id}}``.
             boundary_state_groups: Engine groups whose state at a grid
                 boundary must come from ``boundary_state_blocks``.
+            num_speculative_tokens: Tokens the draft model guesses per step; 0
+                when speculative decoding is off.
 
         Returns:
             One ``(metadata, boundary-state block IDs it reads)`` pair per newly
@@ -540,6 +549,7 @@ class LMCacheMPRequestMetadata:
                 boundaries[tail_boundary] = []
         if (
             tracker.ends_at_prompt
+            and not (boundary_state_groups and num_speculative_tokens > 0)
             and computed_tokens >= num_prompt_tokens
             # A chunk-aligned prompt length is a full chunk's.
             and num_prompt_tokens % lmcache_tokens_per_chunk != 0

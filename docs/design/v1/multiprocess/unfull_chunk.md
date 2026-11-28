@@ -46,7 +46,8 @@ repeated prompt hits 4,896 tokens instead of 4,160.
 Requirements, checked at startup:
 
 - LMCache-driven transfer mode (the CUDA default).
-- No speculative decoding, no `lmcache.mp.lazy_offload`.
+- No `lmcache.mp.lazy_offload`. Speculative decoding (EAGLE / MTP) is
+  supported; see [Speculative decoding](#speculative-decoding).
 - No compressed-attention model with a per-request ring (DeepSeek-V4.1,
   GLM-5.3, Qwen3.8-Flash-Next; see [Limits](#limits)).
 - For Mamba hybrids, a vLLM whose `SchedulerOutput` has
@@ -197,7 +198,8 @@ STORE [kC, B)                         blocks: ceil(B / T)        one object per 
   computes it is scheduled. Blocks come from the block table.
 - **Requests that end at the prompt**: also store the exact tail `[kC, P)`
   once the prompt is computed, all blocks from the block table. Skipped when
-  `P` is a multiple of `C`.
+  `P` is a multiple of `C`, and for Mamba hybrids under speculative decoding
+  (below).
 - A tail is a store of its own, with no full chunk in it. vLLM hands over the
   Mamba state one step after computing `B`, usually after the full chunks
   were stored. So one request can send two stores in one step. The worker
@@ -212,6 +214,26 @@ STORE [kC, B)                         blocks: ceil(B / T)        one object per 
 - Blocks below `B` must not change after the store is sent. Attention rows
   below `B` are never rewritten, and the Mamba block is a copy, so this
   holds.
+
+### Speculative decoding
+
+Draft tokens are written past the prompt end, so the grid tail (`B <= P - 1`)
+stays safe under EAGLE / MTP:
+
+- **Attention**: draft rows land at positions `>= P`, never in `[kC, B)`.
+  Both the grid and the exact tail are stored.
+- **Mamba hybrids**: the grid tail reads vLLM's boundary-state block. vLLM
+  offers only blocks it has hashed for its own prefix cache, and relocates
+  only unhashed speculative blocks (`MambaManager._relocate_speculative_block`
+  asserts this), so a draft token never reaches an offered snapshot. The exact
+  tail would read the running Mamba block, which the drafted tokens advance
+  past `P` and vLLM relocates between steps, so it is not stored: a
+  disaggregated decode then hits the grid tail and recomputes fewer than `g`
+  tokens.
+
+Each tail's last position still holds draft-layer KV computed from the token
+after `B`, as with any full chunk; that affects draft acceptance only, not
+outputs.
 
 ### Lookup
 
