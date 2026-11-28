@@ -4,6 +4,7 @@
 # Standard
 from unittest.mock import MagicMock, patch
 import argparse
+import json
 
 # Third Party
 import pytest
@@ -14,12 +15,14 @@ from lmcache.cli.commands.query import QueryCommand
 
 def _engine_metric_map(
     model_id: str = "facebook/opt-125m",
+    cached_tokens: object = None,
 ) -> dict[str, tuple[str, object]]:
     """Metric-map portion of :meth:`lmcache.cli.request.Request.send_request`."""
     return {
         "model": ("Model", model_id),
         "prompt_tokens": ("Input tokens", 10),
         "output_tokens": ("Output tokens", 5),
+        "cached_tokens": ("Cached tokens", cached_tokens),
         "ttft_ms": ("TTFT (ms)", 1.0),
         "tpot_ms_per_token": ("TPOT (ms/token)", 2.0),
         "total_latency_ms": ("Total latency (ms)", 100.0),
@@ -242,3 +245,70 @@ class TestQueryCommandExecute:
         err = capsys.readouterr().err
         assert "Unknown documents" in err
         assert "unknown_corpus" in err
+
+    @patch("lmcache.cli.commands.query.engine_command.Request")
+    def test_execute_reports_cached_tokens(
+        self,
+        mock_request_cls: MagicMock,
+        cmd: QueryCommand,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The engine's cached-token count reaches both formats."""
+        mock_instance = MagicMock()
+        mock_instance.send_request.return_value = (
+            "Paris.",
+            _engine_metric_map(cached_tokens=3),
+        )
+        mock_request_cls.return_value = mock_instance
+        args = parser.parse_args(
+            [
+                "query",
+                "engine",
+                "--url",
+                "http://localhost:8000/v1",
+                "--prompt",
+                "hello",
+                "--model",
+                "facebook/opt-125m",
+                "--format",
+                "json",
+            ],
+        )
+
+        cmd.execute(args)
+
+        metrics = json.loads(capsys.readouterr().out)["metrics"]
+        assert metrics["cached_tokens"] == 3
+
+    @patch("lmcache.cli.commands.query.engine_command.Request")
+    def test_execute_explains_a_missing_cached_token_count(
+        self,
+        mock_request_cls: MagicMock,
+        cmd: QueryCommand,
+        parser: argparse.ArgumentParser,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """An engine without prompt-token details says how to enable them."""
+        mock_instance = MagicMock()
+        mock_instance.send_request.return_value = ("Paris.", _engine_metric_map())
+        mock_request_cls.return_value = mock_instance
+        args = parser.parse_args(
+            [
+                "query",
+                "engine",
+                "--url",
+                "http://localhost:8000/v1",
+                "--prompt",
+                "hello",
+                "--model",
+                "facebook/opt-125m",
+            ],
+        )
+
+        cmd.execute(args)
+
+        out = capsys.readouterr().out
+        assert "Cached tokens" in out
+        assert "--enable-prompt-tokens-details" in out
+        assert "N/A" in out

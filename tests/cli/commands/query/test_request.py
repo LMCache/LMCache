@@ -58,3 +58,39 @@ def test_send_request_preserves_reported_completion_count(
     if expected_tokens == 0:
         assert metrics["tpot_ms_per_token"][1] == 0.0
         assert metrics["throughput_tokens_per_s"][1] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        ({"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 4}}, 4),
+        ({"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 0}}, 0),
+        ({"prompt_tokens": 10, "prompt_tokens_details": {}}, None),
+        ({"prompt_tokens": 10}, None),
+    ],
+)
+def test_cached_tokens_come_from_prompt_tokens_details(
+    usage: dict[str, object], expected: int | None
+) -> None:
+    """A reported zero is a count; only an absent field is unknown."""
+    chunks = [
+        {"choices": [{"text": "Hello"}]},
+        {"choices": [], "usage": usage},
+    ]
+    response = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    response += "data: [DONE]\n\n"
+    request = Request(
+        "http://engine.test",
+        "model",
+        max_tokens=128,
+        timeout=5.0,
+        completions_only=True,
+    )
+
+    with patch(
+        "lmcache.cli.commands.query._request.urllib.request.urlopen",
+        return_value=BytesIO(response.encode()),
+    ):
+        _answer, metrics = request.send_request("prompt")
+
+    assert metrics["cached_tokens"] == ("Cached tokens", expected)
