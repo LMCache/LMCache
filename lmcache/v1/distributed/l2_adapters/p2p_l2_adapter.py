@@ -614,6 +614,9 @@ class P2PL2Adapter(PeerL2AdapterBase):
         # runs the region hook so nothing is acquired after it returns.
         self._load_tasks: dict[L2TaskId, _LoadTask] = {}
         self._remote_addresses: dict[ObjectKey, TransferChannelAddress] = {}
+        # Lookup hits holding each address: one lookup's unlock must not erase
+        # the address another lookup of the same key is about to load from.
+        self._remote_address_refs: dict[ObjectKey, int] = {}
         # Stores in flight to the peer. With writes enabled this, the store
         # task-id counter and the completed stores are shared between the
         # store loop thread and the request client's receive thread.
@@ -642,14 +645,22 @@ class P2PL2Adapter(PeerL2AdapterBase):
         )
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        """Release peer reservations and discard their cached transfer addresses.
+        """Release peer reservations. A key's cached transfer address is
+        discarded when the last lookup that hit it unlocks.
 
         Args:
             keys: Object keys to unlock. Empty input is a no-op.
         """
+        # A raise keeps the count: the controller aborts and unlocks again. A
+        # failure on the returned future still drops it: nothing retries that
+        # unlock, and the peer's read-lock TTL frees the lock it missed.
         super().submit_unlock(keys)
         for key in keys:
-            self._remote_addresses.pop(key, None)
+            refs = self._remote_address_refs.pop(key, 0) - 1
+            if refs > 0:
+                self._remote_address_refs[key] = refs
+            else:
+                self._remote_addresses.pop(key, None)
 
     # --------------------
     # Store Interface
@@ -1025,7 +1036,12 @@ class P2PL2Adapter(PeerL2AdapterBase):
         for i, (key, addr) in enumerate(zip(keys, addresses, strict=True)):
             if addr.is_valid():
                 bitmap.set(i)
+                # The peer's read lock pins the object, so lookups of one key
+                # share an address unless that lock expired; the latest wins.
                 self._remote_addresses[key] = addr
+                self._remote_address_refs[key] = (
+                    self._remote_address_refs.get(key, 0) + 1
+                )
         return bitmap
 
 

@@ -11,6 +11,7 @@ the full integration without mocking internals.
 """
 
 # Standard
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from threading import Event
@@ -23,7 +24,10 @@ import torch
 
 # First Party
 from lmcache import torch_dev, torch_device_type
-from lmcache.v1.common.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.common.transfer_channel.api import (
+    TransferChannelAddress,
+    TransferChannelTransferResult,
+)
 from lmcache.v1.distributed.api import (
     FULL_ATTENTION_WINDOW_CHUNKS,
     FetchingPolicy,
@@ -81,6 +85,7 @@ from lmcache.v1.memory_management import (
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.transport.futures import MessagingFuture
 from tests.v1.distributed.borrowing_mock import (
     BorrowingMockL2Adapter,
     BorrowingMockL2AdapterConfig,
@@ -740,6 +745,132 @@ class TestMultiAdapterPrefetch:
         ctrl.stop()
         for a in adapters:
             a.close()
+
+
+def _answered(value):
+    """A peer RPC future that is already answered with ``value``."""
+    future: MessagingFuture = MessagingFuture()
+    future.set_result(value)
+    return future
+
+
+class _FakePeerClient:
+    """P2PClient stand-in for one peer: answers lookups from ``hits`` and
+    counts per key the lookup hits it reported and the unlocks it received.
+    A lookup whose keys are in ``held`` stays unanswered until its event
+    is set."""
+
+    def __init__(self, hits: dict[ObjectKey, TransferChannelAddress]) -> None:
+        self.hits = hits
+        self.held: dict[tuple[ObjectKey, ...], Event] = {}
+        self.lookup_hits: Counter[ObjectKey] = Counter()
+        self.unlocks: Counter[ObjectKey] = Counter()
+        self.lookups: list[list[ObjectKey]] = []
+
+    def p2p_lookup_and_lock(
+        self, keys: list[ObjectKey], group_layout_descs: dict
+    ) -> MessagingFuture[int]:
+        self.lookups.append(keys)
+        return _answered(len(self.lookups) - 1)
+
+    def p2p_query_lookup_results(
+        self, task_id: int
+    ) -> MessagingFuture[list[TransferChannelAddress] | None]:
+        keys = self.lookups[task_id]
+        gate = self.held.get(tuple(keys))
+        if gate is not None and not gate.is_set():
+            return _answered(None)
+        self.lookup_hits.update(k for k in keys if k in self.hits)
+        return _answered(
+            [self.hits.get(k, TransferChannelAddress(-1, 0)) for k in keys]
+        )
+
+    def p2p_unlock_objects(self, keys: list[ObjectKey]) -> MessagingFuture[None]:
+        self.unlocks.update(keys)
+        return _answered(None)
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeTransferClient:
+    """Transfer-channel client whose reads finish at once and succeed."""
+
+    def __init__(self) -> None:
+        self.read_sizes: list[int] = []
+
+    def submit_read(self, local: list, remote: list) -> int:
+        self.read_sizes.append(len(remote))
+        return len(self.read_sizes) - 1
+
+    def query_status(self, task_id: int) -> TransferChannelTransferResult:
+        return TransferChannelTransferResult(True, [True] * self.read_sizes[task_id])
+
+
+def make_p2p_adapters(peers: list[_FakePeerClient]) -> list[P2PL2Adapter]:
+    """Build one real P2PL2Adapter per fake peer over a fake transfer channel."""
+    clients = {f"grpc://peer{i}:9555": peer for i, peer in enumerate(peers)}
+    tc_ctx = MagicMock()
+    tc_ctx.get_transfer_channel_client.side_effect = lambda url: _FakeTransferClient()
+    tc_ctx.get_transfer_channel_address.side_effect = lambda pairs: [
+        TransferChannelAddress(offset=o, size=s) for o, s in pairs
+    ]
+    with (
+        patch.object(p2p_mod, "P2PClient", side_effect=clients.__getitem__),
+        patch.object(p2p_mod, "get_transfer_channel_context", return_value=tc_ctx),
+    ):
+        return [
+            P2PL2Adapter(
+                P2PL2AdapterConfig(
+                    peer_mq_server_url=url,
+                    peer_transfer_channel_server_url=f"peer{i}:7600",
+                    lookup_timeout_s=10.0,
+                    load_timeout_s=10.0,
+                )
+            )
+            for i, url in enumerate(clients)
+        ]
+
+
+class TestP2PAdapters:
+    def test_unlock_on_one_peer_keeps_the_address_another_request_waits_on(
+        self, l1_manager
+    ):
+        """A loads k0 from peer X and unlocks it while B, which also hit k0
+        on X, still waits on peer Y. B must still load k0 from X, and every
+        lookup hit gets exactly one unlock."""
+        k0, k1 = make_object_key(0), make_object_key(1)
+        peer_x = _FakePeerClient({k0: TransferChannelAddress(offset=4096, size=64)})
+        peer_y = _FakePeerClient({k1: TransferChannelAddress(offset=8192, size=64)})
+        a_keys, b_keys = [k0], [k0, k1]
+        release_a, release_b = Event(), Event()
+        peer_y.held = {tuple(a_keys): release_a, tuple(b_keys): release_b}
+        adapters = make_p2p_adapters([peer_x, peer_y])
+        ctrl = make_controller(l1_manager, adapters)
+        ctrl.start()
+
+        a_id = ctrl.submit_prefetch_request(single_row_spec(a_keys))
+        b_id = ctrl.submit_prefetch_request(single_row_spec(b_keys))
+        assert wait_for_condition(lambda: peer_x.lookup_hits[k0] == 2)
+
+        release_a.set()
+        assert row_bits(wait_for_result(ctrl, a_id)) == [0]
+        assert peer_x.unlocks[k0] == 1
+
+        release_b.set()
+        assert row_bits(wait_for_result(ctrl, b_id)) == [0, 1]
+        assert peer_x.unlocks == peer_x.lookup_hits
+        assert peer_y.unlocks == peer_y.lookup_hits
+        ctrl.stop()
+
+        # The last unlock dropped the address: a load without a lookup fails.
+        task = adapters[0].submit_load_task([k0], [MagicMock()])
+        result = adapters[0].query_load_result(task)
+        assert result is not None and result.popcount() == 0
+        l1_manager.finish_read(a_keys)
+        l1_manager.finish_read(b_keys)
+        for adapter in adapters:
+            adapter.close()
 
 
 # =============================================================================
