@@ -773,6 +773,9 @@ def test_load_deadline_expired_yields_failure():
     with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
         adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
         tc_client.submit_read.return_value = 1
+        tc_client.query_status.return_value = TransferChannelTransferResult(
+            finished=False
+        )
         task_id = adapter.submit_load_task(
             keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
         )
@@ -780,6 +783,54 @@ def test_load_deadline_expired_yields_failure():
         bitmap = adapter.query_load_result(task_id)
         assert bitmap is not None
         assert bitmap.popcount() == 0
+        tc_client.query_status.assert_called_once_with(1)
+
+
+def test_load_deadline_expired_drops_failed_nixl_entry_and_ignores_channel_errors():
+    """A load that times out before its first query still drops a failed
+    no-handle entry in NixlTransferChannelClient, and a channel error during
+    that cleanup still reports an all-zero bitmap."""
+    # First Party
+    from lmcache.v1.distributed.transfer_channel.impl.nixl_impl import (
+        NixlTransferChannelClient,
+    )
+
+    class _MissingPeer(Exception):
+        pass
+
+    keys = [_key(0)]
+    with _adapter(load_timeout_s=0.01) as (adapter, _mq, _tc_ctx, tc_client, _notifier):
+        nixl_ctx = MagicMock()
+        nixl_ctx.transfer_errors = (_MissingPeer,)
+        nixl_ctx.release_refused_error = ()
+        nixl_ctx.agent.make_prepped_xfer.side_effect = _MissingPeer()
+        channel = NixlTransferChannelClient(nixl_ctx, "peer", object())
+        tc_client.submit_read.side_effect = channel.submit_read
+        tc_client.query_status.side_effect = channel.query_status
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=100, size=10)
+        task_ids = [
+            adapter.submit_load_task(
+                keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+            )
+            for _ in range(3)
+        ]
+        time.sleep(0.02)
+        for task_id in task_ids:
+            bitmap = adapter.query_load_result(task_id)
+            assert bitmap is not None and bitmap.popcount() == 0
+        assert not channel._ended_tasks
+
+        # A channel raising during timeout cleanup (e.g. unknown status) still
+        # yields an all-zero bitmap.
+        tc_client.submit_read.side_effect = None
+        tc_client.submit_read.return_value = 99
+        tc_client.query_status.side_effect = RuntimeError("unknown transfer state")
+        err_task = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+        )
+        time.sleep(0.02)
+        bitmap = adapter.query_load_result(err_task)
+        assert bitmap is not None and bitmap.popcount() == 0
 
 
 # ---------------------------------------------------------------------------

@@ -777,6 +777,16 @@ class P2PL2Adapter(PeerL2AdapterBase):
             return Bitmap(len(task.keys))
         if time.monotonic() > task.deadline:
             del self._load_tasks[task_id]
+            try:
+                # If the transfer already ended (for example, nixl refused to
+                # create it), querying once lets the client drop its record.
+                self._tc_client.query_status(task.read_task_id)
+            except Exception:  # noqa: BLE001 - best-effort cleanup on timeout
+                logger.debug(
+                    "Ignoring channel error while cleaning up timed-out load task %d",
+                    task_id,
+                    exc_info=True,
+                )
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
             return Bitmap(len(task.keys))
 

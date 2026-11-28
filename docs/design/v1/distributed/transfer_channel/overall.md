@@ -202,6 +202,20 @@ points:
   `batch_transfer_async_read` / `batch_transfer_async_write`.
 - **Address → page indices.** `addresses_to_indices` turns `(offset, size)` into
   the list of page indices `[offset/align, …]`, expanding multi-page objects.
+- **Failed transfers.** nixl's Python bindings raise for every error status.
+  A transfer nixl refuses to create or start, or whose status check raises
+  `NIXL_ERR_REMOTE_DISCONNECT`, `NIXL_ERR_NOT_FOUND` or `NIXL_ERR_BACKEND`, is
+  reported finished with no object succeeded, as the Mooncake channel reports
+  a failed batch. Every transfer, failed or not, is reported once nixl has
+  released its handle; while nixl refuses the release the transfer stays
+  unfinished, and the caller keeps its buffers for as long as it keeps
+  polling. nixl with ai-dynamo/nixl#2540 refuses while the transfer is still
+  in progress, but not for a batch that mixes failed and pending operations
+  or failed partway through posting. Earlier releases do not refuse a
+  transfer that is already in error, and nixl does not promise that such a
+  transfer has stopped using its buffers (ai-dynamo/nixl#2532). One query of
+  a client runs at a time, so a transfer is reported finished at most once.
+  Other nixl errors, such as `NIXL_ERR_INVALID_PARAM`, still raise.
 - **Handshake timeout.** The dialing side sets a `RCVTIMEO` of
   `_HANDSHAKE_TIMEOUT_MS` (60 s) on the handshake socket. A wrong/unreachable
   url or a blocked port therefore raises a clear `TimeoutError` instead of

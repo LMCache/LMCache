@@ -2,6 +2,7 @@
 """Nixl-backed implementation of the transfer channel abstraction."""
 
 # Standard
+from types import ModuleType
 from typing import TYPE_CHECKING, Optional, Union
 import importlib
 import itertools
@@ -32,7 +33,12 @@ from lmcache.v1.distributed.transfer_channel.factory import (
 
 if TYPE_CHECKING:
     # Third Party
-    from nixl._api import nixl_agent, nixl_agent_config, nixl_prepped_dlist_handle
+    from nixl._api import (
+        nixl_agent,
+        nixl_agent_config,
+        nixl_prepped_dlist_handle,
+        nixl_xfer_handle,
+    )
     from nixl._bindings import nixlRegDList
 
 logger = init_logger(__name__)
@@ -46,13 +52,18 @@ _HANDSHAKE_TIMEOUT_MS = 60_000
 ############################################################
 # Helper functions
 ############################################################
-def _load_nixl() -> tuple["nixl_agent", "nixl_agent_config"]:
-    """Import the nixl Python bindings, tolerating the cuXX-suffixed packages."""
+def _load_nixl() -> tuple["nixl_agent", "nixl_agent_config", ModuleType]:
+    """Import the nixl Python bindings, tolerating the cuXX-suffixed packages.
+
+    Returns:
+        The agent class, the agent config class, and the bindings module
+        that defines the nixl error types.
+    """
     last_err: Optional[Exception] = None
     for modname in ("nixl._api", "nixl_cu12._api", "nixl_cu13._api"):
         try:
             mod = importlib.import_module(modname)
-            return mod.nixl_agent, mod.nixl_agent_config
+            return mod.nixl_agent, mod.nixl_agent_config, mod.nixlBind
         except ImportError as err:  # noqa: PERF203
             last_err = err
     raise RuntimeError(
@@ -114,9 +125,17 @@ class NixlTransferChannelClient(TransferChannelClient):
         self._remote_handle = remote_dlist_handle
 
         self._task_counter = 0
-        # task_id -> (xfer_handle, remote_addresses)
-        self._tasks: dict[int, tuple] = {}
+        # task_id -> (xfer_handle, object count) of the transfers nixl runs.
+        self._tasks: dict[int, tuple["nixl_xfer_handle", int]] = {}
+        # task_id -> (xfer_handle, object count, succeeded) of the transfers
+        # that ended, or that nixl raised for, and are not reported yet because
+        # nixl has not released their handle. The handle is None when nixl
+        # never created one.
+        self._ended_tasks: dict[int, tuple["nixl_xfer_handle | None", int, bool]] = {}
         self._lock = threading.Lock()
+        # Held by query_status and close, so that only one of them at a time
+        # moves a task from running to ended to reported.
+        self._query_lock = threading.Lock()
 
     def submit_read(
         self,
@@ -162,34 +181,45 @@ class NixlTransferChannelClient(TransferChannelClient):
 
         Returns:
             A TransferChannelTransferResult indicating whether the transfer is
-            finished and which objects succeeded (if finished).
+            finished and which objects succeeded (if finished). A transfer is
+            reported finished once nixl has released its handle; while nixl
+            refuses the release it is unfinished, and the release is retried on
+            the next query. A transfer nixl failed, for example because the
+            connection to the peer broke, is finished with no object succeeded.
 
         Raises:
             KeyError: ``task_id`` is unknown or was already reported finished.
         """
-        with self._lock:
-            if task_id not in self._tasks:
+        with self._query_lock:
+            with self._lock:
+                running = self._tasks.get(task_id)
+                ended = task_id in self._ended_tasks
+            if ended:
+                return self._report_ended(task_id)
+            if running is None:
                 raise KeyError(f"Unknown transfer task id: {task_id}")
-            handle, remote_addresses = self._tasks[task_id]
 
-        status = self._ctx.agent.check_xfer_state(handle)
-        if status == "PROC":
-            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
-
-        # Terminal state (DONE or ERR): release the handle and report.
-        with self._lock:
-            self._tasks.pop(task_id, None)
-        self._ctx.agent.release_xfer_handle(handle)
-
-        if status == "DONE":
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[True] * len(remote_addresses)
-            )
-
-        # status == "ERR" (or any unexpected state): finished but nothing succeeded.
-        return TransferChannelTransferResult(
-            finished=True, succeeded_mask=[False] * len(remote_addresses)
-        )
+            handle, num_objects = running
+            try:
+                status = self._ctx.agent.check_xfer_state(handle)
+            except self._ctx.transfer_errors:
+                logger.exception(
+                    "NIXL transfer %d to peer agent %s failed",
+                    task_id,
+                    self._remote_agent_name,
+                )
+                succeeded = False
+            else:
+                if status == "PROC":
+                    return TransferChannelTransferResult(
+                        finished=False, succeeded_mask=[]
+                    )
+                # "ERR" (or any unexpected state): finished, nothing succeeded.
+                succeeded = status == "DONE"
+            with self._lock:
+                del self._tasks[task_id]
+                self._ended_tasks[task_id] = (handle, num_objects, succeeded)
+            return self._report_ended(task_id)
 
     def close(self) -> None:
         """
@@ -199,14 +229,17 @@ class NixlTransferChannelClient(TransferChannelClient):
             This function does not send any notifications to the server side. The
             server-side teardown needs to be done by other ways (if needed).
         """
-        with self._lock:
-            tasks = list(self._tasks.values())
-            self._tasks.clear()
-        for handle, _ in tasks:
-            try:
-                self._ctx.agent.release_xfer_handle(handle)
-            except Exception:  # noqa: BLE001 - best-effort cleanup
-                pass
+        with self._query_lock:
+            with self._lock:
+                handles = [handle for handle, _ in self._tasks.values()]
+                handles += [h for h, _, _ in self._ended_tasks.values() if h]
+                self._tasks.clear()
+                self._ended_tasks.clear()
+            for handle in handles:
+                try:
+                    self._ctx.agent.release_xfer_handle(handle)
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
         if self._remote_handle is not None:
             try:
                 self._ctx.agent.release_dlist_handle(self._remote_handle)
@@ -232,6 +265,10 @@ class NixlTransferChannelClient(TransferChannelClient):
 
         Raises:
             ValueError: The two address lists differ in length.
+
+        Note:
+            A transfer nixl refuses to create or start still gets a task id;
+            ``query_status`` reports it as failed.
         """
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
@@ -243,22 +280,79 @@ class NixlTransferChannelClient(TransferChannelClient):
             local_region = self._ctx.default_region
         local_idx = self._ctx.addresses_to_indices(local_addresses)
         remote_idx = self._ctx.addresses_to_indices(remote_addresses)
+        num_objects = len(remote_addresses)
 
         agent = self._ctx.agent
-        handle = agent.make_prepped_xfer(
-            operation,
-            self._ctx.local_handles[local_region],
-            local_idx,
-            self._remote_handle,
-            remote_idx,
-        )
-        agent.transfer(handle)
+        try:
+            handle = agent.make_prepped_xfer(
+                operation,
+                self._ctx.local_handles[local_region],
+                local_idx,
+                self._remote_handle,
+                remote_idx,
+            )
+        except self._ctx.transfer_errors:
+            logger.exception(
+                "NIXL could not create a %s to peer agent %s",
+                operation,
+                self._remote_agent_name,
+            )
+            with self._lock:
+                task_id = self._take_task_id()
+                self._ended_tasks[task_id] = (None, num_objects, False)
+            return task_id
+        try:
+            agent.transfer(handle)
+        except self._ctx.transfer_errors:
+            logger.exception(
+                "NIXL could not start a %s to peer agent %s",
+                operation,
+                self._remote_agent_name,
+            )
+            with self._lock:
+                task_id = self._take_task_id()
+                self._ended_tasks[task_id] = (handle, num_objects, False)
+            return task_id
 
         with self._lock:
-            task_id = self._task_counter
-            self._task_counter += 1
-            self._tasks[task_id] = (handle, list(remote_addresses))
+            task_id = self._take_task_id()
+            self._tasks[task_id] = (handle, num_objects)
         return task_id
+
+    def _take_task_id(self) -> int:
+        """Return a new task id. The caller holds ``self._lock``."""
+        task_id = self._task_counter
+        self._task_counter += 1
+        return task_id
+
+    def _report_ended(self, task_id: int) -> TransferChannelTransferResult:
+        """Report an ended transfer as finished once nixl releases its handle.
+
+        If nixl refuses the release, the transfer stays unfinished and the
+        release is retried on the next query. nixl with ai-dynamo/nixl#2540
+        refuses while the transfer is in progress (not for a batch that mixes
+        failed and pending operations); earlier releases do not refuse a
+        transfer that is already in error, and nixl does not promise that such
+        a transfer has stopped using its buffers (ai-dynamo/nixl#2532).
+        The caller holds ``_query_lock``.
+        """
+        with self._lock:
+            handle, num_objects, succeeded = self._ended_tasks[task_id]
+        if handle is not None:
+            try:
+                self._ctx.agent.release_xfer_handle(handle)
+            except self._ctx.release_refused_error:
+                logger.debug(
+                    "NIXL has not released transfer %d to peer agent %s yet",
+                    task_id,
+                    self._remote_agent_name,
+                )
+                return TransferChannelTransferResult(finished=False, succeeded_mask=[])
+        with self._lock:
+            del self._ended_tasks[task_id]
+        return TransferChannelTransferResult(
+            finished=True, succeeded_mask=[succeeded] * num_objects
+        )
 
 
 ############################################################
@@ -374,7 +468,19 @@ class NixlTransferChannelContext(TransferChannelContext):
             advertise_url: The URL to advertise to peers for them to connect to us.
             backends: Optional list of nixl backends to use (e.g., ["UCX"])
         """
-        nixl_agent, nixl_agent_config = _load_nixl()
+        nixl_agent, nixl_agent_config, nixl_bindings = _load_nixl()
+        # Errors that mean a transfer to a peer failed: the connection to the
+        # peer broke, the peer's metadata was invalidated, or the backend
+        # failed the transfer. Clients report them as failed transfers.
+        self.transfer_errors: tuple[type[Exception], ...] = (
+            nixl_bindings.nixlRemoteDisconnectError,
+            nixl_bindings.nixlNotFoundError,
+            nixl_bindings.nixlBackendError,
+        )
+        # Raised when nixl refuses to release a transfer handle.
+        self.release_refused_error: type[Exception] = (
+            nixl_bindings.nixlRepostActiveError
+        )
 
         self._l1_memory_desc = l1_memory_desc
         self._align = l1_memory_desc.align_bytes
