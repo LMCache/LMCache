@@ -12,13 +12,15 @@ baseline serves as the oracle.
 """
 
 # Standard
-from typing import Any
+from typing import NamedTuple, cast
+import math
 
 # Third Party
 import pytest
 import torch
 
 # First Party
+from lmcache.v1.common.kv_format.types import DiscoverableKVCache
 from lmcache.v1.common.ops_types import KernelGroupSpec, PageBufferShapeDesc
 from lmcache.v1.common.utils import make_page_buffer_shape_desc
 from lmcache.v1.platform import torch_ops
@@ -60,25 +62,31 @@ _LAYOUTS: dict[lmcache_native.EngineKVFormat, _Layout] = {
 _LAYOUT_IDS = ["kv_tuple", "mla_tuple"]
 
 
+class _Built(NamedTuple):
+    layers: list[list[torch.Tensor]]
+    desc: PageBufferShapeDesc
+    table: torch.Tensor
+
+
 def _fill(
     shape: tuple[int, ...], dtype: torch.dtype, device: torch.device, salt: int
 ) -> torch.Tensor:
-    values = torch.arange(torch.tensor(shape).prod(), dtype=torch.int32) + salt
+    values = torch.arange(math.prod(shape), dtype=torch.int32) + salt
     return values.remainder(1009).to(dtype).to(device).view(shape)
 
 
-def _build(fmt: lmcache_native.EngineKVFormat, device: torch.device) -> dict[str, Any]:
+def _build(fmt: lmcache_native.EngineKVFormat, device: torch.device) -> _Built:
     """Build engine planes, their pointer table and the factory descriptor."""
     shapes, dtype, _ = _LAYOUTS[fmt]
     layers = [
-        tuple(
+        [
             _fill(shape, dtype, device, 137 * (2 * layer + plane))
             for plane, shape in enumerate(shapes)
-        )
+        ]
         for layer in range(NL)
     ]
     desc = make_page_buffer_shape_desc(
-        layers,
+        cast("list[DiscoverableKVCache]", layers),
         fmt,
         layer_idx=0,
         num_layers_in_group=NL,
@@ -90,7 +98,7 @@ def _build(fmt: lmcache_native.EngineKVFormat, device: torch.device) -> dict[str
         dtype=torch.int64,
         device=device,
     )
-    return {"layers": layers, "desc": desc, "table": table, "dtype": dtype}
+    return _Built(layers, desc, table)
 
 
 def _object(fmt: lmcache_native.EngineKVFormat, device: torch.device) -> torch.Tensor:
@@ -111,7 +119,7 @@ def _native_ops() -> NpuDeviceOps:
 def _transfer_natively(
     ops: NpuDeviceOps,
     path: str,
-    built: dict[str, Any],
+    built: _Built,
     obj: torch.Tensor,
     block_ids: torch.Tensor,
     device: torch.device,
@@ -120,21 +128,21 @@ def _transfer_natively(
 ) -> None:
     if path == "direct":
         ops.multi_layer_block_kv_transfer(
-            built["table"],
+            built.table,
             [int(obj.data_ptr())],
             block_ids,
             device,
             direction,
-            built["desc"],
+            built.desc,
             CHUNK,
             fmt,
             0,
         )
     else:
         spec = KernelGroupSpec(
-            paged_buffer_ptrs=int(built["table"].data_ptr()),
+            paged_buffer_ptrs=int(built.table.data_ptr()),
             lmcache_objects_ptrs=[int(obj.data_ptr())],
-            shape_desc=built["desc"],
+            shape_desc=built.desc,
             lmcache_chunk_size=CHUNK,
             engine_kv_format=int(fmt),
             block_ids_base=int(block_ids.data_ptr()),
@@ -144,6 +152,7 @@ def _transfer_natively(
         ops.execute_object_group_transfer(
             int(direction), device, 1 << 26, [spec], [ops.BatchStep([], [launch])]
         )
+    assert hasattr(torch, "npu")
     torch.npu.synchronize()
 
 
@@ -174,7 +183,7 @@ def test_factory_desc_moves_the_baseline_bytes(
     ops = _native_ops()
     native, reference = _build(fmt, device), _build(fmt, device)
 
-    desc = native["desc"]
+    desc = native.desc
     assert isinstance(desc, ops.PageBufferShapeDesc)
     shapes, dtype, _ = _LAYOUTS[fmt]
     assert desc.num_planes == len(shapes)
@@ -190,7 +199,7 @@ def test_factory_desc_moves_the_baseline_bytes(
         # A valid source object comes from a D2H pass over a third layout.
         source = _object(fmt, device)
         torch_ops.multi_layer_block_kv_transfer(
-            _build(fmt, device)["layers"],
+            _build(fmt, device).layers,
             [source],
             block_ids,
             device,
@@ -201,7 +210,7 @@ def test_factory_desc_moves_the_baseline_bytes(
             0,
         )
         native_obj, reference_obj = source.clone(), source.clone()
-        for planes in native["layers"] + reference["layers"]:
+        for planes in native.layers + reference.layers:
             for plane in planes:
                 plane.zero_()
     else:
@@ -209,12 +218,12 @@ def test_factory_desc_moves_the_baseline_bytes(
 
     _transfer_natively(ops, path, native, native_obj, block_ids, device, direction, fmt)
     torch_ops.multi_layer_block_kv_transfer(
-        reference["layers"],
+        reference.layers,
         [reference_obj],
         block_ids,
         device,
         direction,
-        reference["desc"],
+        reference.desc,
         CHUNK,
         fmt,
         0,
@@ -225,7 +234,7 @@ def test_factory_desc_moves_the_baseline_bytes(
         assert torch.equal(native_obj.cpu(), reference_obj.cpu())
     else:
         for native_planes, reference_planes in zip(
-            native["layers"], reference["layers"], strict=True
+            native.layers, reference.layers, strict=True
         ):
             for got, expected in zip(native_planes, reference_planes, strict=True):
                 assert torch.any(got.cpu() != 0)
