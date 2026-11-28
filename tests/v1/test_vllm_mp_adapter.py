@@ -1385,6 +1385,91 @@ def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> Non
     assert tracker.state == LMCacheMPRequestState.READY
 
 
+def test_aborted_request_releases_lookup_locks() -> None:
+    """An abort before RETRIEVE must release the lookup's pinned range."""
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
+        LMCacheMPRequestState,
+        LMCacheMPRequestTracker,
+    )
+
+    class _Request:
+        request_id = "req-abort"
+        kv_transfer_params = None
+        cache_salt = ""
+        prompt_token_ids = [1, 2, 3, 4]
+        num_prompt_tokens = 4
+        all_token_ids = [1, 2, 3, 4]
+        mm_features: list[object] = []
+
+    request = _Request()
+    tracker = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
+    tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
+    tracker.num_lmcache_hit_tokens = 4
+    tracker.apc_covered_tokens = 0
+    tracker.store_scheduled = False  # type: ignore[attr-defined]
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {request.request_id: tracker}
+    connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+    connector.lazy_offload = False
+    connector._pinned_boundary_state_blocks = set()
+    connector._delay_free_req_ids = set()
+
+    connector.request_finished(request, [])  # type: ignore[arg-type]
+
+    connector.scheduler_adapter.free_lookup_locks.assert_called_once()
+    kwargs = connector.scheduler_adapter.free_lookup_locks.call_args.kwargs
+    assert kwargs["start"] == 0
+    assert kwargs["end"] == 4
+    assert kwargs["request_id"] == "req-abort"
+    connector.scheduler_adapter.cleanup_lookup_result.assert_called_once_with(
+        "req-abort"
+    )
+    connector.scheduler_adapter.end_session.assert_called_once_with("req-abort")
+
+
+def test_completed_retrieve_does_not_release_locks_again() -> None:
+    """A READY request already released its locks during RETRIEVE."""
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
+        LMCacheMPRequestState,
+        LMCacheMPRequestTracker,
+    )
+
+    class _Request:
+        request_id = "req-ready"
+        kv_transfer_params = None
+        cache_salt = ""
+        prompt_token_ids = [1, 2, 3, 4]
+        num_prompt_tokens = 4
+        all_token_ids = [1, 2, 3, 4]
+        mm_features: list[object] = []
+
+    request = _Request()
+    tracker = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
+    tracker.state = LMCacheMPRequestState.READY
+    tracker.num_lmcache_hit_tokens = 4
+    tracker.store_scheduled = False  # type: ignore[attr-defined]
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.request_trackers = {request.request_id: tracker}
+    connector.scheduler_adapter = MagicMock(name="scheduler_adapter")
+    connector.lazy_offload = False
+    connector._pinned_boundary_state_blocks = set()
+    connector._delay_free_req_ids = set()
+
+    connector.request_finished(request, [])  # type: ignore[arg-type]
+
+    connector.scheduler_adapter.free_lookup_locks.assert_not_called()
+
+
 def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
     """instance_id is a 63-bit int, not the PID, and unique per adapter."""
     adapter, _send_mock, _ = fake_adapter

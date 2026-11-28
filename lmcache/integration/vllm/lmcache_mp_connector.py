@@ -1805,6 +1805,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker = self.request_trackers.get(request.request_id)
         delay_free = tracker is not None and tracker.store_scheduled
 
+        # A request can be aborted after its LOOKUP pinned the hit range but
+        # before RETRIEVE released those locks. `needs_retrieve()` is true in
+        # exactly that window and false once the load completed (READY).
+        if tracker is not None and tracker.needs_retrieve():
+            start = tracker.apc_covered_tokens
+            end = tracker.num_lmcache_hit_tokens
+            if end > start:
+                self.scheduler_adapter.free_lookup_locks(
+                    packed_token_ids=tracker.packed_token_ids(),
+                    start=start,
+                    end=end,
+                    request_id=request.request_id,
+                    cache_salt=tracker.cache_salt,
+                    request_configs=tracker.request_configs,
+                )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
