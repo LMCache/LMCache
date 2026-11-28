@@ -5,11 +5,12 @@ ROCm takes the CUDA-style interprocess event API from ``torch.cuda``, but a
 stream wait on an *imported* IPC event is not a command-processor barrier
 there: HIP launches ``__amd_rocclr_streamOpsWait``, a one-work-item kernel that
 spins on a compute unit until the event's signal is written. (A CP wait would
-need an HSA signal behind the event's memory, which the host-registered IPC
+need a ROCr runtime signal behind the event's memory, which the host-registered IPC
 shared memory does not have.)
 
-The ``lmcache_driven`` STORE and RETRIEVE make the server's transfer stream wait
-on the producer fence the engine recorded on its compute stream. The engine may
+The server's transfers (``lmcache_driven`` STORE and RETRIEVE, the CacheBlend
+retrieve, the Q store) make a server stream wait on the producer fence the
+engine recorded on its compute stream. The engine may
 record that fence behind work it has queued but not yet started. If that work
 contains a kernel whose workgroups must all be resident at once (a persistent
 kernel that takes every CU and has its workgroups wait on each other), the
@@ -22,7 +23,9 @@ This backend sets ``host_ready_before_imported_wait``: ``wait_producer_event``
 polls the imported event from the host (``hipEventQuery``) until it has
 completed and only then queues the stream wait, which no longer spins. The
 transfer starts a poll interval after the fence completes instead of the
-moment it does.
+moment it does. If the engine is no longer registered, or the fence is still
+pending at the deadline, the poll gives up and that transfer fails instead of
+holding the server's worker thread.
 """
 
 # Future

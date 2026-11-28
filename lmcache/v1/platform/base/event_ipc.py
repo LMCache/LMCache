@@ -178,6 +178,24 @@ _PRODUCER_SLOW_POLL_S = 0.002
 _PRODUCER_SLOW_AFTER_S = 0.1
 _PRODUCER_WARN_AFTER_S = 10.0
 _PRODUCER_WARN_EVERY_S = 60.0
+# Deadline for a producer fence, over 100x the longest engine step. It is half
+# the engine adapters' default mq_timeout (300 s), the longest an engine waits
+# for a store before it reuses that store's KV blocks (flush_inflight_stores).
+# The poll runs on the server's GPU affinity worker, which clients share when
+# there are fewer workers than clients (the default is one), so a fence that
+# never completes gives that worker back, failing only its own transfer, before
+# an engine gives up on the requests queued behind it.
+_PRODUCER_WAIT_TIMEOUT_S = 150.0
+
+
+class ProducerEventWaitError(RuntimeError):
+    """A producer fence was given up on before it completed.
+
+    Raised by :func:`wait_producer_event` when the fence's engine is no
+    longer registered or the fence is still pending at the deadline. No
+    stream wait has been queued, so the caller must fail the transfer
+    without touching the engine's buffers.
+    """
 
 
 def wait_producer_event(
@@ -185,6 +203,8 @@ def wait_producer_event(
     event: object,
     stream: object,
     *,
+    is_alive: Callable[[], bool] | None = None,
+    timeout_s: float = _PRODUCER_WAIT_TIMEOUT_S,
     clock: Callable[[], float] = time.monotonic,
     pause: Callable[[float], None] = time.sleep,
 ) -> None:
@@ -195,35 +215,52 @@ def wait_producer_event(
     while it waits sets ``host_ready_before_imported_wait``; there the host
     polls ``query_event`` until the fence has completed and only then queues
     the wait, which then returns at once. Every other backend queues the wait
-    directly.
+    directly; ``is_alive`` and ``timeout_s`` do not apply to it.
 
-    There is no deadline: a fence that has not completed is logged after
+    The poll gives up, without queueing the wait, when ``is_alive`` returns
+    False (checked once the poll has slowed down) or the fence is still
+    pending after ``timeout_s``. A pending fence is logged after
     ``_PRODUCER_WARN_AFTER_S`` and then every ``_PRODUCER_WARN_EVERY_S``.
 
     Args:
         backend: The event IPC backend that imported ``event``.
         event: The imported producer event.
         stream: Stream that should wait for ``event``.
+        is_alive: Returns whether the producer's engine is still registered
+            (False once it is unregistered or reaped). None: not checked.
+        timeout_s: Seconds to poll before giving up.
         clock: Monotonic clock in seconds; injectable for testing.
         pause: Sleep function in seconds; injectable for testing.
+
+    Raises:
+        ProducerEventWaitError: The poll gave up (engine gone or deadline
+            passed); no stream wait was queued.
     """
     if getattr(backend, "host_ready_before_imported_wait", False):
         start = clock()
         warn_at = _PRODUCER_WARN_AFTER_S
         while not backend.query_event(event):
             waited = clock() - start
+            slow = waited >= _PRODUCER_SLOW_AFTER_S
+            if slow and is_alive is not None and not is_alive():
+                raise ProducerEventWaitError(
+                    f"producer event still pending after {waited:.1f} s and its "
+                    "engine is no longer registered; giving up on it"
+                )
+            if waited >= timeout_s:
+                raise ProducerEventWaitError(
+                    f"producer event still pending after {waited:.0f} s "
+                    f"(limit {timeout_s:.0f} s); giving up on it"
+                )
             if waited >= warn_at:
                 logger.warning(
                     "Producer event not complete after %.0f s; the transfer "
-                    "stays queued until it is.",
+                    "stays queued until it is (limit %.0f s).",
                     waited,
+                    timeout_s,
                 )
                 warn_at += _PRODUCER_WARN_EVERY_S
-            pause(
-                _PRODUCER_POLL_S
-                if waited < _PRODUCER_SLOW_AFTER_S
-                else _PRODUCER_SLOW_POLL_S
-            )
+            pause(_PRODUCER_SLOW_POLL_S if slow else _PRODUCER_POLL_S)
     backend.wait_event(event, stream)
 
 

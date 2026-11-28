@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
+import ast
 import inspect
 
 # Third Party
@@ -191,14 +192,17 @@ def test_worker_exports_events_through_platform_backend(
     assert all(call[-1] == device for call in backend.calls[3:])
 
 
-def test_server_store_and_retrieve_delegate_event_ordering(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Server imports, waits, records, and exports through the event backend."""
+def _server_handle_path(
+    monkeypatch: pytest.MonkeyPatch, backend: Any
+) -> SimpleNamespace:
+    """A LMCacheDrivenTransferModule with GPU instance 1 registered on CPU fakes.
+
+    Returns the module, the registration ``entry``, a request ``key``, and the
+    stream ``callbacks``, held imports (``held``) and released import tokens
+    (``released``) it records.
+    """
     # First Party
     from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
-
-    backend = _FakeEventBackend()
 
     def unexpected_backend_lookup(_device: object) -> _FakeEventBackend:
         raise AssertionError("server should reuse the registered event backend")
@@ -259,6 +263,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             has_subscribers=lambda event_type: False,
         ),
         resolve_obj_keys=lambda key, group_ids: [[]],
+        layout_desc_registry=SimpleNamespace(unregister=lambda *args: None),
     )
     module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
         cast(Any, server_context)
@@ -280,6 +285,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
         transfer_object_group=lambda *args, **kwargs: None,
+        close=lambda: None,
     )
     entry = lmcache_driven_transfer.ContextEntry(
         cache_context=cast(Any, cache_context),
@@ -288,17 +294,33 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         chunk_size=256,
         event_backend=cast(Any, backend),
     )
-    monkeypatch.setattr(
-        module,
-        "get_and_touch_context_entry",
-        lambda instance_id: entry,
-    )
+    # Registered directly: register_kv_cache needs real IPC handles.
+    module._cache_contexts[1] = entry
     key = SimpleNamespace(
         request_id="request",
         cache_salt="",
         worker_id=0,
         has_unfull_chunk=lambda chunk_size: False,
     )
+
+    return SimpleNamespace(
+        module=module,
+        entry=entry,
+        key=key,
+        callbacks=callbacks,
+        held=held,
+        released=released,
+    )
+
+
+def test_server_store_and_retrieve_delegate_event_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Server imports, waits, records, and exports through the event backend."""
+    backend = _FakeEventBackend()
+    server = _server_handle_path(monkeypatch, backend)
+    module, key = server.module, server.key
+    callbacks, held, released = server.callbacks, server.held, server.released
 
     assert module.store(key, 1, [[]], b"store-producer") == (
         b"completion-handle",
@@ -332,6 +354,61 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             assert backend.calls[index - 1][0] == "record"
 
 
+class _AbandonedFenceBackend(_FakeEventBackend):
+    """A host-ready backend whose producer fence never completes; the first
+    poll runs ``on_first_query`` (e.g. the reaper dropping the engine)."""
+
+    host_ready_before_imported_wait = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_first_query = lambda: None
+
+    def query_event(self, event: object) -> bool:
+        self.calls.append(("query", event))
+        if sum(call[0] == "query" for call in self.calls) == 1:
+            self.on_first_query()
+        return False
+
+
+def test_server_fails_transfers_whose_engine_is_reaped_mid_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fence whose engine is reaped while the server polls it fails that
+    STORE / RETRIEVE instead of holding the worker: no stream wait, no import
+    held, a completion event still recorded, and the retrieve still releases
+    the read locks of its range."""
+    backend = _AbandonedFenceBackend()
+    server = _server_handle_path(monkeypatch, backend)
+    module, key = server.module, server.key
+    # One chunk, so the retrieve has read locks to release.
+    module.context.resolve_obj_keys = lambda key, group_ids: [["chunk-0"]]
+
+    def reap() -> None:
+        assert module.reap_stale_instances(-1.0, -1.0) == [1]
+
+    backend.on_first_query = reap
+    assert module.store_with_chunk_mask(key, 1, [[5]], b"store-producer") == (
+        b"completion-handle",
+        False,
+        [],
+    )
+    assert [call[0] for call in backend.calls[-2:]] == ["record", "export"]
+
+    module._cache_contexts[1] = server.entry
+    backend.calls.clear()
+    backend.on_first_query = reap
+    assert module.retrieve(key, 1, [[5]], b"retrieve-producer") == (
+        b"completion-handle",
+        False,
+    )
+    assert [call[0] for call in backend.calls[-2:]] == ["record", "export"]
+
+    assert not any(call[0] == "wait" for call in backend.calls)
+    assert server.held == []
+    assert [kind for kind, _ in server.callbacks] == ["finish_read_by_owner"]
+
+
 def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
     """The scoped multiprocess modules remain backend-neutral."""
     # First Party
@@ -343,3 +420,33 @@ def test_handle_path_has_no_musa_specific_imports_or_branches() -> None:
         source = inspect.getsource(module)
         assert "lmcache.v1.platform.devices.musa" not in source
         assert 'device.type == "musa"' not in source
+
+
+def test_server_waits_on_imported_engine_events_poll_on_the_host() -> None:
+    """Every server-side stream wait on an event imported from an engine goes
+    through ``wait_producer_event``, so a host-ready backend (ROCm) never
+    queues a GPU wait on a pending fence. The CacheBlend retrieve cannot run in
+    a unit test, so this checks the call sites in the source."""
+    # First Party
+    from lmcache.v1.multiprocess.modules import lmcache_driven_transfer
+    from lmcache.v1.multiprocess.modules.blend import retrieve
+    from lmcache.v1.multiprocess.plugin_modules import qstore
+
+    routed = {}
+    for module in (lmcache_driven_transfer, retrieve, qstore):
+        calls = [
+            node.func
+            for node in ast.walk(ast.parse(inspect.getsource(module)))
+            if isinstance(node, ast.Call)
+        ]
+        assert not [
+            func
+            for func in calls
+            if isinstance(func, ast.Attribute) and func.attr == "wait_event"
+        ], module.__name__
+        routed[module.__name__.rsplit(".", 1)[-1]] = sum(
+            isinstance(func, ast.Name) and func.id == "wait_producer_event"
+            for func in calls
+        )
+    # STORE + RETRIEVE, the CacheBlend retrieve, STORE_Q + the SDK ring wait.
+    assert routed == {"lmcache_driven_transfer": 2, "retrieve": 1, "qstore": 2}

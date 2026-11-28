@@ -46,6 +46,7 @@ from lmcache.v1.multiprocess.modules.blend.rope import (
 from lmcache.v1.multiprocess.native_completion import submit_callback_to_stream
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.event_ipc import wait_producer_event
 
 logger = init_logger(__name__)
 
@@ -908,15 +909,27 @@ class RetrieveMixin:
             vllm_event = event_backend.import_event(
                 event_ipc_handle, gpu_context.device
             )
-            event_backend.wait_event(vllm_event, retrieve_stream)
 
-            # Stage marks for the scatter_ms log line (CPU enqueue wall time):
-            # fetch = prefetched read, plan = table build, exec = native enqueue.
+            # Stage marks for the scatter_ms log line (CPU wall time): wait =
+            # host wait for the producer fence, fetch = prefetched read, plan =
+            # table build, exec = native enqueue.
             _stage_ms: dict[str, float] = {}
             _stage_t = time.perf_counter()
             # cb.scatter opens mid-try; track it so a failure closes the span.
             scatter_open = False
             try:
+                # Inside the try: a fence given up on (ProducerEventWaitError)
+                # fails the retrieve through the epilogue below.
+                wait_producer_event(
+                    event_backend,
+                    vllm_event,
+                    retrieve_stream,
+                    is_alive=lambda: self._transfer_module.is_current_entry(
+                        instance_id, entry
+                    ),
+                )
+                _stage_ms["wait"] = (time.perf_counter() - _stage_t) * 1000
+                _stage_t = time.perf_counter()
                 # Repeated chunks share keys: read each once, expand per match.
                 unique_keys = list(dict.fromkeys(all_obj_keys))
                 with self._ctx.storage_manager.read_prefetched_results(

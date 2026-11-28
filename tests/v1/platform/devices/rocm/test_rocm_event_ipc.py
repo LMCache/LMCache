@@ -7,6 +7,7 @@ import pytest
 # First Party
 from lmcache.v1.platform.base.event_ipc import (
     DefaultEventIPCBackend,
+    ProducerEventWaitError,
     wait_producer_event,
 )
 from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
@@ -89,11 +90,18 @@ def test_rocm_backend_completed_event_is_not_delayed() -> None:
 def test_default_backend_queues_the_wait_without_polling() -> None:
     backend = DefaultEventIPCBackend(event_module=_EventModule, device_type="cuda")
     event = _Event(pending=5)
-    wait_producer_event(backend, event, "stream", pause=pytest.fail)
+    wait_producer_event(
+        backend,
+        event,
+        "stream",
+        is_alive=lambda: pytest.fail("is_alive consulted"),
+        timeout_s=0.0,
+        pause=pytest.fail,
+    )
     assert event.log == [("wait", "stream")]
 
 
-def test_poll_slows_down_and_warns_without_giving_up(monkeypatch) -> None:
+def test_poll_slows_down_and_warns_before_the_deadline(monkeypatch) -> None:
     warnings: list[str] = []
     monkeypatch.setattr(
         event_ipc.logger, "warning", lambda msg, *args: warnings.append(msg % args)
@@ -108,6 +116,51 @@ def test_poll_slows_down_and_warns_without_giving_up(monkeypatch) -> None:
     assert clock.pauses[-1] == pytest.approx(0.002)
     assert clock.now > 10.0
     assert len(warnings) == 1 and "not complete after 10 s" in warnings[0]
+
+
+def test_poll_gives_up_at_the_deadline_without_queueing_the_wait() -> None:
+    backend = RocmEventIPCBackend(event_module=_EventModule)
+    event = _Event(pending=10**9)
+    clock = _Clock()
+    with pytest.raises(ProducerEventWaitError, match="limit 30 s"):
+        wait_producer_event(
+            backend, event, "stream", timeout_s=30.0, clock=clock, pause=clock.pause
+        )
+    assert ("wait", "stream") not in event.log
+    assert 30.0 <= clock.now < 30.01
+
+
+def test_poll_gives_up_when_the_engine_is_gone() -> None:
+    backend = RocmEventIPCBackend(event_module=_EventModule)
+    event = _Event(pending=10**9)
+    clock = _Clock()
+    with pytest.raises(ProducerEventWaitError, match="no longer registered"):
+        wait_producer_event(
+            backend,
+            event,
+            "stream",
+            is_alive=lambda: clock.now < 1.0,
+            clock=clock,
+            pause=clock.pause,
+        )
+    assert ("wait", "stream") not in event.log
+    assert 1.0 <= clock.now < 1.01
+
+
+def test_engine_liveness_is_not_checked_while_the_poll_is_fast() -> None:
+    """A fence that completes within the fast polls never consults is_alive."""
+    backend = RocmEventIPCBackend(event_module=_EventModule)
+    event = _Event(pending=3)
+    clock = _Clock()
+    wait_producer_event(
+        backend,
+        event,
+        "stream",
+        is_alive=lambda: pytest.fail("is_alive consulted"),
+        clock=clock,
+        pause=clock.pause,
+    )
+    assert event.log[-1] == ("wait", "stream")
 
 
 def test_poll_propagates_query_errors() -> None:

@@ -51,7 +51,11 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.request_handler import HandlerType, request_handler
-from lmcache.v1.platform.base.event_ipc import get_event_ipc_backend
+from lmcache.v1.platform.base.event_ipc import (
+    ProducerEventWaitError,
+    get_event_ipc_backend,
+    wait_producer_event,
+)
 from lmcache.v1.platform.base.ipc_wrapper import KVCache
 from lmcache.v1.platform.cache_context import create_cache_context
 from lmcache.v1.transport.qstore import QRingInfo
@@ -269,6 +273,22 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             if entry is not None:
                 entry.last_seen = now
             return entry
+
+    def is_current_entry(self, instance_id: int, entry: ContextEntry) -> bool:
+        """Return whether ``entry`` is still the Q ring of ``instance_id``.
+
+        False once the instance was unregistered or reaped. Does not refresh
+        the last-seen time.
+
+        Args:
+            instance_id: The worker instance ID.
+            entry: The entry a request looked up for ``instance_id``.
+
+        Returns:
+            True if ``entry`` is the instance's current Q ring registration.
+        """
+        with self._lock:
+            return self._q_contexts.get(instance_id) is entry
 
     def context_entries_snapshot(self) -> dict[int, ContextEntry]:
         """Return a shallow copy of the registry for iteration or status.
@@ -696,7 +716,22 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             vllm_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
-            event_backend.wait_event(vllm_event, cache_context.stream)
+            try:
+                wait_producer_event(
+                    event_backend,
+                    vllm_event,
+                    cache_context.stream,
+                    is_alive=lambda: self.is_current_entry(instance_id, entry),
+                )
+            except ProducerEventWaitError:
+                # Nothing was reserved or copied: fail the store, commit nothing.
+                logger.exception(
+                    "Failing STORE_Q for request_id=%s, instance ID %d",
+                    key.request_id,
+                    instance_id,
+                )
+                event_backend.record_event(event, cache_context.stream)
+                return event_backend.export_event(event, cache_context.device), False
 
             # CPU-synchronous sentinel: a GPU store is about to be enqueued.
             # Must be published via publish() (not publish_on_stream) so the
@@ -1100,6 +1135,11 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         object bytes it wrote for a store, the previous batch's reads for a
         retrieve. The server's copies, queued after this wait, then neither
         read unwritten pieces nor overwrite unread ones.
+
+        Raises:
+            ProducerEventWaitError: The SDK's event was given up on (its ring
+                is no longer registered, or the deadline passed); no wait was
+                queued, so the caller must not touch the pieces.
         """
         cache_context = ring.cache_context
         event_backend = ring.event_backend
@@ -1107,7 +1147,12 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
         producer_event = event_backend.import_event(
             event_ipc_handle, cache_context.device
         )
-        event_backend.wait_event(producer_event, cache_context.stream)
+        wait_producer_event(
+            event_backend,
+            producer_event,
+            cache_context.stream,
+            is_alive=lambda: self.is_current_entry(instance_id, ring),
+        )
         kv = (
             self._kv_module.get_and_touch_context_entry(instance_id)
             if self._kv_module is not None
@@ -1181,8 +1226,10 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             torch_dev.stream(cache_context.stream),
         ):
             event = event_backend.create_event(cache_context.device)
-            self._wait_for_sdk_gpu_copy(ring, instance_id, event_ipc_handle)
             try:
+                # Inside the try: a wait given up on fails the retrieve, and the
+                # finally still releases the read locks.
+                self._wait_for_sdk_gpu_copy(ring, instance_id, event_ipc_handle)
                 cursor = 0
                 for group in plan:
                     found, objs = storage_manager.unsafe_read(
@@ -1273,8 +1320,10 @@ class QStoreModule(DiscoverableModule, InstanceLivenessTarget):
             torch_dev.stream(cache_context.stream),
         ):
             event = event_backend.create_event(cache_context.device)
-            self._wait_for_sdk_gpu_copy(ring, instance_id, event_ipc_handle)
             try:
+                # Inside the try: a wait given up on fails the store before
+                # anything is reserved.
+                self._wait_for_sdk_gpu_copy(ring, instance_id, event_ipc_handle)
                 cursor = 0
                 for group in plan:
                     layout_desc = get_layout_desc(
