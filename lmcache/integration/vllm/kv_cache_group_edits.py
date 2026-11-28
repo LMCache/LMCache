@@ -39,8 +39,9 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, TypeAlias
+import math
 
 # Third Party
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheSpecKind
@@ -366,13 +367,23 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
     Some hybrid backends (e.g., vLLM-Ascend <= v0.29) register conv and SSM
     as separate contiguous slices carved from a shared pool. Each slice's
     per-block stride is its own byte size, not the padded page, so
-    :class:`_MambaPageViewEdit` does not apply. The transfer path expects
-    one uint8 plane per slice, ``[num_blocks, block_size, 1, width]`` with
-    ``width = nbytes_per_block // block_size``. ``matches`` and ``apply``
-    require each state to be a dense contiguous slice with the same
-    ``num_blocks`` and require ``spec.block_size`` (scheduler block size) to
-    divide that per-block byte count; otherwise ``width`` is not integral and
-    the edit does not match (``apply`` raises if forced).
+    :class:`_MambaPageViewEdit` does not apply. The view is one uint8 plane
+    per slice, ``[num_blocks, num_slots, 1, width]``
+    (format 17, ``NL_X_NP_X_NB_BS_ONE_HS``). ``num_slots`` is
+    ``gcd(block_size, *payloads)``, which equals ``spec.block_size`` when
+    every payload divides it and otherwise compresses slots (e.g. Qwen4 PLE
+    under block sizes 896 and 1664, or an indivisible conv/SSM pair) so each
+    row is a fraction of the payload. A per-row size limit belongs to the
+    transfer kernel. On Ascend, for example, one ``slots_per_block == 1`` row
+    exceeds the 128 KiB unified-buffer floor for 184320-byte PLE and physical
+    UB for 384 KiB--2 MiB SSM slices. Currently this class and format 17 are
+    used only on Ascend; the view itself is vendor-neutral, so another backend
+    can use it. Like :meth:`_MambaUnifiedViewEdit._compressed_slots`, slot
+    compression is lossless because recurrent-state blocks are always
+    transferred whole (both full chunks and unfull-chunk boundary-state
+    blocks). A coprime block (``gcd <= 1`` while ``block_size > 1``) does not
+    match. A packed page, whose conv stride equals ``page_size_bytes``,
+    remains owned by :class:`_MambaPageViewEdit`.
     """
 
     name = "mamba-slice-planes"
@@ -386,25 +397,52 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
         return int(state.numel()) * int(state.element_size()) // num_blocks
 
     @staticmethod
-    def _uint8_plane(state: torch.Tensor, block_size: int) -> torch.Tensor:
-        """Re-view one state slice as one uint8 plane."""
+    def _resolve_plane_slots(
+        block_size: int, states: Sequence[torch.Tensor]
+    ) -> int | None:
+        """Return the uint8-plane slot count, or ``None`` when none is legal.
+
+        Each state must be one non-empty contiguous slice. ``num_slots`` is
+        ``gcd(block_size, *payloads)`` (``block_size`` when every payload is
+        a multiple of it), which divides ``block_size`` so downstream slot
+        compression (``tokens_per_block % slots_per_block == 0``) stays valid
+        while splitting each block into narrower rows. ``None`` rejects a
+        slice that is not one contiguous block, an empty input, or a coprime
+        block. The transfer kernel enforces row alignment and its own per-row
+        budget (on Ascend, the unified-buffer floor).
+        """
+        if block_size <= 0 or not states:
+            return None
+        payloads: list[int] = []
+        for state in states:
+            nbytes = _MambaSlicePlaneEdit._dense_block_bytes(state)
+            if nbytes is None:
+                return None
+            payloads.append(nbytes)
+        num_slots = math.gcd(block_size, *payloads)
+        if block_size > 1 and num_slots <= 1:
+            return None
+        return num_slots
+
+    @staticmethod
+    def _uint8_plane(state: torch.Tensor, num_slots: int) -> torch.Tensor:
+        """Re-view one contiguous state slice as one uint8 plane."""
         nbytes = _MambaSlicePlaneEdit._dense_block_bytes(state)
         if nbytes is None:
             raise ValueError(
                 "Mamba state must be a non-empty contiguous slice, "
                 f"got shape {tuple(state.shape)} stride {tuple(state.stride())}"
             )
-        if nbytes % block_size != 0:
+        if num_slots <= 0 or nbytes % num_slots != 0:
             raise ValueError(
-                f"scheduler block size {block_size} does not divide the "
-                f"{nbytes}-byte state block"
+                f"slot count {num_slots} does not divide the {nbytes}-byte state block"
             )
-        width = nbytes // block_size
+        width = nbytes // num_slots
         num_blocks = int(state.shape[0])
         raw = state.view(torch.uint8)
         base = int(raw.storage_offset())
         return raw.as_strided(
-            (num_blocks, block_size, 1, width),
+            (num_blocks, num_slots, 1, width),
             (nbytes, width, width, 1),
             storage_offset=base,
         )
@@ -423,15 +461,11 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
         ):
             return False
         block_size = int(spec.block_size)
-        if block_size <= 0:
-            return False
-        block_counts: set[int] = set()
-        for state in kv_cache:
-            nbytes = self._dense_block_bytes(state)
-            if nbytes is None or nbytes % block_size != 0:
-                return False
-            block_counts.add(int(state.shape[0]))
-        if len(block_counts) != 1:
+        block_counts = {int(state.shape[0]) for state in kv_cache}
+        if (
+            len(block_counts) != 1
+            or self._resolve_plane_slots(block_size, kv_cache) is None
+        ):
             return False
         stride_bytes = kv_cache[0].stride(0) * kv_cache[0].element_size()
         return stride_bytes != spec.page_size_bytes
@@ -452,8 +486,13 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
             raise ValueError(
                 f"Mamba states cover different block counts {sorted(num_blocks)}"
             )
-        block_size = int(spec.block_size)
-        return [self._uint8_plane(state, block_size) for state in kv_cache]
+        num_slots = self._resolve_plane_slots(int(spec.block_size), kv_cache)
+        if num_slots is None:
+            raise ValueError(
+                f"scheduler block size {spec.block_size} does not tile the "
+                "Mamba state blocks at a legal slot count"
+            )
+        return [self._uint8_plane(state, num_slots) for state in kv_cache]
 
 
 class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
@@ -776,7 +815,9 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
     1152-token block). The target is ``spec.num_states``
     (``block_size / tokens_per_state``), so declared slot compression is
     preserved and the server still derives it from
-    ``tokens_per_block / slots_per_block``.
+    ``tokens_per_block / slots_per_block``. Kernel pages must tile the
+    unpadded logical page (``real_page_size_bytes``), which equals
+    ``page_size_bytes`` unless the spec sets ``page_size_padded``.
     """
 
     name = "subpaged-mla-attention-view"
@@ -835,10 +876,16 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
                 f"the logical/kernel page ratio {ratio}"
             )
         kernel_page_bytes = kv_cache.shape[1:].numel() * kv_cache.element_size()
-        if kernel_page_bytes * ratio != spec.page_size_bytes:
+        # Tile the unpadded logical page. On NVIDIA/AMD/XPU, page_size_padded
+        # is unset whenever a kernel-split contiguous MLA tensor is registered,
+        # so this equals spec.page_size_bytes. vLLM-Ascend QSA compressed
+        # pages set page_size_padded to the Mamba page while the tensor itself
+        # stays dense at real_page_size_bytes.
+        page_size_bytes = _unpadded_attention_page_bytes(spec)
+        if kernel_page_bytes * ratio != page_size_bytes:
             raise ValueError(
                 f"{ratio} kernel pages ({kernel_page_bytes * ratio} bytes) do "
-                f"not tile the logical page ({spec.page_size_bytes} bytes)"
+                f"not tile the logical page ({page_size_bytes} bytes)"
             )
         if not kv_cache.is_contiguous():
             raise ValueError(
@@ -867,8 +914,10 @@ def _unpadded_attention_page_bytes(spec: KVCacheSpec) -> int:
 
     ``page_size_bytes`` may be larger: vLLM-Ascend hybrid models set
     ``page_size_padded`` to the Mamba page, which adds conv state the
-    contiguous K/V views do not contain. Only the contiguous-plane rule uses
-    this. The interleaved rule tiles the padded ``page_size_bytes`` span.
+    contiguous K/V views do not contain. The contiguous-plane rule and the
+    sub-paged MLA rule tile this unpadded size. The interleaved rule tiles
+    the padded ``page_size_bytes`` span. When ``page_size_padded`` is unset,
+    ``real_page_size_bytes`` equals ``page_size_bytes``.
     """
     real_page_size_bytes = getattr(spec, "real_page_size_bytes", None)
     if isinstance(real_page_size_bytes, int):
