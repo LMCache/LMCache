@@ -23,6 +23,7 @@ what it accelerates and inherits the torch baseline for everything else.
 |---------|-----------|----------|
 | Compiled CUDA ops | `PYBIND11_MODULE(cuda_ops)` — CUDA/HIP native kernels loaded only by `CudaDeviceOps` | `csrc/cuda/pybind.cpp` |
 | Compiled SYCL ops | `PYBIND11_MODULE(xpu_ops)` — 12 ops + 2 enums (+`GPUKVFormat`); **24 ops fall back to torch** | `csrc/sycl/pybind_sycl.cpp` |
+| Compiled Ascend ops | `PYBIND11_MODULE(npu_ops)` — MP block-transfer host layer, stream recorders and pinned allocation, loaded only by `NpuDeviceOps`; takes the plan types `lmcache_native` registers instead of defining copies | `csrc/ascend/pybind.cpp` |
 | Torch/CPU reference | `torch_ops.py` — 36 ops (migrated from former `python_ops_fallback.py`) | `lmcache/v1/platform/torch_ops.py` |
 | Shared types | `lmcache_native` owns `TransferDirection`, `EngineKVFormat`, `PageBufferShapeDesc`, `StagingCopy`, `LaunchVar`, `BatchStep`, `KernelGroupSpec`; `ops_types.py` re-exports them and adds `set_shape_desc_dtype` fallback glue | `csrc/lmcache_native/pybind.cpp`, `lmcache/v1/common/ops_types.py` |
 | MUSA ops | Python override: 1 native op, rest inherited | `lmcache/v1/platform/devices/musa/device_ops.py` |
@@ -188,7 +189,7 @@ classDiagram
     class CudaDeviceOps { "cuda"; +tensor_from_ptr(); bind_native(cuda_ops) }
     class XpuDeviceOps { "xpu"; bind_native(xpu_ops): 12 SYCL + 24 torch }
     class MusaDeviceOps { "musa"; +tensor_from_ptr(); transfer overrides }
-    class NpuDeviceOps { "npu"; +tensor_from_ptr(); sync-recorder; memcpy }
+    class NpuDeviceOps { "npu"; +tensor_from_ptr(); bind_native(npu_ops) }
     class HpuDeviceOps { "hpu"; pure inherit }
 ```
 
@@ -289,6 +290,38 @@ class HpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "hpu"
     # All 36 inherited from the torch baseline.
 ```
+
+### 4.6 Ascend NPU — bind the in-tree MP module after the plugin hook
+
+```python
+# platform/devices/npu/device_ops.py
+class NpuDeviceOps(DeviceOps):
+    device_type: ClassVar[str] = "npu"
+
+    def ensure_native(self) -> None:
+        if self._native_bound:
+            return
+        self._native_bound = True
+        try:
+            import lmcache_ascend  # noqa: F401  (activation hook, patches only)
+        except ModuleNotFoundError as exc:
+            if exc.name != "lmcache_ascend":
+                raise
+        try:
+            import lmcache.npu_ops as native
+        except ImportError as exc:
+            raise ImportError("NPU MP ops require the in-tree lmcache.npu_ops ...") from exc
+        self.bind_native(native)   # recorders, memcpy, pinned alloc, block transfer
+```
+
+> A missing extension is fatal, unlike CUDA and XPU: the torch baseline
+> reconstructs pointer-mode staging buffers as CPU tensors and would transfer
+> in the wrong address space. Until the module is bound, the class overrides
+> `record_completion_on_stream` and `record_event_on_stream` to synchronize
+> the stream first, because torch_npu exposes no host callback; the native
+> module supplies `aclrtLaunchHostFunc`-based recorders. The out-of-tree
+> `lmcache_ascend` plugin is imported first only as an activation hook for
+> hardware-specific patches: absent is skipped, installed-but-broken raises.
 
 ---
 
@@ -416,6 +449,13 @@ lmcache/v1/platform/
   hpu/
     __init__.py               # HpuDeviceSpec.ops_cls -> HpuDeviceOps
     device_ops.py             # HpuDeviceOps (inherits baseline)
+  npu/
+    __init__.py               # NpuDeviceSpec.ops_cls -> NpuDeviceOps
+    device_ops.py             # NpuDeviceOps + bind_native(lmcache.npu_ops)
+    cache_context.py          # device pointer tables, staging buffers, transfer stream
+    ipc_wrapper.py            # per-layer KV IPC wrapper over torch_npu storage IPC
+    event_ipc.py              # CUDA-style event ABI adapter
+    pin_memory.py             # host-memory pinning via CANN acl
 ```
 
 ---
@@ -449,6 +489,17 @@ accelerator owns a dedicated subdirectory. CUDA sources live in `csrc/cuda/`
 and build as the private `lmcache.cuda_ops` extension. Device-agnostic callers
 use the resolved `lmcache.device_ops` object instead of a compiled module name.
 
+Ascend keeps the same layout with `csrc/ascend/`, but only the MP core lives
+there: the block-transfer host layer, the stream recorders, pinned allocation
+and the Ascend C block-transfer kernel (its contract is
+`csrc/ascend/kernels/kernels/multi_layer/block_transfer_contract.md`). The
+in-process kernels and the HCCL/HIXL transfer channels stay in the
+LMCache-Ascend plugin. `lmcache.npu_ops` registers no plan type of its own
+beyond the staged-plan structs (`StagingCopy`, `LaunchVar`, `BatchStep`); it
+takes `PageBufferShapeDesc`, `KernelGroupSpec` and the format enums from the
+registry of `lmcache_native`, which is why it is compiled against torch's
+bundled pybind11 rather than a separately installed one.
+
 ---
 
 ## 8. Build System
@@ -458,6 +509,15 @@ setuptools auto-discovers `BuildProfile`s in
 `csrc/cuda/` into `lmcache.cuda_ops`; the ROCm profile hipifies that same
 directory and emits the same module name. Other devices keep their own native
 module names and directories.
+
+The Ascend C kernels and the CANN host toolchain do not fit the
+setuptools/torch `Extension` flow, so `ascend.py` drives an out-of-line CMake
+project for `lmcache.npu_ops` and `libcache_kernels.so` and leaves the common
+C++ extensions on torch's `BuildExtension`. The profile is auto-detected from
+the CANN toolkit directory, an installed `torch_npu`, and a device signal —
+a board reported by `npu-smi`, else `SOC_VERSION`, else an available
+`torch.npu` — because installing LMCache on Ascend runs with
+`TORCH_DEVICE_BACKEND_AUTOLOAD=0`, where `torch.npu` does not exist.
 
 ---
 
@@ -470,5 +530,6 @@ module names and directories.
 | HIP/ROCm | handled by `CudaDeviceOps` | same; ROCm builds `cuda_ops` via hipify | `csrc/cuda/` | N/A |
 | XPU | `XpuDeviceOps` | 12 via `bind_native(xpu_ops)` + 24 torch | existing SYCL | **low** |
 | MUSA | `MusaDeviceOps` | pointer tensors + transfer overrides | none | **low** |
+| NPU | `NpuDeviceOps` | pointer tensors + MP ops via `bind_native(npu_ops)` | `csrc/ascend/` (CMake, CANN) | in-tree |
 | HPU | `HpuDeviceOps` | none (inherits baseline) | none | **trivial** |
 | Neuron | `NeuronDeviceOps` | none (inherits baseline) | none | **trivial** |

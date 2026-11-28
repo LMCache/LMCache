@@ -202,14 +202,19 @@ class NpuDeviceOps(DeviceOps):
     ) -> None:
         """Copy ``nbytes`` between an NPU device pointer and host memory.
 
+        Torch-baseline override, in effect until :meth:`ensure_native` binds
+        ``lmcache.npu_ops``, whose ``lmcache_memcpy_async`` replaces it and,
+        like the CUDA op, splits pointer-mode copies at the
+        ``host_buffer_alignments`` boundaries around ``host_buffer_offset``.
+
         Tensor operands delegate to the torch baseline (``copy_``-based).
         Pointer mode must not: the baseline drives ``cudaMemcpy`` through
         libcudart, which cannot address NPU memory and crashes the process.
         Instead build zero-copy views over both pointers and issue one
         stream-ordered ``copy_`` on the current stream. The CUDA-specific
         ``host_buffer_offset`` / ``host_buffer_alignments`` chunking
-        parameters are ignored: a single ``copy_`` needs no boundary
-        splitting.
+        parameters are unused by this override: a single ``copy_`` needs no
+        boundary splitting.
 
         Args:
             dest: Destination address or tensor. Host for D2H, device for
@@ -217,10 +222,10 @@ class NpuDeviceOps(DeviceOps):
             src: Source address or tensor. Device for D2H, host for H2D.
             nbytes: Number of bytes to copy.
             direction: H2D or D2H; selects which side is host memory.
-            host_buffer_offset: Unused in pointer mode (CUDA chunking
-                parameter).
-            host_buffer_alignments: Unused in pointer mode (CUDA chunking
-                parameter).
+            host_buffer_offset: Host-side offset of the copy inside the
+                lmcache allocator; read by the native op only.
+            host_buffer_alignments: Pin-chunk size the native op splits a
+                copy at; read by the native op only.
 
         Raises:
             ValueError: If ``nbytes`` is not positive or the direction is
