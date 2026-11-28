@@ -7,7 +7,7 @@ PyO3. It is used by both:
 - the MP `raw_block` L2 adapter (`RawBlockL2Adapter`) via `RawBlockCore`
 
 The Rust crate intentionally stays narrow: it owns the raw device handle and
-exposes blocking `pwrite_from_buffer` / `pread_into` primitives. Slotting,
+exposes blocking `pwrite_from_buffer` / `pread_into` primitives. Space allocation,
 checkpointing, recovery, and MP task orchestration all live in Python.
 
 ## I/O Engines
@@ -66,7 +66,7 @@ StoreController / PrefetchController
 
 This split lets LMCache reuse the same on-device metadata and recovery model in
 both non-MP and MP mode without duplicating the raw-block implementation. During
-restart recovery, the shared `RawBlockCore` validates POSIX per-slot headers with
+restart recovery, the shared `RawBlockCore` validates POSIX per-object headers with
 an internal pool of 8 reader threads. Both regular `io_uring` and `io_uring_cmd`
 batch header reads up to `iouring_queue_depth`.
 
@@ -191,7 +191,6 @@ lmcache server --transport grpc --host 127.0.0.1 --port 5555 \
   --l2-adapter '{
     "type": "raw_block",
     "device_path": "/dev/nvme0n1",
-    "slot_bytes": 1048576,
     "block_align": 4096,
     "header_bytes": 4096,
     "meta_total_bytes": 268435456,
@@ -212,11 +211,11 @@ Notes:
   file used only by LMCache.
 - For `use_uring_cmd=true`, `device_path` must use the NVMe character
   device node (e.g., `/dev/ng0n1`) instead of the block device node.
-- `block_align` must be a power of two. `slot_bytes`, `header_bytes`, and
+- `block_align` must be a power of two. `header_bytes` and
   `meta_total_bytes` must be multiples of `block_align`.
 - With `use_odirect=true`, LMCache MP L1 alignment must be at least
   `block_align`.
 - Restart recovery uses the metadata checkpoint region on the same device.
-- Raw-block slot reclamation is driven by the shared/global L2 eviction
+- Raw-block space reclamation is driven by the shared/global L2 eviction
   controller or explicit `delete()` calls.
 - `raw_block` remains the adapter type for all supported engines.

@@ -630,7 +630,6 @@ class TestRawBlockWorkerFailure:
 
         raw_config = RawBlockL2AdapterConfig(
             device_path="/unused/raw-block",
-            slot_bytes=1024 * 1024,
             use_odirect=False,
             io_engine="io_uring",
             num_store_workers=1,
@@ -643,7 +642,7 @@ class TestRawBlockWorkerFailure:
         ) as core_cls:
             core = core_cls.return_value
             core.report_status.return_value = {"usable_capacity_bytes": 1024 * 1024}
-            core.snapshot_indexed_keys.return_value = []
+            core.snapshot_indexed_allocations.return_value = []
             core.raise_if_failed.side_effect = reject_failed_worker
             core.exists_many.side_effect = lookup_keys
             core.unlock_many.side_effect = locked_keys.difference_update

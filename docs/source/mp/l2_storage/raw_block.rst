@@ -1,10 +1,13 @@
 Raw Block (Rust)
 ================
 
-A built-in L2 adapter that stores KV objects in fixed-size slots on a raw block
-device or pre-sized file using the Rust raw-device I/O bindings. It reuses the
-existing raw-block metadata checkpoint model and writes directly into the
-caller-provided load buffers during prefetch.
+A built-in L2 adapter that stores KV objects on a raw block device or
+pre-sized file using the Rust raw-device I/O bindings. Each object gets exactly
+the space it needs (a header plus its payload rounded up to ``block_align``),
+so one device serves objects of any size: several models, chunk sizes, hybrid
+layer groups, unfull chunks and serialized payloads, without sizing anything
+at startup. It reuses the existing raw-block metadata checkpoint model and
+writes directly into the caller-provided load buffers during prefetch.
 
 **Installation:** the Rust bindings ship as a separate wheel,
 ``lmcache-rust-raw-block-io``, released at the same version as ``lmcache``.
@@ -20,7 +23,6 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 **Required fields:**
 
 - ``device_path``: Raw device path or pre-sized file path.
-- ``slot_bytes``: Fixed slot size in bytes. Must be aligned to ``block_align``.
 
 **Optional fields:**
 
@@ -29,7 +31,9 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - ``use_odirect``: ``true`` or ``false`` (default ``true``).
 - ``block_align``: Device alignment in bytes (default ``4096``). Must be a
   power of two.
-- ``header_bytes``: Per-slot header reservation (default ``4096``).
+- ``header_bytes``: Per-object header reservation (default ``4096``).
+- ``slot_bytes``: Deprecated and ignored (a warning is logged). Earlier
+  versions stored every object in a slot of this size.
 - ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
   The region holds two checkpoint copies, and each copy must fit the whole
   index. A checkpoint larger than one copy is skipped, so newer entries are
@@ -41,10 +45,12 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
   controls carried over from the legacy raw-block backend. A periodic
   checkpoint waits for ``meta_idle_quiet_ms`` without I/O, but not for more
-  than one extra interval, so steady traffic cannot hold it off.
+  than one extra interval, so steady traffic cannot hold it off. With
+  ``meta_enable_periodic=false``, only a clean shutdown leaves a checkpoint
+  that covers the whole cache.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
-  in-memory index instead.
+  in-memory index instead; the old checkpoint is then voided at startup.
 - ``enable_zero_copy``: Try aligned direct-buffer I/O when possible. With
   ``io_engine="io_uring"``, also try to register eligible L1 memory as fixed
   buffers.
@@ -74,9 +80,10 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
   ``"cache_salt_rank"`` keeps that bucket isolation and further separates
   rank-local write streams within each bucket when identifiers are available.
   The default is ``"cache_salt_prefix"`` when ``fdp_enabled=true``.
-- ``fdp_slot_reuse_policy``: Free-slot reuse policy. ``"pid_affinity"``
-  prefers a free slot last assigned to the same FDP placement identifier before
-  falling back to any free slot. ``"none"`` disables affinity-based reuse. The
+- ``fdp_slot_reuse_policy``: Free-space reuse policy. ``"pid_affinity"``
+  prefers, among free extents of exactly the needed size, one last written
+  with the same FDP placement identifier, before falling back to the usual
+  best fit. ``"none"`` disables affinity-based reuse. The
   default is ``"pid_affinity"`` when ``fdp_enabled=true`` and ``"none"``
   otherwise.
 - ``meta_checkpoint_placement_id``: Optional non-zero placement identifier for
@@ -90,14 +97,15 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - ``raw_block`` is a server-owned MP adapter. It does **not** support
   per-TP device-path mappings in MP mode.
 - ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
-- ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
-  through ``RawBlockCore``. Slot reclamation is driven by the shared/global
-  L2 eviction controller or explicit ``delete()`` calls.
-- POSIX restart recovery validates slot headers with an internal pool of 8
+- ``raw_block`` owns on-device space allocation, checkpointing, and recovery
+  through ``RawBlockCore``. Space reclamation is driven by the shared/global
+  L2 eviction controller or explicit ``delete()`` calls. Usage counts each
+  object's allocated bytes (header and padded payload).
+- POSIX restart recovery validates object headers with an internal pool of 8
   reader threads. Both regular ``io_uring`` and ``io_uring_cmd`` batch header
   reads up to ``iouring_queue_depth``.
-- ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
-  of ``block_align``.
+- ``header_bytes`` and ``meta_total_bytes`` must be multiples of
+  ``block_align``, and ``header_bytes`` at least 32.
 - If ``use_odirect`` or ``use_uring_cmd`` is enabled, the server's
   ``--l1-align-bytes`` must be at least ``block_align``.
 - With ``O_DIRECT``, raw-block I/O rejects offsets and total I/O lengths that
@@ -155,13 +163,120 @@ the Rust wheel's version, so pin it yourself to guarantee a matching pair:
 - Bucket-to-placement assignments are process-local. Restart recovery does not
   need them for correctness because ``cache_salt`` is part of the object key,
   but first-seen FDP placement assignments may change after adapter restart.
-- Slot affinity is process-local and is not stored in metadata checkpoints.
-  After recovery, free slots have no recorded affinity until they are reused.
+- Reuse affinity is process-local and is not stored in metadata checkpoints.
+  After recovery, free space has no recorded affinity until it is reused.
 - Store and retrieve requests must use the same ``cache_salt`` to address the
   same object. This is the normal LMCache key identity rule; FDP placement is a
   write directive and is not used to locate data on reads.
 - Metadata checkpoint writes use ``meta_checkpoint_placement_id`` when
   configured, otherwise they use default NVMe placement with no directive.
+
+**Space allocation:**
+
+Free space is kept as maximal free extents. A store takes the head of the
+smallest free extent that fits (best fit), so an object the size of one that
+was just evicted reuses exactly that space. Freed space merges with adjacent
+free space immediately. A store fails when no single free extent is long
+enough, even if the free bytes add up; ``alloc_failure_count`` counts these
+failures. Eviction is unchanged: it starts at ``trigger_watermark``, so at the
+default 0.8 the free space left keeps such failures rare (at most 0.1 % in the
+simulations and end-to-end runs of the design doc). With a higher
+``trigger_watermark`` (above about 0.85) less free space is left, and the
+larger objects can keep failing below the watermark. Objects that cannot be evicted
+(locked keys, see ``locked_key_count``) spread across the device have the same
+effect. A rising ``alloc_failure_count`` with ``largest_free_extent_bytes``
+below the object size shows it.
+
+The core status (``/status``, under the adapter's ``core``) reports
+``usable_capacity_bytes``, ``allocated_bytes``, ``free_bytes``,
+``free_extent_count``, ``largest_free_extent_bytes``,
+``alloc_failure_count``,
+``header_invalidation_count``, ``header_invalidation_failure_count``,
+``quarantined_bytes`` and
+``quarantined_range_count``. The fixed-slot keys ``slot_bytes``,
+``max_slots``, ``next_slot``, ``free_slot_count`` and
+``quarantined_slot_count`` are gone.
+
+The first ``block_align`` bytes of the data region hold a format marker, not
+objects.
+
+**Space reuse and crash recovery:**
+
+After a crash, recovery loads the newest on-device checkpoint and, with
+``meta_verify_on_load`` (the default), drops every entry whose object header
+does not match: the header holds the key, the size and a random generation of
+the write that the checkpoint lists, so a header left by another write of the
+same key at the same place does not match either. Because objects have
+different sizes, a new object can start in the middle of a deleted one and
+overwrite its payload without touching its header. A delete therefore
+overwrites the object's header first and frees the space only after that write
+returns, so recovery drops the deleted entry instead of returning another
+object's bytes for it.
+
+This costs one ``header_bytes`` write per deleted object (4 KiB by default:
+0.4 % of the bytes a 1 MiB object took to store, 0.04 % for 10 MB), done by
+the delete call itself on the eviction controller's thread: batched with
+``io_engine="io_uring"``, spread over 8 threads with ``io_engine="posix"``.
+In our runs (8 keys per call, ramdisk, O_DIRECT) a delete took 5.8, 8.6,
+10.2 and 11.5 µs per object with io_uring and 9.7, 15.3, 19.9 and 23.7 µs
+with posix for 64 KiB, 1 MiB, 4 MiB and 16 MiB objects, against 0.6 to
+1.4 µs with fixed slots; with 2048 keys per call on an ext4 file on NVMe,
+4 to 6 µs with io_uring and 36 µs with posix. Stores took 0.2 to 3.5 % more
+with io_uring and 0.6 to 10 % more with posix at the same sizes (the most at
+64 KiB); loads moved within ±4 %. If that write fails, the space is retired like
+quarantined space (below) and counted in
+``header_invalidation_failure_count``; a restart frees it again, which is
+safe because the object's payload was never overwritten. At startup, an entry
+whose header cannot be read is retired too.
+
+- With ``meta_verify_on_load=false``, recovery trusts the checkpoint as is, so
+  space reused since it was written can return wrong bytes, as with the
+  fixed-slot layout. Deletes still zero headers, so a later run with
+  verification on is protected.
+- New checkpoints always supersede the copies of earlier runs. If no
+  checkpoint is loaded (``load_checkpoint_on_init=false``, it is rejected, or
+  it was written with another ``meta_magic`` or ``meta_version``), every
+  metadata container is voided at startup, before any store, also the
+  containers of a rejected checkpoint's own ``meta_total_bytes``; a failed
+  write there stops the adapter from starting, and so does a failed read of
+  the metadata region. Clear the metadata region before changing
+  ``meta_total_bytes``, ``block_align`` or ``header_bytes``: a checkpoint copy
+  this run cannot read stays on the device.
+- Retired space returns after a restart, which frees it as unused.
+- The checkpoint grows with the number of objects (about 250 bytes each with
+  vLLM MP keys in our runs); a checkpoint larger than half of
+  ``meta_total_bytes`` is not written, and a warning is logged. Size
+  ``meta_total_bytes`` for the expected object count, for example 128 MiB for
+  200,000 objects.
+- Writes are not flushed to the device. These guarantees cover process
+  crashes; after a power loss, a drive with a volatile write cache may keep
+  any subset of the recent writes.
+
+**Upgrading from fixed slots, and going back:**
+
+Checkpoints written by earlier fixed-slot versions are loaded: each object
+keeps only the space it needs and the rest of its slot becomes free. The
+object in slot 0 is dropped, because that space now holds the format marker.
+The checkpoint is then rewritten in the new format; if it no longer fits a
+metadata container (entries are about 26 bytes longer), the adapter starts
+empty instead.
+
+Older versions reject the new format and start empty. Clear the metadata
+region (the first ``meta_total_bytes`` of the device) before going back to an
+older version and before upgrading again after it; both lose the cache. For
+example, with the default ``meta_total_bytes`` of 256 MiB (check the device
+name, this destroys the cache on it):
+
+.. code-block:: bash
+
+    dd if=/dev/zero of=/dev/nvme0n1 bs=1M count=256 oflag=direct
+
+Without that, the format marker catches the common case: the older version
+writes its first object at the start of the data region, overwriting the
+marker, and this version then starts empty instead of trusting a checkpoint
+whose space the older run may have reused. It does not catch an older run
+that stopped before that first write reached the device while later writes
+did (one io_uring batch has no order, and posix runs several store workers).
 
 **Fixed-buffer registration and memlock:**
 
@@ -241,25 +356,25 @@ A bare ``127.0.0.1:5555`` also selects the default gRPC request transport.
 .. code-block:: bash
 
     # Basic raw_block with posix I/O
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
 
     # With io_uring
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
 
     # With io_uring_cmd (NVMe passthrough)
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
 
     # With FDP discovery and cache_salt prefix placement enabled
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "use_odirect": false}'
 
     # With FDP discovery and cache_salt/rank placement enabled
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "cache_salt_rank", "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "cache_salt_rank", "use_odirect": false}'
 
     # With FDP discovery only, keeping KV data writes on default NVMe placement
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "io_engine": "io_uring", "use_uring_cmd": true, "fdp_enabled": true, "fdp_data_placement_policy": "none", "use_odirect": false}'
 
     # With eviction
-    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 **Failure handling and shutdown:**
 
@@ -275,14 +390,14 @@ confirms an Unrecovered Read Error (UECC). The status mask ignores CRD,
 More and DNR. POSIX and ordinary ``io_uring`` surface Linux errors and
 retain per-request handling.
 
-Slot quarantine requires a matching raw-block wheel with typed completion
+Quarantine requires a matching raw-block wheel with typed completion
 errors. Older wheels report failed reads as per-request misses.
 
 On a confirmed UECC while loading a cached payload, the core quarantines
-the affected data slot until the handle closes. Lookup and load miss for
-the slot's key. The worker keeps serving other slots, including successful
-keys in the same load. A later store can cache the recomputed key in a
-different slot. Each quarantined slot reduces usable capacity by one slot.
+all of the object's space until the handle closes. Lookup and load miss for
+its key. The worker keeps serving other objects, including successful keys
+in the same load. A later store can cache the recomputed key elsewhere.
+Quarantined space reduces usable capacity by its size.
 
 For a full-attention prefix request for A, B and C, if B fails and no
 other tier supplies B, the serving caller gets only A. If A fails, the
@@ -290,12 +405,12 @@ prefix is empty. The prefetch controller applies this rule after combining
 the available tiers. A separate request can still use healthy C.
 
 The core logs the failed byte range and raw NVMe status. The adapter's core
-status exposes ``quarantined_slot_count``, ``last_payload_uecc`` and the
-remaining ``usable_capacity_bytes``. A payload UECC alone leaves the worker
+status exposes ``quarantined_range_count``, ``quarantined_bytes``,
+``last_payload_uecc`` and the remaining ``usable_capacity_bytes``. A payload UECC alone leaves the worker
 healthy. Checkpointing continues and records the remaining indexed keys.
 The quarantine set is local to the open handle. After restart the allocator
-can reuse the slot, and an unreadable range can trigger quarantine again.
-Checkpoint and slot-header recovery reads retain their per-request handling.
+can reuse the space, and an unreadable range can trigger quarantine again.
+Checkpoint and object-header recovery reads retain their per-request handling.
 
 After a known worker failure, new prefetch tasks report failure through their
 normal task results and new stores are skipped. The adapter still publishes
