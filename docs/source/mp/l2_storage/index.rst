@@ -34,6 +34,21 @@ Data Flow
 3. If found in L2, the data is loaded back into L1 and read-locked for the
    pending ``RETRIEVE`` RPC.
 
+L2 Load Failures
+----------------
+
+LMCache treats an L2 lookup or load failure as a cache miss. A failed chunk is
+not admitted to L1, and the request continues with the longest prefix that was
+loaded successfully; vLLM recomputes the remaining tokens. LMCache logs the
+adapter error and emits an ``L2_PREFETCH_FAILED`` event with
+``reason="not_found"`` for the failed keys.
+
+This behavior is independent of vLLM's ``kv_load_failure_policy``. That vLLM
+setting controls failures reported by a vLLM KV connector, while LMCache L2
+adapters currently expose a hit-or-miss result to the MP prefetch path. Use the
+LMCache server logs and prefetch events to distinguish an L2 failure from an
+ordinary miss.
+
 Adapter Types
 -------------
 
