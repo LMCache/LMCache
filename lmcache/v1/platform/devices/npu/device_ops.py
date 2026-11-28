@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend NPU ops backend: bulk-bind the plugin's ``lmcache_ascend.ops``.
+"""Ascend NPU ops backend: bulk-bind the in-tree ``lmcache.npu_ops`` module.
 
 :class:`NpuDeviceOps` calls :meth:`bind_native` in :meth:`ensure_native`
-to layer the external Ascend plugin's compiled extension on top of the
-torch baseline. All NPU-specific kernels live in the ``lmcache_ascend``
-plugin, which curates an ops-only binding surface (``lmcache_ascend.ops``,
-mirroring ``lmcache.cuda_ops``); this package only wires detection and
-backend selection. If the plugin is missing, :meth:`ensure_native` raises
-:class:`ImportError`: the torch baseline would reconstruct pointer-mode
-staging buffers as CPU tensors and silently transfer in the wrong
-address space.
+to layer the MP native extension on top of the torch baseline.  The MP core
+(block-transfer host code and Ascend C kernel) is built with LMCache as
+``lmcache.npu_ops``; the out-of-tree ``lmcache_ascend`` plugin remains an
+optional activation hook for hardware-specific patches.  If the extension is
+missing, :meth:`ensure_native` raises :class:`ImportError`: the torch baseline
+would reconstruct pointer-mode staging buffers as CPU tensors and silently
+transfer in the wrong address space.
 """
 
 # Future
@@ -68,16 +67,34 @@ class NpuDeviceOps(DeviceOps):
     device_type: ClassVar[str] = "npu"
 
     def ensure_native(self) -> None:
+        """Load and bind the in-tree ``lmcache.npu_ops`` extension.
+
+        An installed ``lmcache_ascend`` plugin is imported first as an
+        activation hook, so the hardware-specific patches it carries are in
+        effect once the ops are bound. The plugin is optional; one that is
+        installed but fails to import is not skipped, because its patches
+        would then silently be missing.
+
+        Raises:
+            ImportError: If ``lmcache.npu_ops`` was not built, or the plugin
+                is installed but fails to import.
+        """
         if self._native_bound:
             return
         self._native_bound = True  # set early to prevent repeated attempts
         try:
             # Third Party
-            import lmcache_ascend.ops as native
+            import lmcache_ascend  # noqa: F401
+        except ModuleNotFoundError as exc:
+            if exc.name != "lmcache_ascend":
+                raise
+        try:
+            # First Party
+            import lmcache.npu_ops as native
         except ImportError as exc:
             raise ImportError(
-                "NPU requires the LMCache-Ascend native ops (lmcache_ascend.ops): "
-                "Install LMCache-Ascend and retry."
+                "NPU MP ops require the in-tree lmcache.npu_ops extension; "
+                "rebuild LMCache with BUILD_WITH_ASCEND=1 (CANN + torch_npu)."
             ) from exc
         self.bind_native(native)
 
@@ -90,11 +107,9 @@ class NpuDeviceOps(DeviceOps):
         """Publish a completion only after prior NPU stream work finishes.
 
         torch_npu does not expose the CUDA host-callback primitive used by
-        LMCache's native completion recorder. Synchronizing here preserves
-        the storage ownership contract until the plugin ships an async
-        callback backend; the plugin's ``lmcache_ascend.ops`` surface
-        filters torch-fallback re-exports, so either a genuine native
-        binding or this override serves -- never the fallback.
+        LMCache's native completion recorder, so this torch-baseline override
+        synchronizes the stream first. :meth:`ensure_native` replaces it with
+        the native recorder of ``lmcache.npu_ops``.
 
         Args:
             stream_ptr: Raw NPU stream pointer from the generic recorder path.
@@ -187,14 +202,19 @@ class NpuDeviceOps(DeviceOps):
     ) -> None:
         """Copy ``nbytes`` between an NPU device pointer and host memory.
 
+        Torch-baseline override, in effect until :meth:`ensure_native` binds
+        ``lmcache.npu_ops``, whose ``lmcache_memcpy_async`` replaces it and,
+        like the CUDA op, splits pointer-mode copies at the
+        ``host_buffer_alignments`` boundaries around ``host_buffer_offset``.
+
         Tensor operands delegate to the torch baseline (``copy_``-based).
         Pointer mode must not: the baseline drives ``cudaMemcpy`` through
         libcudart, which cannot address NPU memory and crashes the process.
         Instead build zero-copy views over both pointers and issue one
         stream-ordered ``copy_`` on the current stream. The CUDA-specific
         ``host_buffer_offset`` / ``host_buffer_alignments`` chunking
-        parameters are ignored: a single ``copy_`` needs no boundary
-        splitting.
+        parameters are unused by this override: a single ``copy_`` needs no
+        boundary splitting.
 
         Args:
             dest: Destination address or tensor. Host for D2H, device for
@@ -202,10 +222,10 @@ class NpuDeviceOps(DeviceOps):
             src: Source address or tensor. Device for D2H, host for H2D.
             nbytes: Number of bytes to copy.
             direction: H2D or D2H; selects which side is host memory.
-            host_buffer_offset: Unused in pointer mode (CUDA chunking
-                parameter).
-            host_buffer_alignments: Unused in pointer mode (CUDA chunking
-                parameter).
+            host_buffer_offset: Host-side offset of the copy inside the
+                lmcache allocator; read by the native op only.
+            host_buffer_alignments: Pin-chunk size the native op splits a
+                copy at; read by the native op only.
 
         Raises:
             ValueError: If ``nbytes`` is not positive or the direction is

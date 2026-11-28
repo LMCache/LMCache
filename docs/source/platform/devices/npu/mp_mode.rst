@@ -79,10 +79,11 @@ Relationship to the LMCache dev branch
 --------------------------------------
 
 The MP architecture (the ``lmcache server`` CLI, the ``LMCacheMPConnector``,
-and the transfer-mode layer) is developed on the LMCache ``dev`` branch. The
-matching Ascend backends (NPU platform routing, block-transfer ops, hccl/hixl
-bindings) live in the LMCache-Ascend repository. Install both from the
-official repositories only -- see :doc:`lmcache_driven` for the exact
+and the transfer-mode layer) is developed on the LMCache ``dev`` branch,
+together with the Ascend MP backends: NPU platform routing and the
+block-transfer kernel (``lmcache.npu_ops``). The in-process kernels and the
+hccl/hixl bindings live in the LMCache-Ascend repository. Install both from
+the official repositories only -- see :doc:`lmcache_driven` for the exact
 procedure. Do not mix this checkout with the LMCache release used by the
 legacy in-process connector (``LMCacheAscendConnectorV1Dynamic``) in one
 environment.
