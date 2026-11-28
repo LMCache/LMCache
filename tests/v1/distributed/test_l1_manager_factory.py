@@ -135,3 +135,15 @@ def test_overlapping_devdax_ranges_are_rejected_and_earlier_managers_closed(
             [_devdax_config(path, "first"), _devdax_config(path, "second")]
         )
     assert closed == ["first"]
+
+
+def test_l1_shm_name_default_is_unique_per_instance() -> None:
+    """Two managers coexisting in one process must not share an L1 shm
+    segment name: the alloc-time stale-segment cleanup would unlink the
+    first pool's live segment, and that pool's teardown would then raise
+    FileNotFoundError on its second unlink."""
+    first = L1MemoryManagerConfig(size_in_bytes=4096, use_lazy=False)
+    second = L1MemoryManagerConfig(size_in_bytes=4096, use_lazy=False)
+    assert first.shm_name != second.shm_name
+    assert first.shm_name.startswith("lmcache_l1_pool_")
+    assert second.shm_name.startswith("lmcache_l1_pool_")
