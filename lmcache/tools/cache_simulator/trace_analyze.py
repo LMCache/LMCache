@@ -65,12 +65,14 @@ class TraceRecord:
         input_ids: Prompt token ids as the engine prefilled them, chat
             template included. The replay works on nothing else.
         timestamp_ns: Request time in nanoseconds; fixes the replay order.
-        request_id: Collapses a request recorded more than once to its
-            earliest record. The LMCache server emits one span per lookup,
+        request_id: Together with the model, collapses a request recorded
+            more than once to its earliest record. The LMCache server emits
+            one span per lookup,
             and the engine looks a request up again after preemption, so
             that format needs it; a producer that records each request once
             can use any unique value.
-        model: Model name, only for the ``--model`` filter; may be empty.
+        model: Cache namespace and ``--model`` filter; may be empty. Different
+            models cannot reuse each other's prefix or non-prefix chunks.
     """
 
     timestamp_ns: int
@@ -330,8 +332,8 @@ def load_trace_records(
 
     Each non-empty line is parsed as JSON and handed to the format's
     adapter. A request recorded more than once (for example an engine
-    lookup repeated after preemption) keeps only its earliest record, so
-    every request counts once.
+    lookup repeated after preemption) keeps only its earliest record within
+    its model, so requests from different models may reuse a request id.
 
     Args:
         paths: Files to read, in any order.
@@ -340,7 +342,7 @@ def load_trace_records(
         model: When given, keep only requests for this model name.
 
     Returns:
-        One record per request id, sorted by timestamp (ties keep file
+        One record per ``(model, request_id)``, sorted by timestamp (ties keep file
         order).
 
     Raises:
@@ -376,9 +378,9 @@ def load_trace_records(
             f"Expected {fmt.expects}; see the trace-analyze docs."
         )
     records.sort(key=lambda r: r.timestamp_ns)
-    first: dict[str, TraceRecord] = {}
+    first: dict[tuple[str, str], TraceRecord] = {}
     for r in records:
-        first.setdefault(r.request_id, r)
+        first.setdefault((r.model, r.request_id), r)
     return list(first.values())
 
 
@@ -437,14 +439,16 @@ def replay(
     chunk_size: int,
     capacity_tokens: int,
 ) -> ReplayResult:
-    """Replay a trace through one LRU cache plus the CacheBlend matcher.
+    """Replay a trace through one shared LRU and per-model CacheBlend matchers.
 
     For each request, in order: the leading run of cached chunk hashes is
     the prefix hit; the matcher is probed with the full prompt and its
     matches are reconciled with :func:`select_non_prefix_segments`; the
     request's chunks are then registered with the matcher and inserted in
     the LRU (prefix hits are touched, not re-inserted), and every chunk the
-    LRU evicts is removed from the matcher so later probes cannot match it.
+    LRU evicts is removed from its model's matcher so later probes cannot
+    match it. LRU keys include the model: models share the token budget,
+    but cannot reuse each other's chunks, even with identical token hashes.
 
     Args:
         records: Requests in replay order.
@@ -458,7 +462,7 @@ def replay(
     """
     capacity_chunks = capacity_tokens // chunk_size
     cache = LRUCacheFast(capacity_chunks)
-    matcher = BlendTokenRangeMatcher(chunk_size) if capacity_chunks else None
+    matchers: dict[str, BlendTokenRangeMatcher] = {}
 
     total_tokens = 0
     prefix_total = 0
@@ -469,13 +473,16 @@ def replay(
     for record, chunk_hashes in zip(records, hashes, strict=True):
         hit_prefix = 0
         for h in chunk_hashes:
-            if not cache.contains(h):
+            if not cache.contains((record.model, h)):
                 break
             hit_prefix += 1
         prefix_tokens = hit_prefix * chunk_size
 
         non_prefix_tokens = 0
-        if matcher is not None and chunk_hashes:
+        if capacity_chunks and chunk_hashes:
+            if record.model not in matchers:
+                matchers[record.model] = BlendTokenRangeMatcher(chunk_size)
+            matcher = matchers[record.model]
             segments = select_non_prefix_segments(
                 matcher.match_sub_sequence(record.input_ids), prefix_tokens
             )
@@ -485,12 +492,14 @@ def replay(
 
             matcher.on_new_token_hashes(record.input_ids, chunk_hashes)
             for i, h in enumerate(chunk_hashes):
+                key = (record.model, h)
                 if i < hit_prefix:
-                    cache.access(h)
+                    cache.access(key)
                     continue
-                evicted = cache.insert(h)
+                evicted = cache.insert(key)
                 if evicted is not None:
-                    matcher.remove_chunks([evicted])
+                    evicted_model, evicted_hash = evicted
+                    matchers[evicted_model].remove_chunks([evicted_hash])
 
         total_tokens += len(record.input_ids)
         prefix_total += prefix_tokens

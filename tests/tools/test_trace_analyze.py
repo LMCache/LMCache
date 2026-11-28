@@ -2,6 +2,7 @@
 """Tests for the request-trace cache analyzer."""
 
 # Standard
+from dataclasses import replace
 from pathlib import Path
 import json
 import struct
@@ -78,6 +79,68 @@ class TestLoadTraceRecords:
         # The fixture's last batch looks sess-r1 up again, later.
         (r1,) = [r for r in load_trace_records([FIXTURE]) if r.request_id == "sess-r1"]
         assert r1.timestamp_ns == 1_700_000_001_000_000_000
+
+    @pytest.mark.parametrize("trace_format", ["lmcache", "dynamo"])
+    def test_request_ids_are_scoped_to_model(
+        self, tmp_path: Path, trace_format: str
+    ) -> None:
+        lines = []
+        for model, timestamp in [("model-A", 2), ("model-B", 1), ("model-A", 3)]:
+            if trace_format == "lmcache":
+                span = {
+                    "name": "mp.request.trace",
+                    "startTimeUnixNano": timestamp,
+                    "attributes": [
+                        {"key": "session_id", "value": {"stringValue": "same-id"}},
+                        {"key": "lmcache.model", "value": {"stringValue": model}},
+                        {
+                            "key": "lmcache.input_ids",
+                            "value": {"stringValue": "[1,2,3,4]"},
+                        },
+                    ],
+                }
+                batch: dict[str, object] = {
+                    "resourceSpans": [{"scopeSpans": [{"spans": [span]}]}]
+                }
+            else:
+                values = {
+                    "event_type": "request_payload",
+                    "rid": "same-id",
+                    "model": model,
+                    "payload": json.dumps({"payload": {"request": {"messages": []}}}),
+                }
+                log = {
+                    "timeUnixNano": timestamp,
+                    "attributes": [
+                        {"key": key, "value": {"stringValue": value}}
+                        for key, value in values.items()
+                    ],
+                }
+                batch = {
+                    "resourceLogs": [
+                        {
+                            "scopeLogs": [
+                                {
+                                    "scope": {"name": "dynamo.request_trace"},
+                                    "logRecords": [log],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            lines.append(json.dumps(batch))
+        path = tmp_path / "models.jsonl"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        records = load_trace_records([path], trace_format=trace_format)
+
+        assert [(r.model, r.request_id, r.timestamp_ns) for r in records] == [
+            ("model-B", "same-id", 1),
+            ("model-A", "same-id", 2),
+        ]
+        assert load_trace_records(
+            [path], trace_format=trace_format, model="model-A"
+        ) == [records[1]]
 
     def test_accepts_plain_int_encoding(self, tmp_path: Path) -> None:
         # Some exporters write int64 as JSON numbers rather than strings.
@@ -178,6 +241,30 @@ class TestPrefixReplay:
         assert exact.per_request_prefix_hit_tokens == [0, 4, 0]
         assert exact.per_request_non_prefix_hit_tokens == [0, 0, 4]
 
+    @pytest.mark.parametrize("first_model", ["model-A", ""])
+    @pytest.mark.parametrize(
+        ("capacity", "expected_hits", "expected_evictions"),
+        [(8, [0, 0, 4], 0), (4, [0, 0, 0], 2), (3, [0, 0, 0], 0)],
+    )
+    def test_models_isolate_prefixes_but_share_capacity(
+        self,
+        first_model: str,
+        capacity: int,
+        expected_hits: list[int],
+        expected_evictions: int,
+    ) -> None:
+        records = [
+            replace(_record(1, [1, 2, 3, 4]), model=first_model),
+            replace(_record(2, [1, 2, 3, 4]), model="model-B"),
+            replace(_record(3, [1, 2, 3, 4]), model=first_model),
+        ]
+
+        (res,) = analyze(records, [4], [capacity])
+
+        assert res.per_request_prefix_hit_tokens == expected_hits
+        assert res.per_request_non_prefix_hit_tokens == [0, 0, 0]
+        assert res.eviction_count == expected_evictions
+
     def test_grid_order_and_hash_sharing(self) -> None:
         results = analyze(self.RECORDS, [4, 8], [8, 16])
         assert [(r.chunk_size, r.capacity_tokens) for r in results] == [
@@ -232,6 +319,31 @@ class TestBlendReplay:
         # request then evicts the filler.
         assert res.eviction_count == 6
         assert res.per_request_non_prefix_hit_tokens == [0, 0, 0]
+
+    def test_non_prefix_matches_are_scoped_to_model(self) -> None:
+        records = [
+            replace(_record(1, [1, 2, 3, 4]), model="model-A"),
+            replace(_record(2, [9, 1, 2, 3, 4]), model="model-B"),
+            replace(_record(3, [9, 1, 2, 3, 4]), model="model-A"),
+        ]
+
+        (res,) = analyze(records, [4], [8])
+
+        assert res.per_request_prefix_hit_tokens == [0, 0, 0]
+        assert res.per_request_non_prefix_hit_tokens == [0, 0, 4]
+
+    def test_cross_model_eviction_removes_non_prefix_matches(self) -> None:
+        records = [
+            replace(_record(1, [1, 2, 3, 4]), model="model-A"),
+            replace(_record(2, [20, 21, 22, 23]), model="model-B"),
+            replace(_record(3, [9, 1, 2, 3, 4]), model="model-A"),
+        ]
+
+        (res,) = analyze(records, [4], [4])
+
+        assert res.per_request_prefix_hit_tokens == [0, 0, 0]
+        assert res.per_request_non_prefix_hit_tokens == [0, 0, 0]
+        assert res.eviction_count == 2
 
 
 # ---------------------------------------------------------------------------
