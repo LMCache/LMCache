@@ -363,6 +363,10 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
             in protocol group order. Empty means legacy single-group; the
             top-level ``num_layers``/``hidden_dim_size``/``dtype_str`` then
             describe the sole group.
+        worker_id: The worker's id within ``world_size`` (the ``worker_id``
+            its store and retrieve keys carry), so the server looks each
+            object group up only on the workers that registered it. ``None``
+            (older clients) counts the groups as stored by every worker.
     """
 
     instance_id: int
@@ -376,6 +380,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     chunk_size: int
     num_physical_slots: int
     group_layouts: list[GroupLayout] = []
+    worker_id: int | None = None
 
 
 @dataclass

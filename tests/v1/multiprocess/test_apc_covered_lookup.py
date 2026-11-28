@@ -85,6 +85,9 @@ def _ctx_with_hashes(n_chunks: int) -> MagicMock:
     token_hasher.compute_packed_chunk_hashes.return_value = [
         bytes([i]) * 4 for i in range(n_chunks)
     ]
+    ctx.layout_desc_registry.find_shard_replication_desc.return_value = (
+        DEFAULT_SHARD_REPLICATION_DESC
+    )
     ctx.layout_desc_registry.get_chunk_size.return_value = CHUNK_SIZE
     ctx.layout_desc_registry.get_token_hasher.return_value = token_hasher
     return ctx

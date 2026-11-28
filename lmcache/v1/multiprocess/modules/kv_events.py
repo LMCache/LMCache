@@ -100,8 +100,10 @@ class CommittedKVResidency:
 
         Returns:
             False for missing or empty registered geometry, or an
-            incomplete chunk. TP replicas require one object per DCP shard.
-            Different L1 tags may supply different required objects.
+            incomplete chunk. TP replicas require one object per DCP shard,
+            and a group requires no object from a worker that does not store
+            it (``ShardReplicationDesc.storing_workers``). Different L1 tags
+            may supply different required objects.
         """
         world_size = ObjectKey.WorldSizeFromKVRank(key.kv_rank)
         geometry = self._layouts.find_group_shard_geometry(key.model_name, world_size)
@@ -121,6 +123,9 @@ class CommittedKVResidency:
                 replication.tp_replicas(group),
                 replication.dcp_shards(group),
             )
+            # A pipeline stage that did not register the group never stores it.
+            if (workers := replication.storing_workers(group)) is None
+            or rank in workers
         )
 
     def clear(self) -> None:

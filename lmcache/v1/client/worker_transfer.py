@@ -327,6 +327,7 @@ class TransferContext(ABC):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        worker_id: int | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -348,6 +349,12 @@ class TransferContext(ABC):
                 worker's own groups, which is wrong when a pipeline stage does
                 not hold the group with the largest block. Adapters that know
                 the chunk size should pass it.
+            worker_id: This worker's id within ``world_size`` (the
+                ``worker_id`` its store and retrieve keys carry). Engine-driven
+                contexts send it so the server looks a pipeline stage up only
+                for the object groups it registered; ``None`` counts them as
+                stored by every worker. Not yet carried by the LMCache-driven
+                ``REGISTER_KV_CACHE``.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -584,6 +591,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        worker_id: int | None = None,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -598,6 +606,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             engine_type: Serving engine that produced the caches.
             lmcache_chunk_tokens: Effective logical tokens per LMCache chunk,
                 or ``None`` to use the server default.
+            worker_id: Unused: ``REGISTER_KV_CACHE`` does not carry it yet.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device,
@@ -920,6 +929,7 @@ class EngineDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         lmcache_chunk_tokens: int | None = None,
+        worker_id: int | None = None,
     ) -> None:
         """Register KV caches with the engine-driven context server.
 
@@ -936,6 +946,10 @@ class EngineDrivenTransferContext(TransferContext):
         Uncompressed single-group registration keeps the legacy path (see
         ``_single_group_block_ids``). Compressed groups size their buffers in
         physical slots while block counts and windows remain in logical tokens.
+
+        ``worker_id`` travels with the registration: a pipeline stage
+        registers only the KV caches its layers hold, and the server must not
+        look it up for the rest.
         """
         (
             block_size,
@@ -1097,6 +1111,7 @@ class EngineDrivenTransferContext(TransferContext):
                     chunk_size=chunk_tokens,
                     num_physical_slots=num_physical_slots,
                     group_layouts=group_layouts,
+                    worker_id=worker_id,
                 )
             )
         )

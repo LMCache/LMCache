@@ -1724,6 +1724,7 @@ class LMCacheMPWorkerAdapter:
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
                 lmcache_chunk_tokens=self.lmcache_tokens_per_chunk,
+                worker_id=self.worker_id,
             )
         except TimeoutError:
             # Never published, so there is nothing to roll back: close the

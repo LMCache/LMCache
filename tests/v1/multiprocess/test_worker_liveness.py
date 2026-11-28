@@ -524,8 +524,14 @@ def test_cpu_events_announce_and_withdraw_tagged_chunks() -> None:
         (2, ShardReplicationDesc((2,), (1,)), [(0, 0)]),
         (2, ShardReplicationDesc((2, 1), (1, 1)), [(0, 0), (0, 1), (1, 1)]),
         (4, ShardReplicationDesc((4,), (2,)), [(0, 0), (1, 0)]),
+        # Pipeline stages: only worker 1 (the last stage) stores group 1.
+        (
+            2,
+            ShardReplicationDesc((1, 1), (1, 1), (None, frozenset({1}))),
+            [(0, 0), (1, 0), (1, 1)],
+        ),
     ],
-    ids=["replicated", "hybrid", "dcp"],
+    ids=["replicated", "hybrid", "dcp", "stage-only-group"],
 )
 def test_cpu_events_require_registered_shards_of_replicated_groups(
     world_size: int,
