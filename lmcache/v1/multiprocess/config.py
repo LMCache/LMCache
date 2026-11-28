@@ -4,7 +4,7 @@
 
 # Standard
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 import argparse
 import json
 import math
@@ -18,6 +18,10 @@ from lmcache.v1.multiprocess.ext_server_module import (
     ExtServerModuleSpec,
     parse_server_module_specs,
 )
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.transport.grpc.tls import GrpcServerTLSConfig
 
 logger = init_logger(__name__)
 
@@ -72,8 +76,9 @@ class MPServerConfig:
     and hands only the handlers to worker threads. ``native`` does the HTTP/2
     and gRPC framing in Rust, off the GIL, and needs the
     ``pygrpc-native`` package. ``auto`` picks ``native`` when that package is
-    installed and ``aio`` otherwise. Used by gRPC transport and by the P2P
-    listener."""
+    installed and ``aio`` otherwise. With ``grpc_tls``, the MP request listener
+    uses ``aio`` for ``auto`` and rejects explicit ``native``. The P2P listener
+    also uses this mode setting."""
 
     api_key_files: list[str] = field(default_factory=list)
     """Key files shared by authentication-enabled HTTP and request entry points."""
@@ -184,19 +189,20 @@ class MPServerConfig:
     server_modules: list[ExtServerModuleSpec] = field(default_factory=list)
     """Out-of-tree ``DiscoverableModule`` classes to import explicitly."""
 
+    grpc_tls: "GrpcServerTLSConfig | None" = None
+    """PEM credentials for TLS on the MP gRPC request listener."""
+
     @property
     def enable_dedup_content(self) -> bool:
         """Deprecated alias of :attr:`enable_dedup_content_fingerprint`."""
         return self.enable_dedup_content_fingerprint
 
     def __post_init__(self) -> None:
-        """Validate the chunk size and worker-reaping timeouts.
+        """Validate server settings.
 
         Raises:
-            ValueError: If the chunk size is not positive, a timeout is
-                non-finite, the reap timeout is negative or a non-zero value
-                below the 30 s floor, or the registration grace is below the
-                reap timeout.
+            ValueError: If the chunk size or gRPC worker count is not positive,
+                a worker timeout is invalid, or gRPC TLS is used with ZMQ.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
@@ -206,6 +212,8 @@ class MPServerConfig:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
             )
+        if self.grpc_tls is not None and self.transport != "grpc":
+            raise ValueError("grpc_tls requires transport='grpc'")
         if not math.isfinite(reap) or reap < 0 or (reap != 0 and reap < 30.0):
             raise ValueError(
                 "worker reap timeout must be 0 (disabled) or >= 30s; keep it "

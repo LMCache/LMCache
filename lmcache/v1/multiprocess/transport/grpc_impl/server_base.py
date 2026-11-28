@@ -8,6 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 import threading
 
+# Third Party
+import grpc
+
 # First Party
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.security.api_key import APIKeyVerifier
@@ -24,6 +27,7 @@ from lmcache.v1.transport.grpc.descriptors import (
     get_service_bindings,
 )
 from lmcache.v1.transport.grpc.endpoint import parse_grpc_target
+from lmcache.v1.transport.grpc.tls import GrpcServerTLSConfig
 
 
 class GrpcMultiprocessServerBase(RequestServer):
@@ -44,6 +48,8 @@ class GrpcMultiprocessServerBase(RequestServer):
         grpc_server_workers: int,
         authentication: APIKeyVerifier | None = None,
         rpc_client: type | None = None,
+        *,
+        tls_config: GrpcServerTLSConfig | None = None,
     ) -> None:
         if max_cpu_workers <= 0:
             raise ValueError("max_cpu_workers must be greater than 0")
@@ -51,6 +57,9 @@ class GrpcMultiprocessServerBase(RequestServer):
         self._bind_url = bind_url
         self._rpc_client = rpc_client
         self._authentication = authentication or APIKeyVerifier()
+        self._tls_credentials = (
+            tls_config.server_credentials() if tls_config is not None else None
+        )
         self._affinity_pool = AffinityThreadPool(
             max_workers=max_gpu_workers,
             thread_name_prefix="grpc-affinity",
@@ -103,8 +112,12 @@ class GrpcMultiprocessServerBase(RequestServer):
         finally:
             self._release_threads(wait=wait)
 
-    def _bind(self, server: Any) -> None:
-        self._bound_port = server.add_insecure_port(parse_grpc_target(self._bind_url))
+    def _bind(self, server: grpc.Server | grpc.aio.Server) -> None:
+        target = parse_grpc_target(self._bind_url)
+        if self._tls_credentials is None:
+            self._bound_port = server.add_insecure_port(target)
+        else:
+            self._bound_port = server.add_secure_port(target, self._tls_credentials)
         if self._bound_port == 0:
             raise RuntimeError(
                 f"Failed to bind gRPC multiprocess server: {self._bind_url}"

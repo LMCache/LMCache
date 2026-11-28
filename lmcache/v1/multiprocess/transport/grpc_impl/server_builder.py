@@ -25,17 +25,29 @@ from lmcache.v1.transport.auth import load_request_authentication
 logger = init_logger(__name__)
 
 
-def resolve_grpc_server_mode(mode: str) -> str:
-    """Resolve ``auto`` to ``native`` if pygrpc-native is installed, else ``aio``.
+def resolve_grpc_server_mode(mode: str, *, tls_enabled: bool = False) -> str:
+    """Resolve ``auto`` to a gRPC server that supports the configured transport.
 
     Args:
         mode: The configured ``grpc_server_mode``.
+        tls_enabled: Whether the request listener uses TLS.
 
     Returns:
-        ``sync``, ``aio`` or ``native``.
+        The selected mode. With TLS, ``auto`` selects ``aio``. Otherwise it
+        prefers ``native`` when pygrpc-native is installed.
+
+    Raises:
+        ValueError: If TLS is configured with explicit ``native`` mode.
     """
+    if tls_enabled and mode == "native":
+        raise ValueError(
+            "TLS is not supported by the native gRPC transport; "
+            "use grpc_server_mode='auto', 'sync', or 'aio'"
+        )
     if mode != "auto":
         return mode
+    if tls_enabled:
+        return "aio"
     if importlib.util.find_spec("pygrpc_native") is not None:
         return "native"
     logger.info("pygrpc-native is not installed; using the aio gRPC server")
@@ -53,28 +65,39 @@ def build_grpc_request_server(
     Args:
         modules: Ordered business modules composing the cache server.
         mp_config: Multiprocess server configuration. ``grpc_server_mode``
-            selects the sync, aio or native server; ``auto`` resolves with
-            ``resolve_grpc_server_mode``.
+            selects the backend, and ``grpc_tls`` supplies TLS credentials.
         rpc_client: RPC contract to expose; defaults to the worker RequestClient.
 
     Returns:
         Configured, but not yet started, gRPC request server.
+
+    Raises:
+        ValueError: If the selected backend cannot use TLS, a configured
+            credential file is unreadable or empty, or auth config is invalid.
     """
+    tls_config = mp_config.grpc_tls
     server_cls: type[GrpcMultiprocessServerBase]
-    mode = resolve_grpc_server_mode(mp_config.grpc_server_mode)
+    mode = resolve_grpc_server_mode(
+        mp_config.grpc_server_mode, tls_enabled=tls_config is not None
+    )
     if mode == "native":
         server_cls = GrpcNativeMultiprocessServer
     elif mode == "aio":
         server_cls = GrpcAioMultiprocessServer
     else:
         server_cls = GrpcMultiprocessServer
-    server = server_cls(
-        bind_url=f"grpc://{mp_config.host}:{mp_config.port}",
-        max_gpu_workers=mp_config.max_gpu_workers,
-        max_cpu_workers=mp_config.max_cpu_workers,
-        grpc_server_workers=mp_config.grpc_server_workers,
-        authentication=load_request_authentication(mp_config.api_key_files),
-        rpc_client=rpc_client,
+    server_args = (
+        f"grpc://{mp_config.host}:{mp_config.port}",
+        mp_config.max_cpu_workers,
+        mp_config.max_gpu_workers,
+        mp_config.grpc_server_workers,
+        load_request_authentication(mp_config.api_key_files),
+        rpc_client,
+    )
+    server = (
+        server_cls(*server_args)
+        if tls_config is None
+        else server_cls(*server_args, tls_config=tls_config)
     )
     try:
         server.add_modules(modules)
