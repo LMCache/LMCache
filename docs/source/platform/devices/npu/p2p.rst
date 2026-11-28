@@ -129,7 +129,7 @@ no conflicting transport experiment settings are inherited from the shell.
    * - MP transfer-channel metadata
      - ``10.0.0.1:8500``
      - ``10.0.0.2:8500``
-   * - MP peer gRPC / worker ZMQ / HTTP
+   * - MP peer gRPC / worker gRPC / HTTP
      - ``9555`` / ``5555`` / ``8080``
      - ``9555`` / ``5555`` / ``8080``
 
@@ -250,7 +250,7 @@ Use a fresh server process for each client invocation. A server can retain
 the previous client's registration metadata; a new client process reusing
 the same endpoint may have a different memory address. After a client
 finishes, stop the server with Ctrl-C, wait for cleanup, and start it again
-before the next run. Save a separate server log for each run.
+before the next run.
 
 HIXL benchmark
 ~~~~~~~~~~~~~~
@@ -259,30 +259,82 @@ HIXL benchmark
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0 LMCACHE_DEVICE_BACKEND=npu LMCACHE_HIXL_DEVICE_ID=0 LMCACHE_HIXL_ENGINE_ID=10.0.0.1:6100 LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 LMCACHE_LOG_LEVEL=INFO python -u -m lmcache.tools.transfer_channel_benchmark --shm-name "" --role server --transfer-channel-type hixl --url 10.0.0.1:7600 --control-url 10.0.0.1:7610 --buffer-size 512MB --page-size 64KB --object-size 16MB --num-objects 4 --num-source-objects 16 --server-timeout 1800 2>&1 | tee logs/ascend-p2p/hixl-server.log
-   echo "server pipeline exit code: $?"
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_HIXL_DEVICE_ID=0 \
+       LMCACHE_HIXL_ENGINE_ID=10.0.0.1:6100 \
+       LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 \
+       LMCACHE_LOG_LEVEL=INFO \
+       python -u -m lmcache.tools.transfer_channel_benchmark \
+       --shm-name "" \
+       --role server \
+       --transfer-channel-type hixl \
+       --url 10.0.0.1:7600 \
+       --control-url 10.0.0.1:7610 \
+       --buffer-size 512MB \
+       --page-size 64KB \
+       --object-size 16MB \
+       --num-objects 4 \
+       --num-source-objects 16 \
+       --server-timeout 1800
 
 Wait for ``[server] ready``, then run **node B, client terminal**:
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0 LMCACHE_DEVICE_BACKEND=npu LMCACHE_HIXL_DEVICE_ID=0 LMCACHE_HIXL_ENGINE_ID=10.0.0.2:6101 LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 LMCACHE_LOG_LEVEL=INFO python -u -m lmcache.tools.transfer_channel_benchmark --shm-name "" --role client --op read --transfer-channel-type hixl --url 10.0.0.1:7600 --listen-url 10.0.0.2:7601 --control-url 10.0.0.1:7610 --buffer-size 512MB --page-size 64KB --object-size 16MB --num-objects 4 --num-source-objects 16 --warmup 5 --iters 30 --verify 2>&1 | tee logs/ascend-p2p/hixl-read.log
-   echo "READ pipeline exit code: $?"
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_HIXL_DEVICE_ID=0 \
+       LMCACHE_HIXL_ENGINE_ID=10.0.0.2:6101 \
+       LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 \
+       LMCACHE_LOG_LEVEL=INFO \
+       python -u -m lmcache.tools.transfer_channel_benchmark \
+       --shm-name "" \
+       --role client \
+       --op read \
+       --transfer-channel-type hixl \
+       --url 10.0.0.1:7600 \
+       --listen-url 10.0.0.2:7601 \
+       --control-url 10.0.0.1:7610 \
+       --buffer-size 512MB \
+       --page-size 64KB \
+       --object-size 16MB \
+       --num-objects 4 \
+       --num-source-objects 16 \
+       --warmup 5 \
+       --iters 30 \
+       --verify
 
-After READ finishes, restart A with its server command above, changing the
-log filename to ``hixl-server-write.log``. Wait for ``[server] ready``, then
-run WRITE on **node B**:
+After READ finishes, restart A with its server command above. Wait for
+``[server] ready``, then run WRITE on **node B**:
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0 LMCACHE_DEVICE_BACKEND=npu LMCACHE_HIXL_DEVICE_ID=0 LMCACHE_HIXL_ENGINE_ID=10.0.0.2:6101 LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 LMCACHE_LOG_LEVEL=INFO python -u -m lmcache.tools.transfer_channel_benchmark --shm-name "" --role client --op write --transfer-channel-type hixl --url 10.0.0.1:7600 --listen-url 10.0.0.2:7601 --control-url 10.0.0.1:7610 --buffer-size 512MB --page-size 64KB --object-size 16MB --num-objects 4 --num-source-objects 16 --warmup 5 --iters 30 --verify 2>&1 | tee logs/ascend-p2p/hixl-write.log
-   echo "WRITE pipeline exit code: $?"
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_HIXL_DEVICE_ID=0 \
+       LMCACHE_HIXL_ENGINE_ID=10.0.0.2:6101 \
+       LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 \
+       LMCACHE_LOG_LEVEL=INFO \
+       python -u -m lmcache.tools.transfer_channel_benchmark \
+       --shm-name "" \
+       --role client \
+       --op write \
+       --transfer-channel-type hixl \
+       --url 10.0.0.1:7600 \
+       --listen-url 10.0.0.2:7601 \
+       --control-url 10.0.0.1:7610 \
+       --buffer-size 512MB \
+       --page-size 64KB \
+       --object-size 16MB \
+       --num-objects 4 \
+       --num-source-objects 16 \
+       --warmup 5 \
+       --iters 30 \
+       --verify
 
 Mooncake TE benchmark
 ~~~~~~~~~~~~~~~~~~~~~
@@ -294,54 +346,122 @@ object sizes, iteration counts and memory allocation on both nodes.
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=INFO HCCL_SOCKET_IFNAME=eth0 HCCL_INTRA_ROCE_ENABLE=1 MC_TE_PROTOCOL=ascend MC_TE_DEVICE='' ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' ASCEND_BUFFER_POOL=0:0 ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' ASCEND_AUTO_CONNECT=0 ASCEND_USE_SHORT_CONNECTION=0 ASCEND_CONNECT_TIMEOUT=10000 ASCEND_TRANSFER_TIMEOUT=60000 ASCEND_THREAD_POOL_SIZE=1 ASCEND_BASE_PORT=16000 ASCEND_USE_ASYNC_TRANSFER=1 python -u -m lmcache.tools.transfer_channel_benchmark --shm-name "" --role server --transfer-channel-type mooncake_te --url 10.0.0.1:7600 --control-url 10.0.0.1:7610 --buffer-size 512MB --page-size 64KB --object-size 16MB --num-objects 4 --num-source-objects 16 --server-timeout 1800 2>&1 | tee logs/ascend-p2p/mooncake-server.log
-   echo "server pipeline exit code: $?"
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=INFO \
+       HCCL_SOCKET_IFNAME=eth0 \
+       HCCL_INTRA_ROCE_ENABLE=1 \
+       MC_TE_PROTOCOL=ascend \
+       MC_TE_DEVICE='' \
+       ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' \
+       ASCEND_BUFFER_POOL=0:0 \
+       ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' \
+       ASCEND_AUTO_CONNECT=0 \
+       ASCEND_USE_SHORT_CONNECTION=0 \
+       ASCEND_CONNECT_TIMEOUT=10000 \
+       ASCEND_TRANSFER_TIMEOUT=60000 \
+       ASCEND_THREAD_POOL_SIZE=1 \
+       ASCEND_BASE_PORT=16000 \
+       ASCEND_USE_ASYNC_TRANSFER=1 \
+       python -u -m lmcache.tools.transfer_channel_benchmark \
+       --shm-name "" \
+       --role server \
+       --transfer-channel-type mooncake_te \
+       --url 10.0.0.1:7600 \
+       --control-url 10.0.0.1:7610 \
+       --buffer-size 512MB \
+       --page-size 64KB \
+       --object-size 16MB \
+       --num-objects 4 \
+       --num-source-objects 16 \
+       --server-timeout 1800
 
 Wait for ``[server] ready``, then run **node B, client terminal**:
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=INFO HCCL_SOCKET_IFNAME=eth0 HCCL_INTRA_ROCE_ENABLE=1 MC_TE_PROTOCOL=ascend MC_TE_DEVICE='' ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' ASCEND_BUFFER_POOL=0:0 ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' ASCEND_AUTO_CONNECT=0 ASCEND_USE_SHORT_CONNECTION=0 ASCEND_CONNECT_TIMEOUT=10000 ASCEND_TRANSFER_TIMEOUT=60000 ASCEND_THREAD_POOL_SIZE=1 ASCEND_BASE_PORT=16000 ASCEND_USE_ASYNC_TRANSFER=1 python -u -m lmcache.tools.transfer_channel_benchmark --shm-name "" --role client --op read --transfer-channel-type mooncake_te --url 10.0.0.1:7600 --listen-url 10.0.0.2:7601 --control-url 10.0.0.1:7610 --buffer-size 512MB --page-size 64KB --object-size 16MB --num-objects 4 --num-source-objects 16 --warmup 5 --iters 30 --verify 2>&1 | tee logs/ascend-p2p/mooncake-read.log
-   echo "READ pipeline exit code: $?"
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=INFO \
+       HCCL_SOCKET_IFNAME=eth0 \
+       HCCL_INTRA_ROCE_ENABLE=1 \
+       MC_TE_PROTOCOL=ascend \
+       MC_TE_DEVICE='' \
+       ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' \
+       ASCEND_BUFFER_POOL=0:0 \
+       ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' \
+       ASCEND_AUTO_CONNECT=0 \
+       ASCEND_USE_SHORT_CONNECTION=0 \
+       ASCEND_CONNECT_TIMEOUT=10000 \
+       ASCEND_TRANSFER_TIMEOUT=60000 \
+       ASCEND_THREAD_POOL_SIZE=1 \
+       ASCEND_BASE_PORT=16000 \
+       ASCEND_USE_ASYNC_TRANSFER=1 \
+       python -u -m lmcache.tools.transfer_channel_benchmark \
+       --shm-name "" \
+       --role client \
+       --op read \
+       --transfer-channel-type mooncake_te \
+       --url 10.0.0.1:7600 \
+       --listen-url 10.0.0.2:7601 \
+       --control-url 10.0.0.1:7610 \
+       --buffer-size 512MB \
+       --page-size 64KB \
+       --object-size 16MB \
+       --num-objects 4 \
+       --num-source-objects 16 \
+       --warmup 5 \
+       --iters 30 \
+       --verify
 
-After READ finishes, restart A with its Mooncake server command above,
-changing the log filename to ``mooncake-server-write.log``. Wait for
+After READ finishes, restart A with its Mooncake server command above. Wait for
 ``[server] ready``, then run WRITE on **node B**:
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=INFO HCCL_SOCKET_IFNAME=eth0 HCCL_INTRA_ROCE_ENABLE=1 MC_TE_PROTOCOL=ascend MC_TE_DEVICE='' ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' ASCEND_BUFFER_POOL=0:0 ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' ASCEND_AUTO_CONNECT=0 ASCEND_USE_SHORT_CONNECTION=0 ASCEND_CONNECT_TIMEOUT=10000 ASCEND_TRANSFER_TIMEOUT=60000 ASCEND_THREAD_POOL_SIZE=1 ASCEND_BASE_PORT=16000 ASCEND_USE_ASYNC_TRANSFER=1 python -u -m lmcache.tools.transfer_channel_benchmark --shm-name "" --role client --op write --transfer-channel-type mooncake_te --url 10.0.0.1:7600 --listen-url 10.0.0.2:7601 --control-url 10.0.0.1:7610 --buffer-size 512MB --page-size 64KB --object-size 16MB --num-objects 4 --num-source-objects 16 --warmup 5 --iters 30 --verify 2>&1 | tee logs/ascend-p2p/mooncake-write.log
-   echo "WRITE pipeline exit code: $?"
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=INFO \
+       HCCL_SOCKET_IFNAME=eth0 \
+       HCCL_INTRA_ROCE_ENABLE=1 \
+       MC_TE_PROTOCOL=ascend \
+       MC_TE_DEVICE='' \
+       ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' \
+       ASCEND_BUFFER_POOL=0:0 \
+       ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' \
+       ASCEND_AUTO_CONNECT=0 \
+       ASCEND_USE_SHORT_CONNECTION=0 \
+       ASCEND_CONNECT_TIMEOUT=10000 \
+       ASCEND_TRANSFER_TIMEOUT=60000 \
+       ASCEND_THREAD_POOL_SIZE=1 \
+       ASCEND_BASE_PORT=16000 \
+       ASCEND_USE_ASYNC_TRANSFER=1 \
+       python -u -m lmcache.tools.transfer_channel_benchmark \
+       --shm-name "" \
+       --role client \
+       --op write \
+       --transfer-channel-type mooncake_te \
+       --url 10.0.0.1:7600 \
+       --listen-url 10.0.0.2:7601 \
+       --control-url 10.0.0.1:7610 \
+       --buffer-size 512MB \
+       --page-size 64KB \
+       --object-size 16MB \
+       --num-objects 4 \
+       --num-source-objects 16 \
+       --warmup 5 \
+       --iters 30 \
+       --verify
 
 Check for ``install AscendDirectTransport``, ``Roce mode is enabled``,
 ``Set LocalCommRes to:{"version":"1.3"}`` and ``Use async transfer`` in the
 reference TE logs. Module import alone does not confirm this transport.
 
-Interpreting benchmark results
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-READ must print ``verify OK: 4 objects match expected pattern``. WRITE must
-print ``verify OK: server confirms 4 written objects match expected
-pattern``. Also check the exit codes and both sides' cleanup logs. WRITE
-changes the server's data: restart the server before another verified READ
-that expects the original pattern.
-
-The throughput report measures submission through completion for the payload,
-excluding connection setup and the final byte check. It reports decimal
-GB/s, whereas the example payload is 64 MiB. A 100000 Mb/s port has a raw
-line rate of 12.5 GB/s before protocol overhead. Record the actual port rate,
-payload, READ/WRITE direction and median as well as mean when comparing
-backends. Single-host measurements do not establish cross-host performance.
-
-The benchmark checks transfer-channel data movement. It does not exercise
-coordinator discovery, model accuracy or the MP server's optional P2P store
-policy (``--enable-p2p-write``).
+Both READ and WRITE must report ``verify OK``. After stopping the server,
+confirm that both processes exit successfully without cleanup errors.
 
 MP server deployment
 --------------------
@@ -353,13 +473,20 @@ use matching chunk/layout settings on both nodes. For other models, follow
 their deployment guide. The MP server and its local vLLM should use the same
 compatible packages, model and KV layout as the peer deployment.
 
+The validated ``DeepSeek-V4-Flash-w8a8-mtp`` configuration used
+``--no-separate-object-groups`` on both MP servers. Add it when reproducing
+that configuration; follow the model-specific object-group requirements for
+other models.
+
+Size L1 using the actual Host KV footprint across all TP ranks. Keep the
+working set and concurrent prefetch buffers comfortably below the default
+80% eviction watermark so that prefixes remain available for remote reuse.
+
 **Node A, coordinator terminal** (shared by either backend):
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   lmcache coordinator --host 10.0.0.1 --port 9300 2>&1 | tee logs/ascend-p2p/coordinator.log
+   lmcache coordinator --host 10.0.0.1 --port 9300
 
 Choose **one** of the following backend pairs. B uses
 ``--l2-prefetch-policy skip_l1`` for validation: remotely loaded chunks are
@@ -374,17 +501,64 @@ HIXL MP servers
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=DEBUG LMCACHE_HIXL_DEVICE_ID=0 LMCACHE_HIXL_ENGINE_ID=10.0.0.1:6100 LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 lmcache server --host 0.0.0.0 --port 5555 --http-port 8080 --instance-id ascend-a --supported-transfer-mode lmcache_driven --chunk-size 4096 --l1-size-gb 50 --l1-align-bytes 65536 --no-l1-use-lazy --shm-name "" --eviction-policy LRU --coordinator-url http://10.0.0.1:9300 --coordinator-advertise-ip 10.0.0.1 --p2p-rpc-port 9555 --p2p-advertise-url 10.0.0.1:8500 --p2p-transfer-engine hixl 2>&1 | tee logs/ascend-p2p/mp-a.log
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=DEBUG \
+       LMCACHE_HIXL_DEVICE_ID=0 \
+       LMCACHE_HIXL_ENGINE_ID=10.0.0.1:6100 \
+       LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 \
+       lmcache server \
+       --transport grpc \
+       --host 0.0.0.0 \
+       --port 5555 \
+       --http-host 0.0.0.0 \
+       --http-port 8080 \
+       --instance-id ascend-a \
+       --supported-transfer-mode lmcache_driven \
+       --chunk-size 4096 \
+       --l1-size-gb 50 \
+       --l1-align-bytes 65536 \
+       --no-l1-use-lazy \
+       --shm-name "" \
+       --eviction-policy LRU \
+       --coordinator-url http://10.0.0.1:9300 \
+       --coordinator-advertise-ip 10.0.0.1 \
+       --p2p-rpc-port 9555 \
+       --p2p-advertise-url 10.0.0.1:8500 \
+       --p2p-transfer-engine hixl
 
 **Node B, MP terminal:**
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=DEBUG LMCACHE_HIXL_DEVICE_ID=0 LMCACHE_HIXL_ENGINE_ID=10.0.0.2:6101 LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 lmcache server --host 0.0.0.0 --port 5555 --http-port 8080 --instance-id ascend-b --supported-transfer-mode lmcache_driven --chunk-size 4096 --l1-size-gb 50 --l1-align-bytes 65536 --no-l1-use-lazy --shm-name "" --eviction-policy LRU --l2-prefetch-policy skip_l1 --coordinator-url http://10.0.0.1:9300 --coordinator-advertise-ip 10.0.0.2 --p2p-rpc-port 9555 --p2p-advertise-url 10.0.0.2:8500 --p2p-transfer-engine hixl 2>&1 | tee logs/ascend-p2p/mp-b.log
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=DEBUG \
+       LMCACHE_HIXL_DEVICE_ID=0 \
+       LMCACHE_HIXL_ENGINE_ID=10.0.0.2:6101 \
+       LMCACHE_HIXL_CONNECT_TIMEOUT_MS=10000 \
+       lmcache server \
+       --transport grpc \
+       --host 0.0.0.0 \
+       --port 5555 \
+       --http-host 0.0.0.0 \
+       --http-port 8080 \
+       --instance-id ascend-b \
+       --supported-transfer-mode lmcache_driven \
+       --chunk-size 4096 \
+       --l1-size-gb 50 \
+       --l1-align-bytes 65536 \
+       --no-l1-use-lazy \
+       --shm-name "" \
+       --eviction-policy LRU \
+       --l2-prefetch-policy skip_l1 \
+       --coordinator-url http://10.0.0.1:9300 \
+       --coordinator-advertise-ip 10.0.0.2 \
+       --p2p-rpc-port 9555 \
+       --p2p-advertise-url 10.0.0.2:8500 \
+       --p2p-transfer-engine hixl
 
 Mooncake TE MP servers
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -393,17 +567,86 @@ Mooncake TE MP servers
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=DEBUG HCCL_SOCKET_IFNAME=eth0 HCCL_INTRA_ROCE_ENABLE=1 MC_TE_PROTOCOL=ascend MC_TE_DEVICE='' ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' ASCEND_BUFFER_POOL=0:0 ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' ASCEND_AUTO_CONNECT=0 ASCEND_USE_SHORT_CONNECTION=0 ASCEND_CONNECT_TIMEOUT=10000 ASCEND_TRANSFER_TIMEOUT=60000 ASCEND_THREAD_POOL_SIZE=1 ASCEND_BASE_PORT=16000 ASCEND_USE_ASYNC_TRANSFER=1 lmcache server --host 0.0.0.0 --port 5555 --http-port 8080 --instance-id ascend-a --supported-transfer-mode lmcache_driven --chunk-size 4096 --l1-size-gb 50 --l1-align-bytes 65536 --no-l1-use-lazy --shm-name "" --eviction-policy LRU --coordinator-url http://10.0.0.1:9300 --coordinator-advertise-ip 10.0.0.1 --p2p-rpc-port 9555 --p2p-advertise-url 10.0.0.1:8500 --p2p-transfer-engine mooncake_te 2>&1 | tee logs/ascend-p2p/mp-a.log
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=DEBUG \
+       HCCL_SOCKET_IFNAME=eth0 \
+       HCCL_INTRA_ROCE_ENABLE=1 \
+       MC_TE_PROTOCOL=ascend \
+       MC_TE_DEVICE='' \
+       ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' \
+       ASCEND_BUFFER_POOL=0:0 \
+       ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' \
+       ASCEND_AUTO_CONNECT=0 \
+       ASCEND_USE_SHORT_CONNECTION=0 \
+       ASCEND_CONNECT_TIMEOUT=10000 \
+       ASCEND_TRANSFER_TIMEOUT=60000 \
+       ASCEND_THREAD_POOL_SIZE=1 \
+       ASCEND_BASE_PORT=16000 \
+       ASCEND_USE_ASYNC_TRANSFER=1 \
+       lmcache server \
+       --transport grpc \
+       --host 0.0.0.0 \
+       --port 5555 \
+       --http-host 0.0.0.0 \
+       --http-port 8080 \
+       --instance-id ascend-a \
+       --supported-transfer-mode lmcache_driven \
+       --chunk-size 4096 \
+       --l1-size-gb 50 \
+       --l1-align-bytes 65536 \
+       --no-l1-use-lazy \
+       --shm-name "" \
+       --eviction-policy LRU \
+       --coordinator-url http://10.0.0.1:9300 \
+       --coordinator-advertise-ip 10.0.0.1 \
+       --p2p-rpc-port 9555 \
+       --p2p-advertise-url 10.0.0.1:8500 \
+       --p2p-transfer-engine mooncake_te
 
 **Node B, MP terminal:**
 
 .. code-block:: bash
 
-   mkdir -p logs/ascend-p2p
-   set -o pipefail
-   env ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 LMCACHE_DEVICE_BACKEND=npu LMCACHE_LOG_LEVEL=DEBUG HCCL_SOCKET_IFNAME=eth0 HCCL_INTRA_ROCE_ENABLE=1 MC_TE_PROTOCOL=ascend MC_TE_DEVICE='' ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' ASCEND_BUFFER_POOL=0:0 ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' ASCEND_AUTO_CONNECT=0 ASCEND_USE_SHORT_CONNECTION=0 ASCEND_CONNECT_TIMEOUT=10000 ASCEND_TRANSFER_TIMEOUT=60000 ASCEND_THREAD_POOL_SIZE=1 ASCEND_BASE_PORT=16000 ASCEND_USE_ASYNC_TRANSFER=1 lmcache server --host 0.0.0.0 --port 5555 --http-port 8080 --instance-id ascend-b --supported-transfer-mode lmcache_driven --chunk-size 4096 --l1-size-gb 50 --l1-align-bytes 65536 --no-l1-use-lazy --shm-name "" --eviction-policy LRU --l2-prefetch-policy skip_l1 --coordinator-url http://10.0.0.1:9300 --coordinator-advertise-ip 10.0.0.2 --p2p-rpc-port 9555 --p2p-advertise-url 10.0.0.2:8500 --p2p-transfer-engine mooncake_te 2>&1 | tee logs/ascend-p2p/mp-b.log
+   env \
+       ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+       LMCACHE_DEVICE_BACKEND=npu \
+       LMCACHE_LOG_LEVEL=DEBUG \
+       HCCL_SOCKET_IFNAME=eth0 \
+       HCCL_INTRA_ROCE_ENABLE=1 \
+       MC_TE_PROTOCOL=ascend \
+       MC_TE_DEVICE='' \
+       ASCEND_LOCAL_COMM_RES='{"version":"1.3"}' \
+       ASCEND_BUFFER_POOL=0:0 \
+       ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":"roce:device","comm_resource_config.listen_port":26666}' \
+       ASCEND_AUTO_CONNECT=0 \
+       ASCEND_USE_SHORT_CONNECTION=0 \
+       ASCEND_CONNECT_TIMEOUT=10000 \
+       ASCEND_TRANSFER_TIMEOUT=60000 \
+       ASCEND_THREAD_POOL_SIZE=1 \
+       ASCEND_BASE_PORT=16000 \
+       ASCEND_USE_ASYNC_TRANSFER=1 \
+       lmcache server \
+       --transport grpc \
+       --host 0.0.0.0 \
+       --port 5555 \
+       --http-host 0.0.0.0 \
+       --http-port 8080 \
+       --instance-id ascend-b \
+       --supported-transfer-mode lmcache_driven \
+       --chunk-size 4096 \
+       --l1-size-gb 50 \
+       --l1-align-bytes 65536 \
+       --no-l1-use-lazy \
+       --shm-name "" \
+       --eviction-policy LRU \
+       --l2-prefetch-policy skip_l1 \
+       --coordinator-url http://10.0.0.1:9300 \
+       --coordinator-advertise-ip 10.0.0.2 \
+       --p2p-rpc-port 9555 \
+       --p2p-advertise-url 10.0.0.2:8500 \
+       --p2p-transfer-engine mooncake_te
 
 Verify peer discovery and remote hits
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -424,7 +667,8 @@ Keep vLLM prefix caching disabled for this check
 
 1. Use the same model, tokenizer, chat template, dtype and KV layout on both
    nodes. Send a long, deterministic prompt to A and wait for its request
-   and LMCache store to finish.
+   and LMCache store to finish. Before sending requests to B, confirm that
+   A has not evicted the prefixes intended for reuse.
 2. Send the identical token prefix to B, whose local cache has not seen it.
    Use a tokenized prefix longer than one full chunk; for the commands
    above this means more than 4096 tokens, not 4096 characters. Incomplete
@@ -438,48 +682,11 @@ Keep vLLM prefix caching disabled for this check
    answer and check every result, alongside nonzero L2 hits and error logs.
    Size L1 for the working set and concurrent prefetch buffers.
 
-On A and B respectively:
-
-.. code-block:: bash
-
-   grep -nE 'Added P2P adapter|Stored [0-9]+ tokens|ERROR|Traceback|HixlError' logs/ascend-p2p/mp-a.log
-   grep -nE 'submitted load tasks|hit cells|Retrieved [0-9]+ tokens|ERROR|Traceback|HixlError' logs/ascend-p2p/mp-b.log
+Check the MP server output on A for completed stores and on B for L2 hits
+and completed retrievals. Check both terminals for errors.
 
 For example, ``60 hit cells (0 from L1, 60 from L2)`` on B is evidence of
 remote loading in this configuration. The number of cells is not necessarily
 the token count: it also depends on the model's object groups and layout.
 After validation, restore the default prefetch policy if retaining remote
 data in B's L1 is desired, and lower log verbosity before measuring throughput.
-
-Troubleshooting and scope
--------------------------
-
-* **Initialization fails before registration:** check that the Engine IP
-  belongs to the host, its port is free, ``/etc/hccn.conf`` is present, and
-  the selected NPU's network is healthy. A generic HIXL initialization
-  status does not uniquely identify a port conflict; inspect the native
-  logs for the underlying failure.
-* **Allocation or registration fails:** confirm the actual native module
-  and loaded CANN libraries, non-lazy allocation, empty SHM and disabled
-  hugepages. Do not reuse an older allocator that additionally maps the
-  Host range before communication registration. Allocation success alone
-  does not establish registration or transfer success.
-* **Correct answers but no L2 hits:** check peer discovery, complete chunk
-  lengths, matching token prefixes and layouts, and local caches. Look for
-  earlier errors instead of treating fallback recomputation as a P2P pass.
-* **DeepSeek-V4 object-group errors:** earlier Ascend end-to-end validation
-  used ``--no-separate-object-groups`` on both MP servers. If reproducing
-  that configuration, apply it to both sides and record it with the result.
-  This is an Ascend layout compatibility condition, not a HIXL transport
-  requirement or a general recommendation for other models. In particular,
-  follow the separate object-group requirements in :doc:`hybrid_mamba`.
-* **Cleanup errors:** preserve both complete logs and exit codes even if
-  byte verification passed. Stop peer traffic before teardown and allow
-  time for deregistration and Host memory release.
-
-The current HIXL backend transfers through one registered L1 Host buffer.
-Additional local regions and direct NPU device-memory transfers are outside
-its scope. A successful transfer-channel benchmark, model accuracy test,
-and concurrent remote-hit test establish different properties; record the
-package versions, configuration and evidence for each. Rebuild and rerun
-the relevant checks when the allocator or native bindings change.
