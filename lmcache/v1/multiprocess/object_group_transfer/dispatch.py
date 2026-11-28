@@ -107,5 +107,6 @@ def transfer_kv_per_object_group(
                 skip_first_n_tokens,
                 direction,
                 engine=engine,
+                block_ids_host=block_ids_host,
                 chunk_range=chunk_range,
             )

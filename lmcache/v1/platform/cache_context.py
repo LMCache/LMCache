@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 # First Party
+from lmcache.v1.common.buffer_registration import SlottedBufferRegistration
 from lmcache.v1.common.custom_types import EngineType
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.platform import get_device_spec
@@ -143,6 +144,11 @@ def create_cache_context(
             "entry point provides a DeviceSpec whose ``create_cache_context`` "
             "hook returns a BaseCacheContext instance." % device_type
         )
+    staging_options = {}
+    if isinstance(buffer_registration, SlottedBufferRegistration):
+        alignment = buffer_registration.slot_alignment(device_type)
+        if alignment:
+            staging_options["staging_alignment"] = alignment
     context = spec.create_cache_context(
         kv_caches,
         lmcache_tokens_per_chunk,
@@ -152,6 +158,7 @@ def create_cache_context(
         separate_object_groups,
         full_sw_kv,
         object_group_transfer=object_group_transfer,
+        **staging_options,
     )
     if buffer_registration is not None:
         try:

@@ -714,6 +714,11 @@ verify the installation.
      - ``True``
      - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
        ext4). Ignored by ``ugds``, whose IO bypasses the kernel entirely.
+   * - ``--gds-l1-io-concurrency``
+     - ``0``
+     - Use up to four staging slots for concurrent, aligned cuFile direct I/O.
+       Zero keeps the original single-stream path. Packed buffers, buffered I/O
+       and aliased restore destinations use ordered transfers.
 
 L1 Manager TTLs
 ----------------

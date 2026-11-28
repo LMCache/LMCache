@@ -58,7 +58,7 @@ def context(
 
     class _Context(cuda_context.GPUCacheContext):
         def _init_impl(self, *args: Any, **kwargs: Any) -> None:
-            self.cuda_stream_ = expected_stream
+            self.cuda_stream_ = cast(torch.cuda.Stream, expected_stream)
             self._temp_buffer = cuda_context._TempGPUBuffer(
                 manager, 16, torch.device("cpu")
             )

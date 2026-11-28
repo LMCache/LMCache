@@ -3,18 +3,24 @@
 as one native plan (host-memory objects only) or one batch at a time."""
 
 # Standard
-from typing import Any, Sequence
+from collections import deque
+from dataclasses import dataclass
+from typing import Any, Protocol, Sequence, cast
 
 # Third Party
 import torch
 
 # First Party
-from lmcache import device_ops
+from lmcache import device_ops, torch_dev
 from lmcache.v1.common.attn_window import recalculate_blocks_to_skip
 from lmcache.v1.common.logging import init_logger
+from lmcache.v1.gpu_connector.gds_context import (
+    SlabDirection,
+    get_l1_gds_context,
+)
 from lmcache.v1.gpu_connector.gpu_ops import build_staging_copies
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
@@ -28,6 +34,7 @@ from lmcache.v1.multiprocess.object_group_transfer.planning import (
     batched_iteration_with_skip,
     resolve_chunk_range,
 )
+from lmcache.v1.platform import stream as platform_stream
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
@@ -246,6 +253,7 @@ def _launch_batch_kernels(
     batch_len: int,
     skip_tokens_in_chunk: int,
     direction: "lmcache_native.TransferDirection",
+    slot_start: int = 0,
 ) -> None:
     """Launch the block kernel for one staged batch, once per kernel group.
 
@@ -253,6 +261,7 @@ def _launch_batch_kernels(
         cache_context: Cache context of the KV cache.
         block_ids_gpu: Block IDs on the GPU, per kernel group.
         object_group_id: Object group index.
+        slot_start: First staging slot used by this batch.
         start_object_idx: Chunk index of the batch's first chunk.
         batch_len: Chunks in the batch; chunk ``i`` is in staging slot ``i``.
         skip_tokens_in_chunk: Leading tokens of the batch not written.
@@ -299,7 +308,9 @@ def _launch_batch_kernels(
             kernel_group_id
         )
         tmp_gpu_buffers_batched = [
-            cache_context.get_temp_kernel_group_buffer(i, kernel_group_id).data_ptr()
+            cache_context.get_temp_kernel_group_buffer(
+                slot_start + i, kernel_group_id
+            ).data_ptr()
             for i in range(batch_len)
         ]
         device_ops.multi_layer_block_kv_transfer(
@@ -315,6 +326,153 @@ def _launch_batch_kernels(
         )
 
 
+class _GDSStream(Protocol):
+    """CUDA slot stream ordering work behind an already-recorded input event."""
+
+    def wait_event(self, event: object) -> None: ...
+
+
+@dataclass
+class _GDSSlot:
+    slot: int
+    object_index: int
+    skip_tokens: int
+
+
+def _run_gds_concurrent(
+    cache_context: BaseCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    skip_first_n_tokens: int,
+    skip_objects: int,
+    end_chunk: int,
+    direction: "lmcache_native.TransferDirection",
+    block_ids_host: Sequence[Sequence[int]],
+) -> bool:
+    """Reap/refill at most four independent stream-ordered GDS slots.
+
+    Slots rotate in submission order. Reads
+    are validated before scatter; stores gather before I/O on the same stream.
+    Every slot remains owned until its final stream wait completes. This runs on
+    the existing blocking affinity handler, never the transport event loop.
+    """
+    chunk_size = cache_context.lmcache_tokens_per_chunk
+    objects = [
+        mo
+        for index, mo in enumerate(memory_objs[:end_chunk])
+        if mo is not None
+        and index >= skip_objects
+        and (index + 1) * chunk_size > skip_first_n_tokens
+    ]
+    if not objects or cache_context.device.type != "cuda":
+        return False
+    if not all(isinstance(mo, GDSMemoryObject) for mo in objects):
+        return False
+    owners = {mo.get_l1_manager() for mo in objects}
+    if len(owners) != 1:
+        return False
+    context = get_l1_gds_context(owners.pop())
+    if not context.io_concurrency:
+        return False
+    is_read = direction == lmcache_native.TransferDirection.H2D
+    if is_read:
+        # Concurrent scatter must preserve the serial ordering of aliased blocks.
+        if not block_ids_host:
+            return False
+        manager = cache_context.kv_layer_groups_manager
+        first_object = max(skip_objects, skip_first_n_tokens // chunk_size)
+        for group_id in manager.object_groups[object_group_id].kernel_group_indices:
+            window_tokens = min(
+                chunk_size, manager.get_subchunk_sw_size_tokens(group_id)
+            )
+            blocks = cache_context.calculate_num_blocks(window_tokens, group_id)
+            destinations = block_ids_host[group_id][
+                first_object * blocks : end_chunk * blocks
+            ]
+            if len(destinations) != len(set(destinations)):
+                return False
+    with cache_context.gds_transfer_scope(), context.io_scope():
+        if not context.has_aligned_slot(
+            cache_context.get_temp_object_group_buffer(0, object_group_id)
+        ):
+            return False
+        count = min(cache_context.max_batch_size, context.io_concurrency)
+        streams = [cache_context.get_gds_transfer_stream(slot) for slot in range(count)]
+        for stream in streams:
+            context.register_stream(cache_context.device, stream)
+        ready = cache_context.record_gds_transfer_ready()
+        pending: deque[_GDSSlot] = deque()
+
+        def finish_oldest() -> int:
+            entry = pending[0]
+            stream = streams[entry.slot]
+            context.synchronize_and_check(cache_context.device, stream)
+            if is_read:
+                with torch_dev.stream(stream):
+                    _launch_batch_kernels(
+                        cache_context,
+                        block_ids_gpu,
+                        object_group_id,
+                        entry.object_index,
+                        1,
+                        entry.skip_tokens,
+                        direction,
+                        entry.slot,
+                    )
+                platform_stream.synchronize_stream(cache_context.device, stream)
+            return pending.popleft().slot
+
+        try:
+            for index in range(skip_objects, end_chunk):
+                obj = memory_objs[index]
+                skip = max(0, skip_first_n_tokens - index * chunk_size)
+                if skip >= chunk_size:
+                    continue
+                if obj is None:
+                    if is_read:
+                        raise ValueError("Missing GDS object during retrieve")
+                    continue
+                assert isinstance(obj, GDSMemoryObject)  # Eligibility checked above.
+                slot = finish_oldest() if len(pending) == count else len(pending)
+                entry = _GDSSlot(slot, index, skip)
+                # Retain ownership even if gather or I/O only partially submits.
+                pending.append(entry)
+                stream = streams[entry.slot]
+                with torch_dev.stream(stream):
+                    cast(_GDSStream, stream).wait_event(ready)
+                    if not is_read:
+                        _launch_batch_kernels(
+                            cache_context,
+                            block_ids_gpu,
+                            object_group_id,
+                            index,
+                            1,
+                            skip,
+                            direction,
+                            entry.slot,
+                        )
+                    context.transfer_async(
+                        obj,
+                        cache_context.get_temp_object_group_buffer(
+                            entry.slot, object_group_id
+                        ),
+                        SlabDirection.READ if is_read else SlabDirection.WRITE,
+                    )
+            while pending:
+                finish_oldest()
+        finally:
+            # Keep the original error; every partially submitted owner/stream drains.
+            for entry in pending:
+                try:
+                    context.synchronize_and_check(
+                        cache_context.device, streams[entry.slot]
+                    )
+                except Exception:
+                    logger.exception("GDS slot cleanup failed after transfer error")
+    return True
+
+
 def run_staged_loop(
     cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
@@ -325,6 +483,7 @@ def run_staged_loop(
     direction: "lmcache_native.TransferDirection",
     *,
     engine: TransferEngine,
+    block_ids_host: Sequence[Sequence[int]] = (),
     chunk_range: tuple[int, int] | None = None,
 ) -> None:
     """Stage and transfer chunks one batch at a time, with any engine.
@@ -338,6 +497,7 @@ def run_staged_loop(
         batch_size: Chunks per batch.
         skip_first_n_tokens: Leading tokens not written.
         direction: H2D (retrieve) or D2H (store).
+        block_ids_host: Host block IDs for checking concurrent scatter destinations.
         engine: The engine of every object in the range.
         chunk_range: ``[start, end)`` chunks to move; None means all.
 
@@ -364,6 +524,19 @@ def run_staged_loop(
     start_chunk, end_chunk = resolve_chunk_range(
         len(memory_objs), chunk_range, num_objects_to_skip
     )
+    if engine is TransferEngine.NVME_DMA and _run_gds_concurrent(
+        cache_context,
+        block_ids_gpu,
+        memory_objs,
+        object_group_id,
+        skip_first_n_tokens,
+        start_chunk,
+        end_chunk,
+        direction,
+        block_ids_host,
+    ):
+        return
+
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs[:end_chunk], batch_size, skip_count=start_chunk
     ):

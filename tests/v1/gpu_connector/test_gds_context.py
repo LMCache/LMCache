@@ -29,14 +29,21 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
 from lmcache.v1.gpu_connector import gds_context
 from lmcache.v1.gpu_connector._gds_backends import create_backend
-from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend
+from lmcache.v1.gpu_connector.gds_backends.base import GDSBackend, Submission
 from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     SlabDirection,
     get_gds_context,
     initialize_gds_context,
 )
-from lmcache.v1.memory_management import GDSMemoryObject
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObjMetadata
+
+requires_native_cuda = pytest.mark.skipif(
+    torch_device_type != "cuda"
+    or not torch_dev.is_available()
+    or torch.version.hip is not None,
+    reason="requires CUDA",
+)
 
 
 def _fake_stream(handle: int):
@@ -553,7 +560,7 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         registration = gds_context.GDSBufferRegistration()
         registration.register(tensor)
         registration.deregister(tensor)
-        register.assert_called_once_with(tensor)
+        register.assert_called_once_with(tensor, object_sizes=(), stream_owner=None)
         deregister.assert_called_once_with(tensor)
         with pytest.raises(ValueError, match="one GDS"):
             gds_context.initialize_l1_gds_context(owner + 1, config)
@@ -568,3 +575,147 @@ def test_l1_context_routes_by_owner_and_limits_process_slabs(monkeypatch, backen
         gds_context.get_l1_gds_context(owner)
     gds_context.initialize_l1_gds_context(owner + 1, config)
     gds_context.close_l1_gds_context(owner + 1)
+
+
+def test_aligned_slot_preserves_payload_and_owns_the_tail(
+    backend: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Store an unaligned object without exposing the following group's bytes."""
+    backend.name = "cufile"
+    handle = backend.open_slab.return_value
+    handle.path = "/test"
+    _use_fake_stream(monkeypatch, 1)
+    monkeypatch.setattr(
+        gds_context.platform_stream, "synchronize_device", lambda *_: None
+    )
+    ctx = GDSContext(backend)
+    ctx.initialize(GdsL1Config("/test", 1 << 20, io_concurrency=4))
+    raw = torch.full((3 * 65536,), 91, dtype=torch.uint8)
+    offset = -raw.data_ptr() % 65536
+    buf = raw.narrow(0, offset, 2 * 65536)
+    logical = buf[:4097]
+    obj = GDSMemoryObject(
+        MemoryObjMetadata(torch.Size([4097]), torch.uint8, 4096, 8192, 0)
+    )
+    try:
+        ctx.register_gpu_buffer(buf, object_sizes=(4097, 123))
+        ctx.register_stream(buf.device, _fake_stream(2))
+        backend.register_aligned_stream.assert_called_once_with(2)
+        _use_fake_stream(monkeypatch, 2)
+        short = Submission(8192, 4096, 0)
+        short.result.value = 8191
+        handle.write_async.return_value = short
+        ctx.transfer_async(obj, logical, SlabDirection.WRITE)
+        with pytest.raises(RuntimeError, match="expected 8192 bytes, completed 8191"):
+            ctx.synchronize_and_check(buf.device, _fake_stream(2))
+        assert handle.write_async.call_args.args == (buf.data_ptr(), 8192, 4096, 0, 2)
+        assert torch.all(logical == 91)
+        assert torch.all(buf[4097:8192] == 0)
+        assert torch.all(buf[8192:] == 91)
+        with pytest.raises(ValueError, match="reservation"):
+            ctx.transfer_async(
+                GDSMemoryObject(
+                    MemoryObjMetadata(torch.Size([4097]), torch.uint8, 4096, 4097, 0)
+                ),
+                logical,
+                SlabDirection.READ,
+            )
+        assert not handle.read_async.called
+        _use_fake_stream(monkeypatch, 1)
+        ctx.transfer_async(obj, logical, SlabDirection.READ)
+        assert handle.read_async.call_args.args[1] == 4097
+    finally:
+        ctx.close()
+
+
+@pytest.mark.parametrize("size", [32 << 20, (32 << 20) + 4096, 40 << 20, 64 << 20])
+def test_large_direct_cufile_groups_keep_four_aligned_slots(size, backend, monkeypatch):
+    # First Party
+    from lmcache.v1.platform.devices.cuda.cache_context import _TempGPUBuffer
+
+    backend.name = "cufile"
+    ctx = GDSContext(backend)
+    ctx.initialize(GdsL1Config("/test", 1 << 30, io_concurrency=4))
+    monkeypatch.setattr(gds_context, "get_gds_context", lambda: ctx)
+    group = SimpleNamespace(
+        shape_desc=SimpleNamespace(kv_size=1),
+        num_layers=1,
+        hidden_dim_size=size // 256,
+        dtype=torch.uint8,
+    )
+    layout = SimpleNamespace(
+        kernel_groups=[group],
+        num_kernel_groups=1,
+        num_object_groups=1,
+        object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+        get_slots_per_chunk_in_sw=lambda _: 256,
+    )
+    alignment = gds_context.GDSBufferRegistration().slot_alignment("cuda")
+    buf = _TempGPUBuffer(layout, 256, torch.device("cpu"), staging_alignment=alignment)
+    assert buf.aligned_object_sizes == (size,)
+    for i in range(4):
+        view = buf.get_temp_object_group_buffer(i, 0)
+        assert view.nbytes == size and view.data_ptr() % 65536 == 0
+
+
+def test_slot_registration_rejects_main_stream_alias_in_both_orders(
+    monkeypatch, backend
+):
+    ctx = GDSContext(backend)
+    ctx.initialized = True
+    buf = torch.empty(4096, dtype=torch.uint8)
+    slot = _fake_stream(17)
+    _use_fake_stream(monkeypatch, 17)
+    ctx.register_gpu_buffer(buf)
+    with pytest.raises(ValueError, match="main stream"):
+        ctx.register_stream(buf.device, slot)
+    ctx.deregister_gpu_buffer(buf)
+    ctx.register_stream(buf.device, slot)
+    ctx.register_stream(buf.device, slot)
+    backend.register_aligned_stream.assert_called_once_with(17)
+    with pytest.raises(ValueError, match="another owner"):
+        ctx.register_stream(buf.device, _fake_stream(17))
+    with pytest.raises(ValueError, match="aligned slot"):
+        ctx.register_gpu_buffer(buf)
+
+
+@requires_native_cuda
+def test_live_owned_cuda_streams_have_distinct_handles():
+    # First Party
+    from lmcache.v1.platform.devices.cuda.cache_context import _OwnedCUDAStream
+
+    streams = [_OwnedCUDAStream.create(torch.device("cuda", 0)) for _ in range(40)]
+    assert len({s.cuda_stream for s in streams}) == len(streams)
+    assert all(s.cuda_stream == s.cupy_stream.ptr for s in streams)
+
+
+@requires_native_cuda
+def test_factory_registers_and_releases_aligned_slots(monkeypatch, backend):
+    # First Party
+    from lmcache.v1.platform.cache_context import create_cache_context
+
+    backend.name = "cufile"
+    slab = GDSContext(backend)
+    slab.initialize(GdsL1Config("/test", 1 << 30, io_concurrency=4))
+    monkeypatch.setattr(gds_context, "get_gds_context", lambda: slab)
+    kv = torch.empty(2, 4, 16, 2, 8, device="cuda")
+    wrapper = SimpleNamespace(to_tensor=lambda: kv, close=Mock())
+    try:
+        ctx = create_cache_context(
+            [wrapper], buffer_registration=gds_context.GDSBufferRegistration()
+        )
+        try:
+            for slot in range(ctx.max_batch_size):
+                assert slab.has_aligned_slot(ctx.get_temp_object_group_buffer(slot, 0))
+            stream = ctx.get_gds_transfer_stream(0)
+            slab.register_stream(ctx.device, stream)
+            main = ctx.stream.cuda_stream
+            assert main != stream.cuda_stream
+        finally:
+            ctx.close()
+        handles = [call.args[0] for call in backend.deregister_stream.call_args_list]
+        assert handles == [stream.cuda_stream, main]
+        wrapper.close.assert_called_once()
+    finally:
+        slab.close()
