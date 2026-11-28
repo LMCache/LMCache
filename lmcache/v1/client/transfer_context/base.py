@@ -167,13 +167,16 @@ class EngineDrivenContext(ABC):
     @abstractmethod
     def prepare_store(
         self, key: IPCCacheServerKey, instance_id: int
-    ) -> tuple[list[torch.Tensor], list[int]] | None:
-        """Prepare SHM buffers for a store operation.
+    ) -> tuple[list[torch.Tensor] | None, list[int]] | None:
+        """Prepare a store operation.
 
         Returns:
-            None: inline mode — no pre-allocated buffers. Caller gathers all
-                chunks to CPU itself and sends the serialized data via
-                commit_store.
+            None: the server named no chunks (inline mode against a server
+                that predates chunk selection). Caller gathers all chunks to
+                CPU itself and sends the serialized data via commit_store.
+            (None, chunk_indices): inline mode. Caller gathers only these
+                chunks into its own buffers and sends them via commit_store
+                with ``chunk_indices``; an empty list means nothing to store.
             ([], []): SHM mode but all chunks already cached. Caller should
                 skip gather and commit entirely.
             (tensors, chunk_indices): SHM mode with new chunks to write.
@@ -188,9 +191,25 @@ class EngineDrivenContext(ABC):
 
     @abstractmethod
     def commit_store(
-        self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        chunks: list[torch.Tensor],
+        chunk_indices: list[int] | None = None,
+        num_chunks: int = 0,
     ) -> bool:
-        """Commit store. Inline: serialize and send. Shm: notify server."""
+        """Commit store. Inline: serialize and send. Shm: notify server.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            chunks: The gathered chunks.
+            chunk_indices: The chunk position of each of ``chunks`` within
+                ``key``, from ``prepare_store``; ``None`` means positions
+                ``0`` to ``len(chunks) - 1``.
+            num_chunks: Chunk positions in ``key``; used with
+                ``chunk_indices``.
+        """
         ...
 
     @abstractmethod

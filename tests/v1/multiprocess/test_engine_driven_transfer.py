@@ -1530,6 +1530,8 @@ def server_module_factory(
         Returns ``(module, mock_storage, mock_session, ctx)``.
         """
         mock_storage = mock_storage or MagicMock()
+        # The store filter keeps every key: these tests reserve and copy all.
+        mock_storage.select_keys_to_write.side_effect = lambda keys: list(keys)
         if mock_session is None:
             mock_session = MagicMock()
             mock_session.get_hashes.return_value = [b"h"]
@@ -2073,6 +2075,60 @@ def test_server_publishes_transfer_events(
     assert events[1].metadata["transfer_key"] != events[4].metadata["transfer_key"]
 
 
+def test_server_inline_store_receives_only_the_chunks_to_write(
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """The inline prepare names the chunks the store filter keeps; the worker
+    sends those in runs, and the transfer counts only them."""
+    tensors = [torch.full((2, 2, 8, 16), float(i)) for i in range(4)]
+    storage = MagicMock()
+    written: dict[str, torch.Tensor] = {}
+
+    def reserve(keys: list[str], *_a: object, **_kw: object) -> dict:
+        reserved = {}
+        for name in keys:
+            memory_obj = MagicMock()
+            memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+            written[name] = memory_obj.tensor
+            reserved[name] = memory_obj
+        return reserved
+
+    storage.reserve_write.side_effect = reserve
+    module, _, _, ctx = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(pool_size=8192),
+        object_keys=["c0", "c1", "c2", "c3"],
+        mock_storage=storage,
+    )
+    storage.select_keys_to_write.side_effect = lambda keys: [
+        key for key in keys if key in ("c0", "c2")
+    ]
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
+    key = _default_key(tokens=32)
+    events: list[Event] = []
+    with patch.object(ctx.event_bus, "publish", side_effect=events.append):
+        assert module.prepare_store(key, 2).context == {"chunk_indices": [0, 2]}
+        assert module.commit_store(key, 2, encode_tensors(tensors[:1]), 0, 1)
+        assert module.commit_store(key, 2, encode_tensors(tensors[2:3]), 2, 1)
+        assert module.commit_store(key, 2, encode_tensors([]), 4, 0)
+    assert sorted(written) == ["c0", "c2"]
+    assert torch.equal(written["c2"], tensors[2])
+    start, end = events[1], events[2]
+    assert start.event_type == EventType.MP_STORE_START
+    assert end.metadata["stored_count"] == 2
+    assert end.metadata["total_bytes"] == 2 * tensors[0].nbytes
+
+    # Nothing to write: the worker sends nothing, and no transfer starts.
+    storage.select_keys_to_write.side_effect = lambda keys: []
+    with patch.object(ctx.event_bus, "publish") as publish:
+        assert module.prepare_store(key, 2).context == {"chunk_indices": []}
+    assert not any(
+        call.args[0].event_type == EventType.MP_STORE_START
+        for call in publish.call_args_list
+    )
+
+
 def test_server_pages_inline_store_and_retrieve(
     server_module_factory: ServerModuleFactory,
 ) -> None:
@@ -2553,6 +2609,39 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
         reserved_keys,
         l1_owners={k: memory_obj.get_l1_manager() for k in reserved_keys},
     )
+
+
+def test_server_shm_prepare_store_gives_slots_only_to_the_chunks_to_write(
+    stub_lmcache_native: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
+    """A chunk the store filter drops is neither reserved nor given a slot,
+    so the worker neither gathers nor commits it."""
+    mock_storage = MagicMock()
+    memory_obj = MagicMock()
+    memory_obj.tensor = torch.zeros(2, 2, 8, 16)
+    memory_obj.shm_offset = 0
+    memory_obj.shm_byte_length = memory_obj.tensor.nbytes
+    mock_storage.reserve_write.side_effect = lambda obj_keys, *_a, **_kw: {
+        obj_key: memory_obj for obj_key in obj_keys
+    }
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=1024
+        ),
+        mock_storage=mock_storage,
+        object_keys=["c0", "c1", "c2"],
+    )
+    mock_storage.select_keys_to_write.side_effect = lambda keys: [
+        key for key in keys if key != "c1"
+    ]
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=6)
+    )
+    response = module.prepare_store(_default_key(tokens=24), 6)
+    assert response.context["chunk_indices"] == [0, 2]
+    assert len(response.context["slots"]) == 2
+    assert mock_storage.reserve_write.call_args[0][0] == ["c0", "c2"]
 
 
 def test_server_shm_transport_uses_engine_level_config(

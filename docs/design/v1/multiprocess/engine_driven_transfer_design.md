@@ -271,10 +271,17 @@ model-specific copy kernel is needed. Workers must report the physical-slot
 count for every registered layout.
 
 Store:
-1. Worker `prepare_store` RPC.
-2. Worker gathers paged KV into CPU chunks.
+1. Worker `prepare_store` RPC. The server reserves nothing; it names the
+   chunks to send (`chunk_indices`, plus `group_ids` for grouped workers),
+   the ones the store filter `StorageManager.select_keys_to_write` keeps,
+   as the SHM prepare does when it reserves slots.
+2. Worker gathers those chunks of paged KV into CPU chunks.
 3. Worker `commit_store` sends serialized bytes.
 4. Server deserializes and writes to storage.
+
+If the server names no chunk, the worker gathers and sends nothing. A worker
+that ignores the names sends every chunk, and `reserve_write` refuses the ones
+L1 already holds.
 
 Retrieve:
 1. Worker `prepare_retrieve` RPC.
@@ -298,6 +305,9 @@ bytes over 4 GiB. `commit_store` and `prepare_retrieve` take `chunk_start` and
 the last chunk, so `0, 0` is the whole range and a transfer that fits in one
 page is a single request as before. The worker cuts the positions into
 consecutive pages of at most 128 MiB (or one chunk) and sends them in order.
+A single-group page carries exactly the chunks of its range, so a page also
+ends where the named positions skip a chunk; when the last chunk is not
+sent, an empty page that starts at the end of the key ends the store.
 The server keeps no state between store pages, and for a retrieve only where
 the unread pages start:
 

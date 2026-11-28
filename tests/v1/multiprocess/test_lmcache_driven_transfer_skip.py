@@ -4,6 +4,8 @@
 
 - ``all_null_chunk_masks`` (store side): mark chunks whose block ids are all the
   null block so ``store`` never commits them.
+- ``null_window_chunk_masks`` (store side): mark sliding-window chunks whose
+  stored window holds a null block, which ``all_null_chunk_masks`` keeps.
 - ``retrieve`` (read side): read/transfer only each object group's in-window
   suffix, None-padding the skipped prefix so the transfer path is unchanged.
 """
@@ -15,13 +17,23 @@ from unittest.mock import MagicMock, call
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.common.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import (
+    EvictionConfig,
+    L1ManagerConfig,
+    L1MemoryManagerConfig,
+    StorageManagerConfig,
+)
+from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
     all_null_chunk_masks,
+    null_window_chunk_masks,
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
@@ -101,6 +113,41 @@ def test_zero_is_real_with_negative_null_block() -> None:
     assert masks == [[False, False]]
 
 
+@pytest.mark.parametrize(
+    ("block_ids", "window_blocks", "expected"),
+    [
+        # The window covers the whole chunk: a chunk that straddles the
+        # window's edge holds null blocks next to real ones.
+        ([[0, 5, 6, 7, 8, 9]], [2], [[True, False, False]]),
+        # A one-block window: a null block before it is never stored, one
+        # inside it is.
+        ([[0, 5, 6, 0]], [1], [[False, True]]),
+        # Not a sliding-window group: this mask never marks it.
+        ([[0, 5, 6, 0]], [0], [[False, False]]),
+    ],
+)
+def test_null_window_marks_a_chunk_whose_stored_window_holds_a_null_block(
+    block_ids: list[list[int]], window_blocks: list[int], expected: list[list[bool]]
+) -> None:
+    masks = null_window_chunk_masks(
+        block_ids, [_og([0])], [2], window_blocks, len(block_ids[0]) // 2
+    )
+    assert masks == expected
+
+
+def test_null_window_checks_only_the_object_groups_window_kernel_groups() -> None:
+    # Object group 0 spans a full-attention kernel group with no window and a
+    # sliding-window one; only the latter's null block marks the chunk.
+    masks = null_window_chunk_masks(
+        block_ids=[[0, 1], [2, 0]],
+        object_groups=[_og([0, 1])],
+        blocks_per_chunk=[1, 1],
+        window_blocks_per_chunk=[0, 1],
+        num_chunks=2,
+    )
+    assert masks == [[False, True]]
+
+
 def test_negative_null_marker_preserves_checkpoint_zero() -> None:
     masks = all_null_chunk_masks([[-1, 0, -1, 1]], [_og([0])], [1], 4, -1)
     assert masks == [[True, False, True, False]]
@@ -111,6 +158,7 @@ def _staging_context(
     object_groups: list[ObjectGroupInfo],
     *,
     window_tokens: int = 2,
+    sliding_window_groups: tuple[int, ...] = (),
 ) -> MagicMock:
     """Build a CPU-only context that captures staged block IDs."""
     context = MagicMock()
@@ -120,6 +168,13 @@ def _staging_context(
         num_kernel_groups=num_kernel_groups,
         object_groups=object_groups,
         get_subchunk_sw_size_tokens=lambda group: window_tokens,
+        kernel_groups=[
+            SimpleNamespace(
+                sw_size_tokens=window_tokens if kg in sliding_window_groups else -1,
+                recurrent_state=False,
+            )
+            for kg in range(num_kernel_groups)
+        ],
     )
     context.stage_block_ids.side_effect = lambda ids: ids
     return context
@@ -180,6 +235,8 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         ]
 
     ctx.storage_manager.unsafe_read = MagicMock(side_effect=fake_read)
+    # The store filter keeps every key: these tests reserve and copy all.
+    ctx.storage_manager.select_keys_to_write.side_effect = lambda keys: list(keys)
     module._ctx = ctx
 
     transfer_calls: list[tuple[int, list]] = []
@@ -318,6 +375,103 @@ def test_store_mask_checks_only_the_requested_object_groups(
     )
     assert ok
     assert mask == expected
+
+
+def test_store_skips_a_sliding_window_chunk_with_a_null_block_in_its_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a prefix-cache hit the engine gives a sliding-window group the
+    null block below ``hit - window``. The chunk that straddles that edge is
+    not all null, but its stored window is not all KV either: no object
+    group of it may commit it."""
+    module, _reads, transfers = _make_module(monkeypatch, 2, [-1, 1])
+    context = _staging_context(
+        2, [_og([0]), _og([1])], window_tokens=2, sliding_window_groups=(1,)
+    )
+    context.kv_layer_groups_manager.num_object_groups = 2
+    context.kv_layer_groups_manager.get_attn_desc = lambda: SimpleNamespace(
+        num_chunks_in_sw=[-1, 1], group_kinds=("attention", "attention")
+    )
+    entry = module.get_and_touch_context_entry(1)
+    context.transfer_object_group = entry.cache_context.transfer_object_group
+    entry.cache_context = context
+    entry.chunk_size = 2
+    module.context.chunk_size = 1
+    module.context.layout_desc_registry.get_chunk_size.return_value = 2
+    module.context.session_manager.get.return_value = None
+    module.context.storage_manager.reserve_write.side_effect = lambda keys, layout: {
+        key: MagicMock(get_size=MagicMock(return_value=10)) for key in keys
+    }
+    monkeypatch.setattr(
+        mod, "downsample_and_stage_block_ids", downsample_and_stage_block_ids
+    )
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: object())
+
+    _handle, ok, mask = module.store_with_chunk_mask(
+        SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
+        1,
+        [[1, 2, 3, 4], [0, 5, 6, 7]],
+        b"producer",
+    )
+    assert ok
+    assert [
+        call.args[0]
+        for call in cast(
+            MagicMock, module.context.storage_manager.reserve_write
+        ).call_args_list
+    ] == [["g0c0", "g0c1"], ["g1c1"]]
+    assert [obj is None for obj in transfers[1][1]] == [True, False]
+    assert mask == [False, True]
+
+
+def test_store_skips_the_chunks_the_cache_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``store`` runs the real store filter: a chunk an L1 already holds is
+    neither reserved nor copied (a None slot), and is re-offered instead."""
+    module, _context, _reads, transfers = _make_checkpoint_module(monkeypatch)
+    layout = MemoryLayoutDesc(shapes=[torch.Size([64])], dtypes=[torch.float32])
+    monkeypatch.setattr(mod, "get_layout_desc", lambda *a, **kw: layout)
+    keys = [
+        [ObjectKey(ObjectKey.IntHash2Bytes(10 * g + c), "m", 0) for c in range(2)]
+        for g in range(2)
+    ]
+    server_context = cast(MagicMock, module.context)
+    server_context.resolve_obj_keys.return_value = keys
+    l1_config = L1ManagerConfig(
+        memory_config=L1MemoryManagerConfig(size_in_bytes=1 << 20, use_lazy=False)
+    )
+    storage = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=l1_config,
+            eviction_config=EvictionConfig("noop"),
+            l1_manager_configs=[l1_config],
+        )
+    )
+    server_context.storage_manager = storage
+    try:
+        held = keys[0][0]
+        reserved = storage.reserve_write([held], layout)
+        storage.finish_write([held], l1_owners=l1_owners_of(reserved))
+
+        _handle, ok = module.store(
+            SimpleNamespace(request_id="req", worker_id=1, has_unfull_chunk=_no_unfull),
+            1,
+            [[0, 1, 2, 3], [-1, -1, 0, 1], [-1, -1, 2, 3]],
+            b"producer",
+        )
+        assert ok
+        # Chunk 0 of group 0 is held; chunk 0 of group 1 is all null.
+        assert [obj is None for obj in transfers[0][1]] == [True, False]
+        assert [obj is None for obj in transfers[1][1]] == [True, False]
+        assert storage.report_status()["store_filter"] == {
+            "requested": 3,
+            "l1_resident": 1,
+            "l1_staged": 0,
+            "to_write": 2,
+        }
+    finally:
+        storage.close()
 
 
 def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):

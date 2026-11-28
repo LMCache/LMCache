@@ -787,6 +787,10 @@ class RawBlockL2Adapter(L2AdapterInterface):
         encoded_keys = [encode_object_key(key).encoded for key in keys]
         self._core.unlock_many(encoded_keys)
 
+    def held_keys(self, keys: list[ObjectKey]) -> list[bool] | None:
+        """Report which keys are committed or have a write in flight."""
+        return self._core.held_many([encode_object_key(key).encoded for key in keys])
+
     def submit_load_task(
         self,
         keys: list[ObjectKey],

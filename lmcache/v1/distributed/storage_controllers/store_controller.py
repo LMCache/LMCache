@@ -33,7 +33,10 @@ from lmcache.v1.distributed.storage_controllers.adapter_lifecycle import (
 from lmcache.v1.distributed.storage_controllers.store_policy import (
     StorePolicy,
 )
-from lmcache.v1.distributed.storage_controllers.utils import L2AdapterDescriptor
+from lmcache.v1.distributed.storage_controllers.utils import (
+    L2AdapterDescriptor,
+    merge_held_answers,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
@@ -84,6 +87,8 @@ class StoreListener(L1ManagerListener):
         # Keys deleted from L1 since the last pop. A pending key deleted
         # before the pop leaves ``_pending_keys``.
         self._deleted_keys: list[ObjectKey] = []
+        self._reoffered_keys: list[ObjectKey] = []
+        self._closed = False
         self._lock = threading.Lock()
         self._event_fd = create_event_notifier()
 
@@ -101,21 +106,46 @@ class StoreListener(L1ManagerListener):
         """Signal the notifier to wake any blocked poll() waiter."""
         self._event_fd.notify()
 
-    def pop_pending_changes(self) -> tuple[list[ObjectKey], list[ObjectKey]]:
+    def pop_pending_changes(
+        self,
+    ) -> tuple[list[ObjectKey], list[ObjectKey], list[ObjectKey]]:
         """
-        Pop the keys written to and deleted from L1 since the last pop.
+        Pop the keys written to, deleted from and re-offered to L1 since
+        the last pop.
 
-        This is non-blocking. Both lists are popped together, so the
-        written keys are all newer than any deletion of the same key.
+        This is non-blocking. The lists are popped together, so the written
+        keys are all newer than any deletion of the same key, and a
+        re-offered key that is also waiting as a written key is seen as
+        such and not submitted twice.
 
         Returns:
-            tuple[list[ObjectKey], list[ObjectKey]]: The written keys and
-            the deleted keys.
+            tuple[list[ObjectKey], list[ObjectKey], list[ObjectKey]]: The
+            written keys, the deleted keys and the re-offered keys.
         """
         with self._lock:
             written, deleted = self._pending_keys, self._deleted_keys
+            reoffered = self._reoffered_keys
             self._pending_keys, self._deleted_keys = [], []
-        return written, deleted
+            self._reoffered_keys = []
+        return written, deleted, reoffered
+
+    def reoffer(self, keys: list[ObjectKey]) -> None:
+        """Ask the loop to store resident L1 keys that L2 may be missing.
+
+        A store skips the GPU copy of a chunk L1 already holds. If that
+        chunk's earlier L2 store failed, or was never made, nothing would
+        write it. The loop checks each re-offered key against its queued and
+        in-flight stores and its adapters, and stores the ones L2 lacks that
+        are still in L1.
+
+        Args:
+            keys: Keys resident in this controller's L1.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._reoffered_keys.extend(keys)
+            self._event_fd.notify()
 
     def pending_count(self) -> int:
         """Return the number of pending keys waiting to be processed."""
@@ -166,7 +196,9 @@ class StoreListener(L1ManagerListener):
         pass
 
     def close(self) -> None:
-        """Close the notifier."""
+        """Close the notifier; later re-offers are dropped."""
+        with self._lock:
+            self._closed = True
         self._event_fd.close()
 
 
@@ -301,6 +333,8 @@ class StoreController(StorageControllerInterface):
         # In-flight tasks still counted against the budget -> when their read
         # locks lapse. Deadlines ascend in insertion order.
         self._budget_deadlines: OrderedDict[tuple[int, L2TaskId], float] = OrderedDict()
+        # What became of re-offered keys, counted on the loop thread.
+        self._reoffer_counts: Counter[str] = Counter()
 
         StoreController._gauge_target = self
         StoreController._gauge_targets[l1_manager.config.tag] = self
@@ -377,7 +411,42 @@ class StoreController(StorageControllerInterface):
             "num_active_adapters": len(self._l2_adapters) - num_draining,
             "num_draining_adapters": num_draining,
             "deferred_l1_deletion_count": len(self._deferred_l1_deletions),
+            "reoffered_keys": dict(self._reoffer_counts),
         }
+
+    def reoffer(self, keys: list[ObjectKey]) -> None:
+        """Queue resident L1 keys for a check that L2 holds them.
+
+        See ``StoreListener.reoffer``. Safe to call from any thread.
+
+        Args:
+            keys: Keys resident in this controller's L1.
+        """
+        if keys:
+            self._listener.reoffer(keys)
+
+    def l2_held_keys(self, keys: list[ObjectKey]) -> list[bool] | None:
+        """Whether some live adapter holds each key or is writing it.
+
+        Safe to call from any thread: it reads the adapter map without
+        changing it and asks each adapter's ``held_keys``, which takes no
+        read locks. Each key is decided across the adapters that can tell
+        (see ``merge_held_answers``).
+
+        Args:
+            keys: The object keys to check.
+
+        Returns:
+            One boolean per key, or None when no live adapter can tell.
+        """
+        if not keys:
+            return []
+        answers = [
+            adapter.held_keys(keys)
+            for adapter_id, adapter in list(self._l2_adapters.items())
+            if adapter_id not in self._draining
+        ]
+        return merge_held_answers(answers, len(keys))
 
     def add_adapter(
         self,
@@ -614,8 +683,9 @@ class StoreController(StorageControllerInterface):
 
     def _process_l1_changes(self) -> None:
         """Drop keys deleted from L1 from the queue, then queue the newly
-        written keys, so the queue only holds keys still in L1."""
-        written, deleted = self._listener.pop_pending_changes()
+        written keys and the re-offered keys L2 lacks, so the queue only
+        holds keys still in L1."""
+        written, deleted, reoffered = self._listener.pop_pending_changes()
         gone = self._queued_keys.intersection(deleted)
         if gone:
             self._queued_keys -= gone
@@ -639,6 +709,8 @@ class StoreController(StorageControllerInterface):
             )
         if written:
             self._process_new_keys(written)
+        if reoffered:
+            self._process_reoffered_keys(reoffered)
 
     def _process_new_keys(self, keys: list[ObjectKey]) -> None:
         """
@@ -693,6 +765,44 @@ class StoreController(StorageControllerInterface):
         _, total_bytes = self._l1_manager.get_memory_usage()
         budget = total_bytes * cfg.trigger_watermark * (1 - cfg.eviction_ratio)
         return self._in_flight_bytes >= budget
+
+    def _process_reoffered_keys(self, keys: list[ObjectKey]) -> None:
+        """Queue the re-offered keys that no adapter holds or is storing.
+
+        A key waiting in the queue, or in an in-flight task, counts as
+        held: its store is under way. If that store fails later, the next
+        re-offer of the key finds it missing and stores it then. A key is
+        missing when an adapter that can tell lacks it and no adapter holds
+        it; it is stored like a newly written key, to every adapter the
+        store policy picks, and waits for the budget. Adapters that cannot
+        tell decide whether they rewrite it.
+
+        Args:
+            keys: Re-offered keys, possibly with duplicates.
+        """
+        counts = self._reoffer_counts
+        unique = list(dict.fromkeys(keys))
+        counts["offered"] += len(unique)
+        busy = set(self._queued_keys)
+        for task in self._in_flight_tasks.values():
+            busy.update(task.keys)
+        candidates = [key for key in unique if key not in busy]
+        counts["under_way"] += len(unique) - len(candidates)
+        held = self.l2_held_keys(candidates)
+        if held is None:
+            # No adapter can tell: keep the earlier behaviour, and do not
+            # store a resident key again.
+            counts["unknown"] += len(candidates)
+            return
+        missing = [key for key, has in zip(candidates, held, strict=True) if not has]
+        counts["held"] += len(candidates) - len(missing)
+        resident, _, _ = self._l1_manager.split_by_residency(missing)
+        counts["gone_from_l1"] += len(missing) - len(resident)
+        counts["queued"] += len(resident)
+        for group in _group_keys_by_shape(resident).values():
+            self._queued.append(group)
+            self._queued_keys.update(group)
+        self._submit_queued()
 
     def _submit_store_for_single_shape(self, keys: list[ObjectKey]) -> None:
         """Submit ``keys`` (all same shape) to their target adapters."""

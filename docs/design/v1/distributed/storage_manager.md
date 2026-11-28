@@ -176,6 +176,33 @@ replays against a fresh manager and against a multi-L1 target alike.
 owner-grouped completion, independent same-key copies, recycled
 ownership, and serialized completion.
 
+## Store filter
+
+`select_keys_to_write(keys)` runs before a GPU store reserves L1 space. It
+returns, in order, the keys the store must copy and drops the rest:
+
+| Chunk state | Copied | Also |
+|---|---|---|
+| resident in an L1 | no | re-offered to that L1's store controller |
+| staged in an L1 by a live store write | no | its write is in flight |
+| absent from L1, held or being written by an L2 adapter (`held_keys`) | no | |
+| absent everywhere, or no adapter that can tell holds it | yes | |
+
+Each key is decided across the adapters that can tell, so an adapter whose
+`held_keys` returns `None` hides neither what another adapter holds nor what
+it lacks. Three objects do not count as resident or staged: a temporary
+object, which L1 drops after its read and never offloads; a shadow L1's
+borrowed view, which is a peer's copy and is always temporary; and another
+writer's staging object, such as a prefetch, whose write may be discarded.
+For these the store decides as for an absent chunk, and `reserve_write`
+refuses a key that is resident in the target L1.
+
+A store whose range starts below the end of the engine's prefix cache, as
+the vLLM connector's does after an APC-covered lookup, therefore copies only
+the chunks no tier holds. The blend store does not use the filter: it
+registers fingerprints only for the chunks it commits. The decisions are
+counted under `store_filter` in `report_status`.
+
 ## Configured peer L1 serving
 
 `StorageManagerConfig.l1_manager_configs` lists tagged DRAM, Device-DAX, GDS

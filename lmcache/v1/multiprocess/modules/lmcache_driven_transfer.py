@@ -44,6 +44,7 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
     split_unfull_chunk_block_ids,
+    stored_window_blocks_per_chunk,
     transfer_kv_per_object_group,
     transfer_unfull_chunk,
     trim_and_stage_unfull_chunk_block_ids,
@@ -141,6 +142,64 @@ def all_null_chunk_masks(
                     break
             chunk_null.append(is_null)
         masks.append(chunk_null)
+    return masks
+
+
+def null_window_chunk_masks(
+    block_ids: Sequence[Sequence[int]],
+    object_groups: Sequence[ObjectGroupInfo],
+    blocks_per_chunk: Sequence[int],
+    window_blocks_per_chunk: Sequence[int],
+    num_chunks: int,
+    null_block_id: int = 0,
+) -> list[list[bool]]:
+    """Mark, per object group, the chunks whose stored window holds a null block.
+
+    A sliding-window kernel group stores the trailing
+    ``window_blocks_per_chunk`` blocks of each chunk. The engine hands out the
+    null block for positions that left a request's window, for example below
+    ``hit - window`` after a prefix-cache hit, so a chunk that straddles that
+    edge can hold null blocks in its stored window while other blocks are
+    real. :func:`all_null_chunk_masks` keeps such a chunk; committing it would
+    serve the null block's contents as KV to a later hit that reads the
+    window.
+
+    Args:
+        block_ids: Raw per-kernel-group engine block ids (before any
+            downsample), indexed by kernel-group index.
+        object_groups: The object groups, indexed by object-group id.
+        blocks_per_chunk: Blocks in one chunk per kernel group, indexed by
+            kernel-group index.
+        window_blocks_per_chunk: Per kernel group, the trailing blocks of a
+            chunk that a sliding-window group stores; ``0`` for other groups
+            (see ``stored_window_blocks_per_chunk``).
+        num_chunks: Number of chunks in the request.
+        null_block_id: Server-wide block ID denoting absent data.
+
+    Returns:
+        ``mask[g][i]`` is True iff chunk ``i`` stores a null block in one of
+        object group ``g``'s sliding-window kernel groups.
+    """
+    masks: list[list[bool]] = []
+    for group in object_groups:
+        windowed = [
+            kg for kg in group.kernel_group_indices if window_blocks_per_chunk[kg]
+        ]
+        masks.append(
+            [
+                any(
+                    null_block_id
+                    in block_ids[kg][
+                        (i + 1) * blocks_per_chunk[kg] - window_blocks_per_chunk[kg] : (
+                            i + 1
+                        )
+                        * blocks_per_chunk[kg]
+                    ]
+                    for kg in windowed
+                )
+                for i in range(num_chunks)
+            ]
+        )
     return masks
 
 
@@ -717,9 +776,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask."""
+        """Store the GPU KV cache blocks to CPU; see store_with_chunk_mask.
+
+        Chunks the cache already holds, or is already writing, are not
+        copied (``skip_held``).
+        """
         handle, ok, _ = self.store_with_chunk_mask(
-            key, instance_id, gpu_block_ids, event_ipc_handle
+            key, instance_id, gpu_block_ids, event_ipc_handle, skip_held=True
         )
         return handle, ok
 
@@ -731,6 +794,8 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         event_ipc_handle: bytes,
         skip_chunks: list[bool] | None = None,
         mask_object_groups: Sequence[int] | None = None,
+        *,
+        skip_held: bool = False,
     ) -> tuple[bytes, bool, list[bool]]:
         """Store the GPU KV cache blocks to CPU.
 
@@ -746,6 +811,10 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             mask_object_groups: Object groups the returned mask checks; None
                 checks every object group. A caller that reads only some
                 groups passes those.
+            skip_held: Skip the chunks an L1 or L2 tier holds or is writing,
+                and re-offer the L1-resident ones to their store controller
+                (see ``StorageManager.select_keys_to_write``). A skipped
+                chunk is not marked stored in the returned mask.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -860,13 +929,30 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             # be committed. Computed on the raw block ids before downsampling
             # mutates them.
             null_block_id = self._ctx.null_block_id
-            skipped_chunks = all_null_chunk_masks(
-                gpu_block_ids,
-                cache_context.kv_layer_groups_manager.object_groups,
-                blocks_per_chunk,
-                num_chunks,
-                null_block_id,
-            )
+            object_groups = cache_context.kv_layer_groups_manager.object_groups
+            # A sliding-window chunk whose stored window holds a null block
+            # carries no valid KV either.
+            skipped_chunks = [
+                [whole or window for whole, window in zip(g_all, g_win, strict=True)]
+                for g_all, g_win in zip(
+                    all_null_chunk_masks(
+                        gpu_block_ids,
+                        object_groups,
+                        blocks_per_chunk,
+                        num_chunks,
+                        null_block_id,
+                    ),
+                    null_window_chunk_masks(
+                        gpu_block_ids,
+                        object_groups,
+                        blocks_per_chunk,
+                        stored_window_blocks_per_chunk(cache_context),
+                        num_chunks,
+                        null_block_id,
+                    ),
+                    strict=True,
+                )
+            ]
 
             block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
@@ -936,6 +1022,12 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                     keys_to_reserve = [
                         k for i, k in enumerate(obj_keys) if not skip_mask[i]
                     ]
+                    if skip_held:
+                        keys_to_reserve = (
+                            self._ctx.storage_manager.select_keys_to_write(
+                                keys_to_reserve
+                            )
+                        )
                     layout_desc = get_layout_desc(
                         cache_context,
                         chunk_size,

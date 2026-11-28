@@ -200,6 +200,10 @@ class _GroupState:
         window_chunks: Trailing chunks this group needs for a cache hit
             (``-1`` = full attention). A retrieve returns only these chunks
             for the group, mirroring the server's prefetch window.
+        sliding_window: Whether the group is sliding-window attention (not
+            recurrent state). The engine hands out the null block for
+            positions that left a request's window, so such a group must not
+            store a chunk whose stored window holds one.
     """
 
     layer_names: list[str]
@@ -208,6 +212,7 @@ class _GroupState:
     blocks_per_window: int
     layout_desc: MemoryLayoutDesc
     window_chunks: int = -1
+    sliding_window: bool = False
 
 
 # Allocates ``count`` CPU gather targets of one shape and dtype.
@@ -933,8 +938,10 @@ class EngineDrivenTransferContext(TransferContext):
         retrieves every chunk; sliding-window groups keep only the trailing
         window of each chunk). Works over both transports: SHM gathers into
         server-reserved slots, inline sends a typed group-major envelope.
-        Uncompressed single-group registration keeps the legacy path (see
-        ``_single_group_block_ids``). Compressed groups size their buffers in
+        A single sliding-window or recurrent-state group takes this path as
+        well, since only it leaves out chunks that hold the null block.
+        Other uncompressed single-group registration keeps the legacy path
+        (see ``_single_group_block_ids``). Compressed groups size their buffers in
         physical slots while block counts and windows remain in logical tokens.
         """
         (
@@ -960,7 +967,12 @@ class EngineDrivenTransferContext(TransferContext):
         group_layouts: list[GroupLayout] = []
         group_states: list[_GroupState] = []
         if len(engine_group_infos) > 1 or (
-            engine_group_infos and engine_group_infos[0].tokens_per_block > block_size
+            engine_group_infos
+            and (
+                engine_group_infos[0].tokens_per_block > block_size
+                or engine_group_infos[0].sw_size_tokens > 0
+                or engine_group_infos[0].recurrent_state
+            )
         ):
             # One LMCache chunk must cover a whole number of blocks of EVERY
             # group. Prefer the chunk size the adapter knows: blocks_in_chunk
@@ -1054,6 +1066,10 @@ class EngineDrivenTransferContext(TransferContext):
                             shapes=[group_shape], dtypes=[kernel_group.dtype]
                         ),
                         window_chunks=window_chunks,
+                        sliding_window=(
+                            kernel_group.sw_size_tokens > 0
+                            and not kernel_group.recurrent_state
+                        ),
                     )
                 )
             # Group 0's layout doubles as the legacy top-level layout so
@@ -1190,9 +1206,10 @@ class EngineDrivenTransferContext(TransferContext):
                 if chunk_indices is not None and len(chunk_indices) == 0:
                     future.set_result(True)
                     return future
+                full_block_ids = _single_group_block_ids(block_ids)
                 cpu_chunks = gather_paged_kv_to_cpu(
                     kv_caches,
-                    _single_group_block_ids(block_ids),
+                    full_block_ids,
                     blocks_in_chunk,
                     layout_hints=self._layout_hints,
                     engine_kv_format=self._engine_kv_format,
@@ -1207,7 +1224,13 @@ class EngineDrivenTransferContext(TransferContext):
                 # unconditional -- guarding it on out_buffers left the inline
                 # path serializing a buffer still being written.
                 synchronize_device(device)
-                ok = ctx.commit_store(key, self._instance_id, cpu_chunks)
+                ok = ctx.commit_store(
+                    key,
+                    self._instance_id,
+                    cpu_chunks,
+                    chunk_indices=chunk_indices,
+                    num_chunks=len(full_block_ids) // blocks_in_chunk,
+                )
         except ContextClosedError:
             # Context is being swapped/shut down; the store is simply lost
             # (same contract as a store against an unhealthy server).
@@ -1321,14 +1344,18 @@ class EngineDrivenTransferContext(TransferContext):
         return picked, [chunk_indices[i] for i in idxs]
 
     def _null_chunk_indices(self, block_ids: list[list[int]]) -> list[list[int]]:
-        """Per group, the chunks whose engine blocks are all the null block.
+        """Per group, the chunks that hold no valid KV: every engine block is
+        the null block, or, for a sliding-window group, a block of the stored
+        window is.
 
         Sliding-window groups lose their out-of-window blocks and align-mode
         recurrent (Mamba/linear-attention) groups keep only the block holding
         the last state, so their earlier chunks are entirely the null block.
-        Those chunks carry no valid KV and must never be stored: object keys
-        are prefix hashes, so a later shorter-prefix hit would restore them.
-        Mirrors ``all_null_chunk_masks`` on the lmcache-driven path.
+        A sliding-window chunk that straddles the window's edge keeps some
+        null blocks too. Those chunks must never be stored: object keys are
+        prefix hashes, so a later shorter-prefix hit would restore them.
+        Mirrors ``all_null_chunk_masks`` and ``null_window_chunk_masks`` on
+        the lmcache-driven path.
         """
         null_id = self._null_block_id
         skipped: list[list[int]] = []
@@ -1339,7 +1366,12 @@ class EngineDrivenTransferContext(TransferContext):
                 [
                     c
                     for c in range(len(ids) // bpc)
-                    if all(b == null_id for b in ids[c * bpc : (c + 1) * bpc])
+                    if (
+                        null_id
+                        in ids[(c + 1) * bpc - state.blocks_per_window : (c + 1) * bpc]
+                        if state.sliding_window
+                        else all(b == null_id for b in ids[c * bpc : (c + 1) * bpc])
+                    )
                 ]
             )
         return skipped
@@ -1361,11 +1393,13 @@ class EngineDrivenTransferContext(TransferContext):
     ) -> "list[_GroupStorePlan] | None":
         """Decide what each group stores and where it gathers to.
 
-        All-null chunks are left out on both transports. Over SHM the server
-        reserves slots for the rest (and none for skipped chunks) and they are
-        the gather targets. Inline has no slots: ``alloc``, when given,
-        provides each group's gather targets (the async path's pinned
-        staging), otherwise gather allocates fresh CPU tensors.
+        All-null chunks are left out on both transports, and so are the
+        chunks the server's store filter drops. Over SHM the server reserves
+        slots for the rest (and none for skipped chunks) and they are the
+        gather targets. Inline has no slots: the server names the chunks to
+        send, and ``alloc``, when given, provides each group's gather
+        targets (the async path's pinned staging), otherwise gather
+        allocates fresh CPU tensors.
 
         Returns:
             One plan per group with chunks to store (an empty list when
@@ -1391,11 +1425,33 @@ class EngineDrivenTransferContext(TransferContext):
                     plans.append(_GroupStorePlan(gid, chunks_g, out_g))
             return plans
 
-        plans = []
+        stored: list[list[int]] = []
         for gid, state in enumerate(self._group_states):
             skip = set(skipped[gid])
             num_chunks = len(block_ids[gid]) // state.blocks_in_chunk
-            indices = [c for c in range(num_chunks) if c not in skip]
+            stored.append([c for c in range(num_chunks) if c not in skip])
+        if not any(stored):
+            return []
+        named = ctx.prepare_store_multigroup(
+            key,
+            self._instance_id,
+            tuple(tuple(g) for g in skipped) if any(skipped) else (),
+        )
+        if named is not None:
+            # The server named the chunks to send; it reserves nothing yet.
+            sent: list[set[int]] = [set() for _ in stored]
+            for c, gid in zip(*named, strict=True):
+                sent[gid].add(c)
+            stored = [
+                [c for c in g_stored if c in g_sent]
+                for g_stored, g_sent in zip(stored, sent, strict=True)
+            ]
+            if not any(stored):
+                return []
+        plans = []
+        for gid, (state, indices) in enumerate(
+            zip(self._group_states, stored, strict=True)
+        ):
             out = (
                 alloc(
                     state.layout_desc.shapes[0],
@@ -1406,10 +1462,6 @@ class EngineDrivenTransferContext(TransferContext):
                 else None
             )
             plans.append(_GroupStorePlan(gid, indices, out))
-        if not any(plan.chunk_indices for plan in plans):
-            return []
-        # Handshake only: the inline strategy reserves nothing at prepare.
-        ctx.prepare_store(key, self._instance_id)
         return plans
 
     def _gather_multigroup(

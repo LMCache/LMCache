@@ -575,7 +575,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 group. Only grouped-protocol workers send it.
 
         Returns:
-            PrepareStoreResponse with empty slots for inline mode.
+            PrepareStoreResponse with the slots to fill (SHM) or the chunks to
+            send (inline).
 
         Raises:
             ValueError: If ``skipped_chunks`` does not have one entry per
@@ -934,7 +935,8 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
 
         CPU timestamps include RPC, worker gather/scatter and serialization,
         not just device DMA. The device label names the server's CPU endpoint.
-        SHM responses report only reserved slots; empty stores need no commit.
+        SHM responses report only reserved slots, and inline store responses
+        only the chunks to send; empty stores need no commit.
 
         Args:
             key: Request and token range identifying the transfer.
@@ -953,19 +955,24 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             count = len(slots)
             total_bytes = sum(slot["length"] for slot in slots)
         else:
-            # Inline Path: Derive payload bytes from unskipped group
-            # counts and layouts, using the already-windowed keys for retrieve.
-            counts = (
-                [len(keys) for keys in group_keys]
-                if group_keys is not None
-                else [(key.end - key.start) // entry.chunk_size]
-            )
-            if skipped_chunks:
-                counts = [
-                    count - len(set(skips))
-                    for count, skips in zip(counts, skipped_chunks, strict=True)
-                ]
+            # Inline Path: Derive payload bytes from the chunks a store names,
+            # or for a retrieve from the already-windowed keys, and layouts.
             layouts = entry.metadata.group_layouts or [entry.metadata.layout_desc]
+            named = context.get("chunk_indices")
+            if named is not None:
+                group_ids = context.get("group_ids") or [0] * len(named)
+                counts = [group_ids.count(gid) for gid in range(len(layouts))]
+            else:
+                counts = (
+                    [len(keys) for keys in group_keys]
+                    if group_keys is not None
+                    else [(key.end - key.start) // entry.chunk_size]
+                )
+                if skipped_chunks:
+                    counts = [
+                        count - len(set(skips))
+                        for count, skips in zip(counts, skipped_chunks, strict=True)
+                    ]
             count = sum(counts)
             total_bytes = sum(
                 n

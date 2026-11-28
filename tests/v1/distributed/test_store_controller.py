@@ -214,7 +214,7 @@ class TestStoreListener:
     def test_pop_pending_changes_returns_empty_initially(self):
         """A fresh listener should have no pending changes."""
         listener = StoreListener()
-        assert listener.pop_pending_changes() == ([], [])
+        assert listener.pop_pending_changes() == ([], [], [])
         listener.close()
 
     def test_on_l1_keys_write_finished_enqueues_keys(self):
@@ -223,7 +223,7 @@ class TestStoreListener:
         keys = [make_object_key(i) for i in range(3)]
 
         listener.on_l1_keys_write_finished(keys)
-        written, _ = listener.pop_pending_changes()
+        written, _, _ = listener.pop_pending_changes()
 
         assert written == keys
         listener.close()
@@ -235,7 +235,7 @@ class TestStoreListener:
         listener.on_l1_keys_deleted_by_manager([make_object_key(1)])
         listener.pop_pending_changes()
 
-        assert listener.pop_pending_changes() == ([], [])
+        assert listener.pop_pending_changes() == ([], [], [])
         listener.close()
 
     def test_deletion_drops_earlier_writes_of_the_key(self):
@@ -247,7 +247,7 @@ class TestStoreListener:
         listener.on_l1_keys_deleted_by_manager([k0, k1])
         listener.on_l1_keys_write_finished([k1])
 
-        assert listener.pop_pending_changes() == ([k1], [k0, k1])
+        assert listener.pop_pending_changes() == ([k1], [k0, k1], [])
         listener.close()
 
     def test_on_l1_keys_write_finished_signals_eventfd(self):
@@ -269,7 +269,7 @@ class TestStoreListener:
         listener.on_l1_keys_write_finished([make_object_key(0)])
         listener.on_l1_keys_write_finished([make_object_key(1), make_object_key(2)])
 
-        written, _ = listener.pop_pending_changes()
+        written, _, _ = listener.pop_pending_changes()
         assert len(written) == 3
         listener.close()
 
@@ -280,7 +280,7 @@ class TestStoreListener:
 
         listener.on_l1_keys_finish_write_and_reserve_read(keys)
 
-        assert listener.pop_pending_changes() == ([], [])
+        assert listener.pop_pending_changes() == ([], [], [])
         assert listener.pending_count() == 0
         listener.close()
 

@@ -203,8 +203,15 @@ class EngineDrivenContextShm(EngineDrivenContext):
         return self._build_slot_tensors(slots), group_ids, chunk_indices
 
     def commit_store(
-        self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        _chunks: list[torch.Tensor],
+        chunk_indices: list[int] | None = None,
+        num_chunks: int = 0,
     ) -> bool:
+        """Notify the server that the prepared slots are filled; the slots
+        already name the chunks, so ``chunk_indices`` is not sent."""
         future = self.req_client.commit_store(key, instance_id, b"")
         try:
             return bool(future.result(timeout=self.mq_timeout))

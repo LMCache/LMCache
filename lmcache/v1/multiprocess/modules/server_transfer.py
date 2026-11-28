@@ -199,8 +199,9 @@ class InlineTransferStrategy(TransferStrategy):
 
     This is the default transport when SHM is unavailable, and it is also used as a
     fallback by the SHM strategy when the worker sends an inline serialized payload.
-    ``prepare_store`` returns an empty context, while ``commit_store`` validates a
-    typed tensor envelope and writes the resulting tensors into reserved objects.
+    ``prepare_store`` reserves nothing and names the chunks the store writes, while
+    ``commit_store`` validates a typed tensor envelope and writes the resulting
+    tensors into reserved objects.
     Explicit group layouts, including a single compressed group, use a
     group-major envelope validated against each group's registered layout.
     """
@@ -227,14 +228,48 @@ class InlineTransferStrategy(TransferStrategy):
         group_keys: "list[list[ObjectKey]] | None" = None,
         skipped_chunks: "Sequence[Sequence[int]]" = (),
     ) -> PrepareStoreResponse:
-        """Return empty store context for inline mode.
+        """Name the chunks the worker sends for this store.
 
-        Inline transport does not pre-allocate SHM slots during prepare; the
-        whole (legacy or grouped) payload arrives with ``commit_store``.
-        ``skipped_chunks`` is not needed here: a grouped payload names
-        the chunks it carries.
+        Inline transport reserves nothing during prepare; the payload arrives
+        with ``commit_store``. The store filter
+        (``StorageManager.select_keys_to_write``) decides here which chunks
+        the store writes, as the SHM strategy does when it reserves slots, so
+        the worker gathers and sends only those. A worker that ignores the
+        answer sends every chunk, and ``reserve_write`` refuses the ones L1
+        holds.
+
+        Args:
+            group_keys: Group-major object keys for grouped-protocol workers;
+                ``None`` means legacy protocol via ``resolve_obj_keys``.
+            skipped_chunks: Per group, chunk positions the worker will not
+                store; they are never named.
+
+        Returns:
+            Context with ``chunk_indices``, the chunk positions to send in
+            increasing order per group. Grouped-protocol responses also carry
+            ``group_ids``, even for one group.
         """
-        return PrepareStoreResponse(context={})
+        grouped = group_keys is not None
+        if group_keys is None:
+            group_keys = [resolve_obj_keys(key)]
+        chunk_indices: list[int] = []
+        group_ids: list[int] = []
+        for gid, g_keys in enumerate(group_keys):
+            skip = set(skipped_chunks[gid]) if skipped_chunks else set()
+            positions = [idx for idx in range(len(g_keys)) if idx not in skip]
+            keep = set(
+                self._storage_manager.select_keys_to_write(
+                    [g_keys[idx] for idx in positions]
+                )
+            )
+            for idx in positions:
+                if g_keys[idx] in keep:
+                    chunk_indices.append(idx)
+                    group_ids.append(gid)
+        ctx: dict[str, Any] = {"chunk_indices": chunk_indices}
+        if grouped:
+            ctx["group_ids"] = group_ids
+        return PrepareStoreResponse(context=ctx)
 
     def _write_chunks(
         self,
@@ -566,7 +601,10 @@ class ShmTransferStrategy(TransferStrategy):
             # blocks): an unwritten slot would be committed as garbage.
             skip = set(skipped_chunks[gid]) if skipped_chunks else set()
             reserved = self._storage_manager.reserve_write(
-                [k for idx, k in enumerate(g_keys) if idx not in skip], g_layout
+                self._storage_manager.select_keys_to_write(
+                    [k for idx, k in enumerate(g_keys) if idx not in skip]
+                ),
+                g_layout,
             )
             g_owners = l1_owners_of(reserved)
             g_reserved: list[ObjectKey] = []

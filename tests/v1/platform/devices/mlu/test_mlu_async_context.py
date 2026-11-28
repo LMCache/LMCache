@@ -112,7 +112,9 @@ def test_fractional_kv_roundtrip_and_immediate_host_reuse(
             list(range(prefix_tokens // 64)),
         )
 
-    def commit_store(key: int, instance_id: int, completed: list[torch.Tensor]) -> bool:
+    def commit_store(
+        key: int, instance_id: int, completed: list[torch.Tensor], **_kwargs: object
+    ) -> bool:
         for actual, expected in zip(completed, expected_chunks, strict=True):
             assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
         chunks[:] = completed

@@ -326,7 +326,11 @@ class AsyncEngineDrivenTransferContext(EngineDrivenTransferContext):
                         # --- Phase 3: commit ---
                         with self._commit_lock:
                             ok = engine_driven_context.commit_store(
-                                key, self._instance_id, gather_target
+                                key,
+                                self._instance_id,
+                                gather_target,
+                                chunk_indices=chunk_indices,
+                                num_chunks=len(full_block_ids) // blocks_in_chunk,
                             )
 
                     if not ok:

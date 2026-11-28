@@ -72,6 +72,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.distributed.storage_controllers.utils import (
     L1ManagerDescriptor,
     L2AdapterDescriptor,
+    merge_held_answers,
     resolve_l1_affinity,
 )
 from lmcache.v1.distributed.storage_controllers.write_policy import (
@@ -255,7 +256,9 @@ class StorageManager:
                 self._store_controllers[manager.l1_manager_id] = controller
                 controller.start()
                 cleanup.callback(controller.stop)
-
+            # What select_keys_to_write decided, per chunk.
+            self._store_filter_lock = threading.Lock()
+            self._store_filter_counts: Counter[str] = Counter()
             self._prefetch_controller = PrefetchController(
                 l1_managers=list(self._l1_managers),
                 l1_manager_descriptors=[
@@ -347,6 +350,75 @@ class StorageManager:
             )
 
         return result
+
+    def select_keys_to_write(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Drop the keys a store need not copy: held, or on their way to L2.
+
+        A store's range can include chunks the cache already has, for
+        example when the engine's own prefix cache covered the lookup and
+        the store starts at token zero. This check keeps such a store
+        from copying them again:
+
+        - resident in an L1 (a temporary object does not count): not
+          copied, and re-offered to that L1's store controller, which
+          stores it to L2 if an adapter lacks it, no adapter holds it and
+          no store of it is under way (for example after a failed L2
+          store);
+        - staged in an L1 by a live store write: not copied, its write is
+          in flight;
+        - absent from every L1 but held by an L2 adapter, committed or in
+          flight: not copied. Each key is decided across the adapters that
+          can tell, so one adapter that cannot tell hides nothing;
+        - otherwise copied. When no adapter can tell, every chunk absent
+          from L1 is copied, and the adapters decide whether they rewrite
+          it.
+
+        Args:
+            keys: The keys a store is about to reserve.
+
+        Returns:
+            The keys to reserve and copy, in their original order.
+        """
+        counts: Counter[str] = Counter(requested=len(keys))
+        remaining = list(keys)
+        for manager_id, manager in self._l1_managers_by_id.items():
+            if not remaining:
+                break
+            resident, staged, remaining = manager.split_by_residency(
+                remaining, tag=_L1_WRITE_TAG
+            )
+            counts["l1_resident"] += len(resident)
+            counts["l1_staged"] += len(staged)
+            self._store_controllers[manager_id].reoffer(resident)
+        if remaining:
+            held = self._l2_held_keys(remaining)
+            if held is None:
+                counts["l2_unknown"] += len(remaining)
+            else:
+                absent = set()
+                for key, has in zip(remaining, held, strict=True):
+                    if has:
+                        counts["l2_held"] += 1
+                    else:
+                        absent.add(key)
+                remaining = [key for key in remaining if key in absent]
+        counts["to_write"] += len(remaining)
+        with self._store_filter_lock:
+            self._store_filter_counts.update(counts)
+        keep = set(remaining)
+        return [key for key in keys if key in keep]
+
+    def _l2_held_keys(self, keys: list[ObjectKey]) -> list[bool] | None:
+        """Whether any store controller's adapters hold each key."""
+        answers = [
+            controller.l2_held_keys(keys)
+            for controller in self._store_controllers.values()
+        ]
+        return merge_held_answers(answers, len(keys))
+
+    def _store_filter_snapshot(self) -> dict[str, int]:
+        with self._store_filter_lock:
+            return dict(self._store_filter_counts)
 
     @enable_tracing(redact=("l1_owners",))
     def finish_write(
@@ -1375,6 +1447,7 @@ class StorageManager:
             "num_l2_adapters": len(adapters),
             "l1_usage": self.get_l1_usage(),
             "l1_capacity_bytes_by_backend": dict(capacities),
+            "store_filter": self._store_filter_snapshot(),
         }
         if not self.is_multi_l1:
             result.update(

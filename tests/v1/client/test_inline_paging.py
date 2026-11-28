@@ -11,7 +11,10 @@ import torch
 # First Party
 from lmcache.v1.client.transfer_context import inline
 from lmcache.v1.client.transfer_context.inline import EngineDrivenContextInline
-from lmcache.v1.common.custom_types import PrepareRetrieveResponse
+from lmcache.v1.common.custom_types import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+)
 from lmcache.v1.transport.futures import MessagingFuture
 from lmcache.v1.transport.tensor_wire import (
     decode_grouped_tensors,
@@ -27,9 +30,17 @@ CHUNK = [torch.full(SHAPE, float(i)) for i in range(5)]
 class _Client:
     """Records pages and answers retrieve pages from ``chunks``."""
 
-    def __init__(self, groups: list[tuple[list[int], list[torch.Tensor]]] | None):
+    def __init__(
+        self,
+        groups: list[tuple[list[int], list[torch.Tensor]]] | None,
+        store_context: dict[str, Any] | None = None,
+    ):
         self.groups = groups
+        self.store_context = store_context or {}
         self.pages: list[tuple[int, int, bytes]] = []
+
+    def prepare_store(self, _key, _iid) -> MessagingFuture:
+        return _done(PrepareStoreResponse(context=self.store_context))
 
     def commit_store(self, _key, _iid, data, start, count) -> MessagingFuture:
         self.pages.append((start, count, data))
@@ -94,6 +105,57 @@ def test_store_is_sent_in_pages() -> None:
     expected = [(torch.Size(SHAPE), torch.float32, 5)] * 2
     last = decode_grouped_tensors(client.pages[1][2], expected=expected)
     assert [ix for ix, _ in last] == [[2], [2]]
+
+
+def _sent(client: _Client, counts: tuple[int, ...]) -> list[torch.Tensor]:
+    """Decode the flat pages ``client`` received; ``counts`` per page."""
+    return sum(
+        (
+            decode_tensors(
+                data,
+                expected_shape=torch.Size(SHAPE),
+                expected_dtype=torch.float32,
+                expected_count=n,
+            )
+            for (_, _, data), n in zip(client.pages, counts, strict=True)
+        ),
+        [],
+    )
+
+
+def test_prepare_store_returns_the_chunks_the_server_names() -> None:
+    named = _ctx(_Client(None, {"chunk_indices": [1, 3]}))
+    assert named.prepare_store(cast(Any, None), 1) == (None, [1, 3])
+    # A server that names no chunks gets every chunk, as before.
+    assert _ctx(_Client(None)).prepare_store(cast(Any, None), 1) is None
+
+
+def test_store_sends_only_the_named_chunks_in_runs() -> None:
+    """A flat page carries exactly the chunks of its range, so a gap in the
+    named positions ends a page as the page size does."""
+    client = _Client(None)
+    chunks = CHUNK[:3]
+    assert _ctx(client).commit_store(
+        cast(Any, None), 1, chunks, chunk_indices=[1, 2, 4], num_chunks=5
+    )
+    assert [(s, c) for s, c, _ in client.pages] == [(1, 2), (4, 0)]
+    assert all(
+        torch.equal(a, b) for a, b in zip(_sent(client, (2, 1)), chunks, strict=True)
+    )
+
+
+def test_store_ends_with_an_empty_page_when_the_last_chunk_is_not_sent() -> None:
+    """Only a page with count 0 ends the store, so when the last chunk is
+    held an empty page at the end of the key closes it."""
+    client = _Client(None)
+    chunks = CHUNK[:3]
+    assert _ctx(client).commit_store(
+        cast(Any, None), 1, chunks, chunk_indices=[0, 1, 2], num_chunks=5
+    )
+    assert [(s, c) for s, c, _ in client.pages] == [(0, 2), (2, 1), (5, 0)]
+    assert all(
+        torch.equal(a, b) for a, b in zip(_sent(client, (2, 1, 0)), chunks, strict=True)
+    )
 
 
 def test_retrieve_reassembles_pages() -> None:

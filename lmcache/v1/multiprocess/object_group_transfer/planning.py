@@ -12,6 +12,45 @@ import torch
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 
+def _kept_blocks_per_chunk(
+    cache_context: BaseCacheContext, kernel_group_id: int
+) -> int:
+    """Return the trailing blocks of each chunk a kernel group stores: the
+    window's blocks for a window smaller than a chunk, else the whole chunk."""
+    subchunk_sw_size_tokens = (
+        cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
+            kernel_group_id
+        )
+    )
+    tokens_per_chunk = min(
+        cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
+    )
+    return cache_context.calculate_num_blocks(tokens_per_chunk, kernel_group_id)
+
+
+def stored_window_blocks_per_chunk(cache_context: BaseCacheContext) -> list[int]:
+    """Per kernel group, the trailing blocks of each chunk that a
+    sliding-window attention group stores; ``0`` for every other group.
+
+    The count is what :func:`downsample_and_stage_block_ids` keeps.
+    Recurrent-state groups do not count as sliding-window attention: each of
+    their chunks is either all null or real at its checkpoint.
+
+    Args:
+        cache_context: The cache context containing the KV cache information.
+
+    Returns:
+        One block count per kernel group, indexed by kernel-group index.
+    """
+    manager = cache_context.kv_layer_groups_manager
+    return [
+        _kept_blocks_per_chunk(cache_context, kernel_group_id)
+        if group.sw_size_tokens > 0 and not group.recurrent_state
+        else 0
+        for kernel_group_id, group in enumerate(manager.kernel_groups)
+    ]
+
+
 def batched_iteration_with_skip(
     lst: Sequence,
     batch_size: int,
@@ -95,17 +134,7 @@ def downsample_and_stage_block_ids(
     """
     num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
     for kernel_group_id in range(num_kernel_groups):
-        subchunk_sw_size_tokens = (
-            cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
-                kernel_group_id
-            )
-        )
-        tokens_per_chunk = min(
-            cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
-        )
-        keep_blocks_per_chunk = cache_context.calculate_num_blocks(
-            tokens_per_chunk, kernel_group_id
-        )
+        keep_blocks_per_chunk = _kept_blocks_per_chunk(cache_context, kernel_group_id)
         total_blocks_per_chunk = cache_context.calculate_num_blocks(
             cache_context.lmcache_tokens_per_chunk, kernel_group_id
         )

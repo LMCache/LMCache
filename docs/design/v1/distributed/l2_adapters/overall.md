@@ -101,6 +101,23 @@ submit_unlock(keys) -> None
   guarantee eventual success (retry internally if needed). The caller will never
   retry.
 
+### Held-Key Query
+
+```
+held_keys(keys) -> list[bool] | None
+```
+
+- **No I/O, no read locks:** reports whether each key is committed or has a
+  store in flight, from the adapter's own state. The store path uses it to
+  skip a chunk the adapter already has, or is already writing, without the
+  read locks that `submit_lookup_and_lock_task` takes. An adapter may hold
+  its own index mutex briefly while it answers.
+- **Optional:** the default returns `None`, meaning the adapter cannot tell.
+  Callers then keep their earlier behaviour for that adapter: they copy the
+  chunk and let the adapter decide whether to rewrite it.
+- **A failed write reads as absent** once it has failed, so a later caller
+  sees the gap.
+
 ### Load Operations
 
 ```
@@ -255,6 +272,27 @@ Waiting groups hold no locks. When L1 deletes a waiting key, the controller
 drops it from the queue, so it is never stored to L2 and the queue only holds
 keys that are still in L1. Dropped keys count in `lmcache_mp.l1_read_failure`
 (`during=l2_store`, `reason=not_found`), as they would at submit time.
+
+### Re-Offered Keys
+
+A store skips the GPU copy of a chunk an L1 already holds (see
+`StorageManager.select_keys_to_write`) and re-offers the chunk to that L1's
+controller. The loop pops re-offers together with the new and deleted
+keys, queues the new keys first, then judges each re-offered key:
+
+- a key also waiting in the queue, or in an in-flight store task, counts as
+  held: its store is under way;
+- each other key is decided across the live adapters that can tell
+  (`held_keys`): one that any of them holds is held; one that none of them
+  holds and that is still resident in L1, not as a temporary object, is
+  queued like a new key and waits for the in-flight budget. It goes to every
+  adapter the store policy picks; an adapter that cannot tell decides whether
+  it rewrites the key;
+- if no adapter can tell, the key is left alone.
+
+So a failed L2 store, which the loop itself does not retry, is repaired by
+the next store whose range covers the chunk. The outcomes are counted under
+`reoffered_keys` in the controller status.
 
 ### Lock Invariants
 

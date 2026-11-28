@@ -94,6 +94,10 @@ class _FakeStorageManager:
     ) -> dict[object, object]:
         return {}
 
+    def select_keys_to_write(self, keys: list[object]) -> list[object]:
+        # The store filter keeps every key.
+        return list(keys)
+
     def prepare_read_completion(self, keys, l1_owners=None):
         return []
 
@@ -274,6 +278,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             num_object_groups=1,
             num_kernel_groups=1,
             object_groups=[SimpleNamespace(kernel_group_indices=[0])],
+            kernel_groups=[SimpleNamespace(sw_size_tokens=-1, recurrent_state=False)],
             get_attn_desc=lambda: SimpleNamespace(
                 num_chunks_in_sw=[-1], group_kinds=()
             ),
