@@ -50,6 +50,31 @@ def test_vllm_flash_infer_nhd():
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
 
 
+def test_vllm_edit_opaque_page_stays_nhd_under_hnd():
+    """An edit-synthesized opaque page keeps its NHD page axes under HND.
+
+    ``_synthetic_attention_page_view`` writes one page per logical block as
+    ``(num_blocks, 2, block_size, 1, head_size)`` -- the two halves of one
+    page, not semantic K/V, and a singleton synthetic head. Its token axis is
+    dim 2 by construction, while an HND hint would read that axis as heads and
+    resolve ``block_size`` from dim 3 (always 1). The singleton head axis is
+    what identifies the page, so detection must not follow the engine hint for
+    it.
+    """
+    kv = [_t(NB, 2, BS, 1, HS) for _ in range(NL)]
+    fmt, out = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt == F.NL_X_NB_TWO_BS_NH_HS
+    assert tuple(out[0].shape) == (NB, 2, BS, 1, HS)
+
+
+def test_vllm_blocks_first_fused_rank5_hnd():
+    # A real HND engine tensor has block positions at dim 3, never 1, so the
+    # opaque-page rule above must not capture it.
+    kv = [_t(NB, 2, NH, BS, HS) for _ in range(NL)]
+    fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt == F.NL_X_NB_TWO_NH_BS_HS
+
+
 def test_vllm_mla():
     kv = [_t(NB, BS, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})

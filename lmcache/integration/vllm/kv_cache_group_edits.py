@@ -40,7 +40,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Mapping
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 # Third Party
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, KVCacheSpecKind
@@ -65,6 +65,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
 from lmcache.v1.common.kv_format.contiguity import (
     attempt_permute_to_contiguous_view,
 )
+from lmcache.v1.common.kv_format.detectors.vllm import resolve_vllm_kv_layout
 from lmcache.v1.common.kv_format.types import KV_LAYOUT_NAMES
 from lmcache.v1.common.logging import init_logger
 from lmcache.v1.common.utils import LayoutHints
@@ -91,6 +92,34 @@ _SUBPAGEABLE_ATTENTION_KINDS = frozenset(
         KVCacheSpecKind.SINK_FULL_ATTENTION,
     }
 )
+
+# KV resolutions whose per-layer tensors put heads before block positions.
+# ``BLHNC`` is vLLM's blocks-first spelling of the same per-layer order.
+_HND_KV_LAYOUTS = frozenset({"HND", "BLHNC"})
+
+
+def _kv_layout_from_hints(layout_hints: LayoutHints | None) -> str:
+    """Return the resolved KV layout the edits must interpret planes with.
+
+    A missing hint keeps the historical ``NHD`` default, which is what
+    :func:`resolve_vllm_kv_layout` returns. The registration entry point
+    resolves the hint once and hands every rule the same value, so edit-time
+    geometry and format detection cannot disagree.
+    """
+    return resolve_vllm_kv_layout(layout_hints or {})
+
+
+def _attention_plane_axes(kv_layout: str) -> tuple[int, int]:
+    """Return ``(block_axis, head_axis)`` of one rank-4 attention plane.
+
+    NHD / BLNHC planes are ``[NB, block, heads, head_size]``; HND / BLHNC
+    planes are ``[NB, heads, block, head_size]``. The block axis carries the
+    scheduler's token unit, so reading the other axis as the kernel block size
+    silently shrinks the planned page to ``1/ratio`` of its bytes.
+    """
+    if kv_layout in _HND_KV_LAYOUTS:
+        return 2, 1
+    return 1, 2
 
 
 def _declares_slot_compression(spec: KVCacheSpec) -> bool:
@@ -264,6 +293,7 @@ class KVCacheGroupEdit(ABC):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         """Return whether this rule applies to the layer's registered cache.
 
@@ -273,6 +303,9 @@ class KVCacheGroupEdit(ABC):
                 list of tensors for Mamba layers.
             kind: The layer's kind; read from the spec when omitted, which
                 needs vLLM before vllm-project/vllm#61452.
+            layout_hints: Engine layout hints; rules that read the tensor's
+                block axis resolve the KV layout from them exactly like
+                format detection (``NHD`` when absent).
         """
 
     @abstractmethod
@@ -318,6 +351,7 @@ class _MambaPageViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         # Conv's per-block stride must be the full page. A slice-sized stride
         # passes through; apply re-strides only the packed layout.
@@ -414,6 +448,7 @@ class _MambaSlicePlaneEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         if (
             _spec_kind(spec, kind) != KVCacheSpecKind.MAMBA
@@ -501,6 +536,7 @@ class _SubpagedAttentionViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         return (
             # Standard-paged attention only; MLA layouts and declared slot
@@ -637,6 +673,7 @@ class _MambaUnifiedViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         """
         Matches the mamba kv cache with unified layout.
@@ -786,6 +823,7 @@ class _SubpagedMLAAttentionViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         return (
             _spec_kind(spec, kind) == KVCacheSpecKind.MLA_ATTENTION
@@ -881,8 +919,12 @@ def _subpaged_plane_pair_ratio(
     k_plane: torch.Tensor,
     v_plane: torch.Tensor,
     kind: KVCacheSpecKind | None = None,
+    layout_hints: LayoutHints | None = None,
 ) -> int | None:
     """Return the logical/kernel block ratio for a sub-paged rank-4 pair.
+
+    The kernel block size is read from the plane's block axis, which is dim 1
+    under NHD and dim 2 under HND (see :func:`_attention_plane_axes`).
 
     ``None`` means the pair is not a standard-paged attention cache whose
     kernel block evenly divides the scheduler block, or K/V differ in dtype
@@ -896,7 +938,10 @@ def _subpaged_plane_pair_ratio(
         return None
     if k_plane.dtype != v_plane.dtype or k_plane.device != v_plane.device:
         return None
-    kernel_block_size = int(k_plane.shape[1])
+    block_axis, head_axis = _attention_plane_axes(_kv_layout_from_hints(layout_hints))
+    if int(k_plane.shape[head_axis]) <= 0:
+        return None
+    kernel_block_size = int(k_plane.shape[block_axis])
     logical_block_size = int(spec.block_size)
     if (
         kernel_block_size <= 0
@@ -910,19 +955,21 @@ def _subpaged_plane_pair_ratio(
     return ratio
 
 
-def _dense_trailing_nhd_row(plane: torch.Tensor) -> bool:
-    """Whether ``plane`` has a dense NHD row on axes 1..3.
+def _dense_plane_row(plane: torch.Tensor) -> bool:
+    """Whether ``plane`` has a dense trailing row on axes 1..3.
 
+    Works for both resolutions: NHD ``[NB, block, heads, head_size]`` and HND
+    ``[NB, heads, block, head_size]`` both keep the last three dims dense.
     Dim 0 may be gapped (interleaved K/V kernel pages); only the trailing
-    ``(kernel_block, num_heads, head_size)`` slice must be dense.
+    slice must be dense.
     """
     if plane.ndim != 4:
         return False
-    num_heads, head_size = int(plane.shape[2]), int(plane.shape[3])
+    dim2, dim3 = int(plane.shape[2]), int(plane.shape[3])
     return (
         int(plane.stride(3)) == 1
-        and int(plane.stride(2)) == head_size
-        and int(plane.stride(1)) == num_heads * head_size
+        and int(plane.stride(2)) == dim3
+        and int(plane.stride(1)) == dim2 * dim3
     )
 
 
@@ -934,7 +981,7 @@ def _is_interleaved_kernel_kv_pair(
     page_size_bytes: int,
 ) -> bool:
     """Return whether K/V are v0.30 interleaved kernel pages in one pool."""
-    if not (_dense_trailing_nhd_row(k_plane) and _dense_trailing_nhd_row(v_plane)):
+    if not (_dense_plane_row(k_plane) and _dense_plane_row(v_plane)):
         return False
     row_elems = int(k_plane.shape[1:].numel())
     row_bytes = row_elems * int(k_plane.element_size())
@@ -975,6 +1022,12 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
     of each logical page, not semantic K and V. Separate dense K-only and
     V-only views at the scheduler block size are not possible without a copy.
 
+    Under HND the planes are ``[NB, heads, kernel_block, head_size]`` and the
+    kernel block size is read from dim 2 instead of dim 1. The output page is
+    still the NHD-shaped opaque page above: its token axis is the scheduler
+    block size by construction, and the detector must not re-read it through
+    the engine's HND hint (see ``VLLM_Detector``).
+
     The tile check uses ``page_size_bytes``, the full interleaved span.
     """
 
@@ -985,12 +1038,13 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
             return False
         k_plane, v_plane = planes
-        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane, kind)
+        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane, kind, layout_hints)
         if ratio is None:
             return False
         return _is_interleaved_kernel_kv_pair(
@@ -1004,9 +1058,12 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
         self,
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
-        _layout_hints: LayoutHints,
+        layout_hints: LayoutHints,
     ) -> torch.Tensor:
         """Re-view interleaved kernel pages at logical-block granularity.
+
+        The kernel block size is read from the plane's block axis (dim 1 under
+        NHD, dim 2 under HND).
 
         Raises:
             ValueError: If ``kv_cache`` is not a two-tensor pair, or the
@@ -1018,8 +1075,11 @@ class _SubpagedAttentionInterleavedPlaneViewEdit(KVCacheGroupEdit):
                 f"expected a (K, V) attention pair, got {type(kv_cache).__name__}"
             )
         k_plane, _v_plane = planes
+        block_axis, _head_axis = _attention_plane_axes(
+            _kv_layout_from_hints(layout_hints)
+        )
         logical_block_size = int(spec.block_size)
-        kernel_block_size = int(k_plane.shape[1])
+        kernel_block_size = int(k_plane.shape[block_axis])
         if kernel_block_size <= 0 or logical_block_size % kernel_block_size != 0:
             raise ValueError(
                 f"logical block size {logical_block_size} is not a multiple of "
@@ -1062,6 +1122,11 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
     (format 16). Collapsing the two allocations into one byte plane would
     copy the cache.
 
+    HND is not supported here: the re-viewed planes would keep heads before
+    block positions, and registration has no two-plane HND format. The rule
+    still matches so the combination fails loudly instead of leaving the
+    attention group silently treated as slot-compressed (see ``apply``).
+
     The tile check uses ``real_page_size_bytes``. Hybrid
     ``page_size_bytes`` includes Mamba conv padding that is not in these
     views.
@@ -1074,12 +1139,13 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
         kind: KVCacheSpecKind | None = None,
+        layout_hints: LayoutHints | None = None,
     ) -> bool:
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
             return False
         k_plane, v_plane = planes
-        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane, kind)
+        ratio = _subpaged_plane_pair_ratio(spec, k_plane, v_plane, kind, layout_hints)
         if ratio is None:
             return False
         if not (k_plane.is_contiguous() and v_plane.is_contiguous()):
@@ -1091,14 +1157,14 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
         self,
         spec: KVCacheSpec,
         kv_cache: RegisteredKVCache,
-        _layout_hints: LayoutHints,
+        layout_hints: LayoutHints,
     ) -> list[torch.Tensor]:
         """Return K and V re-viewed at the scheduler block size.
 
         Raises:
-            ValueError: If ``kv_cache`` is not a two-tensor pair, or the
-                kernel pages of one logical block do not tile
-                ``real_page_size_bytes``.
+            ValueError: If ``kv_cache`` is not a two-tensor pair, the pair is
+                registered under HND, or the kernel pages of one logical block
+                do not tile ``real_page_size_bytes``.
         """
         planes = _attention_kv_plane_pair(kv_cache)
         if planes is None:
@@ -1106,8 +1172,20 @@ class _SubpagedAttentionContiguousPlaneViewEdit(KVCacheGroupEdit):
                 f"expected a (K, V) attention pair, got {type(kv_cache).__name__}"
             )
         k_plane, v_plane = planes
+        kv_layout = _kv_layout_from_hints(layout_hints)
+        if kv_layout in _HND_KV_LAYOUTS:
+            raise ValueError(
+                "cannot re-view contiguous (K, V) attention planes under HND: "
+                "the scheduler-block view keeps heads before block positions, "
+                "and registration has no two-plane HND format, so the block "
+                "axis would be addressed as heads. Run vLLM-Ascend v0.30 or "
+                "newer (its interleaved K/V pool registers one opaque NHD page, "
+                "which the interleaved rule handles under HND), or unset the "
+                "HND requirement (e.g. VLLM_KV_CACHE_LAYOUT)."
+            )
+        block_axis, _head_axis = _attention_plane_axes(kv_layout)
         logical_block_size = int(spec.block_size)
-        kernel_block_size = int(k_plane.shape[1])
+        kernel_block_size = int(k_plane.shape[block_axis])
         if kernel_block_size <= 0 or logical_block_size % kernel_block_size != 0:
             raise ValueError(
                 f"logical block size {logical_block_size} is not a multiple of "
@@ -1170,14 +1248,21 @@ def apply_kv_cache_group_edits(
         A new ``dict`` with edited layers re-viewed, others untouched.
 
     Raises:
-        ValueError: If the groups fail :func:`validate_kv_cache_groups`, or a
-            matched layer's cache layout violates its rule's invariants (see
-            each rule's ``apply``).
+        ValueError: If the groups fail :func:`validate_kv_cache_groups`, the
+            ``kv_layout`` hint names an unsupported resolution, or a matched
+            layer's cache layout violates its rule's invariants (see each
+            rule's ``apply``).
     """
     # Backstop for connectors initialized without a kv_cache_config.
     validate_kv_cache_groups(kv_cache_config)
     if kv_cache_config is None or not kv_cache_config.has_mamba_layers:
         return dict(kv_caches)
+
+    # Resolve the layout once and hand every rule the same value: edit-time
+    # geometry and the later format detection must not disagree, including on
+    # the legacy no-hint default.
+    kv_layout = _kv_layout_from_hints(layout_hints)
+    resolved_hints = cast(LayoutHints, {**layout_hints, "kv_layout": kv_layout})
 
     edited = dict(kv_caches)
     counts: Counter[str] = Counter()
@@ -1185,8 +1270,8 @@ def apply_kv_cache_group_edits(
         for name, spec in group_layer_specs(group).items():
             kind = _layer_kind(group, spec)
             for edit in _EDITS:
-                if edit.matches(spec, kv_caches[name], kind):
-                    edited[name] = edit.apply(spec, kv_caches[name], layout_hints)
+                if edit.matches(spec, kv_caches[name], kind, resolved_hints):
+                    edited[name] = edit.apply(spec, kv_caches[name], resolved_hints)
                     counts[edit.name] += 1
                     break
     logger.info(
