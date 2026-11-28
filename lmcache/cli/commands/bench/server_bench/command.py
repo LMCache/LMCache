@@ -174,13 +174,18 @@ def run_server_bench(
     command: "BaseCommand",
     args: argparse.Namespace,
 ) -> None:
-    """Centralized orchestrator: run the server bench loop.
+    """Run the server bench and fail after reporting unsuccessful checks.
 
     Args:
         command: The owning :class:`BaseCommand` instance, used to
             obtain a configured :class:`Metrics` object via
             ``command.create_metrics``.
         args: Parsed CLI arguments for ``lmcache bench server``.
+
+    Raises:
+        SystemExit: With status 1 on runtime errors or failed correctness checks.
+            Metrics are emitted before reporting failed checks. A clean
+            interruption with no recorded failures retains status 0.
     """
     config = parse_args_to_config(args)
     # The IPC policy is process-wide and the CUDA event backend is cached on
@@ -240,6 +245,18 @@ def run_server_bench(
         args=args,
         result=result,
     )
+    failed_checks = [
+        f"{name} ({result.failed_count(name)}/{len(checks)})"
+        for name, checks in result.checks.items()
+        if not all(checks)
+    ]
+    if failed_checks:
+        print(
+            "ERROR: Server benchmark correctness checks failed: "
+            + ", ".join(failed_checks),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     log("Done.")
 
 

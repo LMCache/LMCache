@@ -1371,9 +1371,14 @@ keys and the cold/warm checks stay valid.
        --start 0 --end 400 --interval 0 --concurrency 8
 
 The summary adds ``Concurrency``, ``Elapsed (s)``, and ``Requests / s``.
-Use ``--interval 0`` when comparing throughput, otherwise the delay
-dominates. ``Requests / s`` counts cold/warm sequence pairs, matching
-``Total requests``.
+``Requests / s`` counts cold/warm sequence pairs, matching ``Total requests``.
+An interval contributes to elapsed time, so use ``--interval 0`` only when
+interpreting that trade-off. In ``lmcache_driven`` mode, a STORE reply does
+not guarantee lookup visibility: ``finish_write`` can still be queued.
+At interval zero, a warm LOOKUP may therefore miss even without capacity
+pressure. Such a miss fails the warm-hit and checksum-availability checks;
+it is not proof that the server dropped the STORE. The benchmark reports
+these failures and exits 1 rather than retrying them or reporting success.
 
 Size the server's L1 to hold the whole run. If stores arrive faster than
 the eviction controller frees memory, the server drops them, and the
@@ -1424,7 +1429,11 @@ metrics summary is printed. The summary includes:
 * **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
   interval, concurrency.
 * **Results** -- total requests, checksum OK / FAIL counts, checksum pass rate,
-  elapsed time, requests per second.
+  elapsed time, requests per second. Checksum FAIL counts comparisons that
+  ran and mismatched; it does not count checksums that could not be compared.
+  Failed correctness checks are named on stderr, including missing warm hits
+  or unavailable checksums, even when ``--quiet`` suppresses stdout. Metrics
+  files requested with ``--output`` are written before the failure is reported.
 * **Latency sections** -- per-operation latency statistics (count, mean,
   min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
   retrieve.
@@ -1510,10 +1519,11 @@ Exit codes
      - Meaning
    * - ``0``
      - Test loop completed (or was interrupted cleanly with Ctrl-C)
-       with no checksum mismatches.
+       with no recorded correctness-check failures.
    * - ``1``
-     - Fatal error (for example, CUDA unavailable in ``--mode gpu``,
-       server unreachable, or a checksum mismatch).
+     - Fatal error (for example, CUDA unavailable in ``--mode gpu`` or
+       server unreachable), or a failed correctness check such as a warm
+       miss, failed transfer, unavailable checksum, or checksum mismatch.
 
 .. _lmcache-bench-l2:
 
