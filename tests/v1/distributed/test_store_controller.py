@@ -11,6 +11,7 @@ the full integration without mocking internals.
 
 # Standard
 from typing import NoReturn
+import dataclasses
 import select
 import threading
 import time
@@ -505,6 +506,58 @@ class TestStoreControllerSingleAdapter:
 
         ok = wait_for_condition(all_keys_evictable, timeout=5.0)
         assert ok, "Read locks must be released for every concurrent request"
+
+        ctrl.stop()
+        adapter.close()
+
+    def test_object_groups_stored_in_separate_tasks(self, l1_manager, monkeypatch):
+        """A write batch mixing object groups of different layouts is split
+        into one store task per object group, and every key reaches L2.
+
+        Adapters size per-task resources from one object, so a mixed task
+        would store objects with the wrong layout.
+        """
+        adapter = make_adapter()
+        submitted_sizes: list[set[int]] = []
+        submit = adapter.submit_store_task
+
+        def recording_submit(keys: list[ObjectKey], objects: list[MemoryObj]):
+            submitted_sizes.append({obj.get_size() for obj in objects})
+            return submit(keys, objects)
+
+        monkeypatch.setattr(adapter, "submit_store_task", recording_submit)
+        ctrl = StoreController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultStorePolicy([l1_manager]),
+        )
+        ctrl.start()
+
+        # Small group first: the order that stored nothing before the split.
+        small_key = dataclasses.replace(make_object_key(0), object_group_id=0)
+        large_key = dataclasses.replace(make_object_key(0), object_group_id=1)
+        small_layout = MemoryLayoutDesc(
+            shapes=[torch.Size([16, 2, 64])], dtypes=[torch.bfloat16]
+        )
+        large_layout = MemoryLayoutDesc(
+            shapes=[torch.Size([128, 2, 128])], dtypes=[torch.bfloat16]
+        )
+        for key, layout in ((small_key, small_layout), (large_key, large_layout)):
+            l1_manager.reserve_write(
+                keys=[key], is_temporary=[False], layout_desc=layout
+            )
+        # One finish_write makes both keys arrive in one store batch.
+        l1_manager.finish_write([small_key, large_key])
+
+        ok = wait_for_condition(
+            lambda: adapter.debug_has_key(small_key)
+            and adapter.debug_has_key(large_key),
+            timeout=5.0,
+        )
+        assert ok, "Both object groups should be stored in L2"
+        assert len(submitted_sizes) == 2
+        assert all(len(sizes) == 1 for sizes in submitted_sizes)
 
         ctrl.stop()
         adapter.close()
