@@ -6,8 +6,9 @@ import sys
 import unittest
 
 # Add .buildkite/scripts to sys.path
+# test-import: allow -- standalone CI script outside lmcache package
 scripts_dir = Path(__file__).resolve().parent.parent / ".buildkite" / "scripts"
-sys.path.insert(0, str(scripts_dir))
+sys.path.insert(0, str(scripts_dir))  # test-import: allow
 
 # Third Party
 import fast_fail_cancel  # noqa: E402

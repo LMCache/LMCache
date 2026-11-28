@@ -7,7 +7,6 @@ Supports bidirectional cancellation using only the Python standard library:
 """
 
 # Standard
-from typing import Any, Dict, List, Optional, Tuple
 import argparse
 import json
 import os
@@ -19,24 +18,46 @@ import urllib.request
 
 PROTECTED_BRANCHES = {"dev", "main", "master"}
 CANCELLABLE_BK_STATES = {"running", "scheduled", "failing", "creating"}
+JsonValue = dict[str, object] | list[object] | str | None
 
 
-def get_token_buildkite(explicit_token: Optional[str]) -> Optional[str]:
-    """Retrieve Buildkite API token from CLI argument or environment."""
+def get_token_buildkite(explicit_token: str | None) -> str | None:
+    """Retrieve Buildkite API token from CLI argument or environment.
+
+    Args:
+        explicit_token: Explicit token passed via CLI flag, if any.
+
+    Returns:
+        Resolved Buildkite API token, or None if unavailable.
+    """
     if explicit_token:
         return explicit_token
     return os.environ.get("BUILDKITE_API_TOKEN") or os.environ.get("BK_TOKEN")
 
 
-def get_token_github(explicit_token: Optional[str]) -> Optional[str]:
-    """Retrieve GitHub token from CLI argument or environment."""
+def get_token_github(explicit_token: str | None) -> str | None:
+    """Retrieve GitHub token from CLI argument or environment.
+
+    Args:
+        explicit_token: Explicit token passed via CLI flag, if any.
+
+    Returns:
+        Resolved GitHub token, or None if unavailable.
+    """
     if explicit_token:
         return explicit_token
     return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
 
 
-def _normalize_pr_number(raw: Optional[str]) -> Optional[str]:
-    """Normalize PR number, ignoring empty or Buildkite 'false'/'0' sentinels."""
+def _normalize_pr_number(raw: str | None) -> str | None:
+    """Normalize PR number, ignoring empty or Buildkite 'false'/'0' sentinels.
+
+    Args:
+        raw: Raw PR number string from CLI or environment.
+
+    Returns:
+        Normalized numeric PR string, or None when unset/sentinel.
+    """
     if not raw:
         return None
     val = str(raw).strip()
@@ -46,7 +67,11 @@ def _normalize_pr_number(raw: Optional[str]) -> Optional[str]:
 
 
 def _emit_warning(msg: str) -> None:
-    """Print warning and emit GHA/Buildkite annotations when running in CI."""
+    """Print warning and emit GHA/Buildkite annotations when running in CI.
+
+    Args:
+        msg: Warning message to display and annotate.
+    """
     print(f"  [WARN] {msg}")
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::warning::{msg}")
@@ -65,21 +90,35 @@ def _emit_warning(msg: str) -> None:
                 check=False,
                 timeout=5,
             )
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             pass
 
 
 def _http_request(
     url: str,
     method: str = "GET",
-    token: Optional[str] = None,
+    token: str | None = None,
     auth_header_prefix: str = "Bearer ",
-    data: Optional[bytes] = None,
-    headers: Optional[Dict[str, str]] = None,
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
     timeout: int = 30,
     retries: int = 3,
-) -> Tuple[int, Any]:
-    """Send an HTTP request using urllib with retry on transient network errors."""
+) -> tuple[int, JsonValue]:
+    """Send an HTTP request using urllib with retry on transient network errors.
+
+    Args:
+        url: Target HTTP endpoint URL.
+        method: HTTP verb (e.g. GET, POST, PUT).
+        token: Optional bearer/token credential.
+        auth_header_prefix: Prefix placed before token in Authorization header.
+        data: Optional request body bytes.
+        headers: Optional extra HTTP headers.
+        timeout: Per-request socket timeout in seconds.
+        retries: Maximum attempts on transient network errors.
+
+    Returns:
+        Tuple of (http_status_or_-1, parsed_json_or_text_or_none).
+    """
     req_headers = {
         "Accept": "application/json",
         "User-Agent": "LMCache-CI-FastFail",
@@ -99,13 +138,13 @@ def _http_request(
                 if body:
                     try:
                         return status_code, json.loads(body.decode("utf-8"))
-                    except Exception:
-                        return status_code, body.decode("utf-8")
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        return status_code, body.decode("utf-8", errors="replace")
                 return status_code, None
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             return e.code, body
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
             last_err = str(e)
             if attempt < retries - 1:
                 time.sleep(1.0)
@@ -118,18 +157,31 @@ def cancel_github_actions(
     commit_sha: str,
     repo: str,
     token: str,
-    current_run_id: Optional[str],
-    pr_number: Optional[str] = None,
+    current_run_id: str | None,
+    pr_number: str | None = None,
     dry_run: bool = False,
     reason: str = "",
-) -> List[Dict[str, Any]]:
-    """Find and cancel sibling pull_request GitHub Actions runs for commit_sha."""
+) -> list[dict[str, object]]:
+    """Find and cancel sibling pull_request GitHub Actions runs for commit_sha.
+
+    Args:
+        commit_sha: Git commit SHA to match against workflow runs.
+        repo: GitHub repository in owner/name format.
+        token: GitHub token with actions:write permission.
+        current_run_id: Current workflow run ID to exclude from cancellation.
+        pr_number: Optional PR number to filter matching runs.
+        dry_run: When True, log planned cancellations without mutating.
+        reason: Human-readable cancellation reason for logs.
+
+    Returns:
+        List of run metadata dictionaries that were (or would be) cancelled.
+    """
     print(
         f"\n[Fast-Fail] Querying GitHub Actions runs for commit "
         f"{commit_sha[:8]} in {repo}..."
     )
-    cancelled: List[Dict[str, Any]] = []
-    runs: List[Dict[str, Any]] = []
+    cancelled: list[dict[str, object]] = []
+    runs: list[dict[str, object]] = []
     norm_pr = _normalize_pr_number(pr_number)
 
     for status in ("in_progress", "queued"):
@@ -149,7 +201,9 @@ def cancel_github_actions(
                 f"(HTTP {status_code}): {resp}"
             )
             continue
-        runs.extend(resp.get("workflow_runs", []))
+        raw_runs = resp.get("workflow_runs")
+        if isinstance(raw_runs, list):
+            runs.extend(r for r in raw_runs if isinstance(r, dict))
 
     unique_runs = {str(r.get("id")): r for r in runs if r.get("id")}
 
@@ -160,16 +214,21 @@ def cancel_github_actions(
             )
             continue
 
-        # Only cancel pull_request runs; never cancel scheduled/push/rerun jobs.
+        # Fail closed: only cancel explicit pull_request runs.
         event = run.get("event")
-        if event and event != "pull_request":
+        if event != "pull_request":
             print(
                 f"  -> Skipping non-PR event '{event}': "
                 f"run {run_id_str} ({run.get('name')})"
             )
             continue
 
-        run_prs = run.get("pull_requests") or []
+        raw_prs = run.get("pull_requests")
+        run_prs = (
+            [p for p in raw_prs if isinstance(p, dict)]
+            if isinstance(raw_prs, list)
+            else []
+        )
         if norm_pr and run_prs:
             pr_nums = {
                 str(p.get("number")) for p in run_prs if p.get("number") is not None
@@ -186,7 +245,7 @@ def cancel_github_actions(
             print(f"  -> Skipping protected branch {branch}: run {run_id_str}")
             continue
 
-        run_info = {
+        run_info: dict[str, object] = {
             "id": run_id_str,
             "name": run.get("name"),
             "status": run.get("status"),
@@ -232,17 +291,30 @@ def cancel_buildkite_builds(
     commit_sha: str,
     org: str,
     token: str,
-    current_build_id: Optional[str],
-    pr_number: Optional[str] = None,
+    current_build_id: str | None,
+    pr_number: str | None = None,
     dry_run: bool = False,
     reason: str = "",
-) -> List[Dict[str, Any]]:
-    """Find and cancel sibling PR Buildkite builds for commit_sha."""
+) -> list[dict[str, object]]:
+    """Find and cancel sibling PR Buildkite builds for commit_sha.
+
+    Args:
+        commit_sha: Git commit SHA to match against Buildkite builds.
+        org: Buildkite organization slug.
+        token: Buildkite API token with write_builds permission.
+        current_build_id: Current Buildkite build UUID to exclude.
+        pr_number: Optional PR number to filter matching builds.
+        dry_run: When True, log planned cancellations without mutating.
+        reason: Human-readable cancellation reason for logs.
+
+    Returns:
+        List of build metadata dictionaries that were (or would be) cancelled.
+    """
     print(
         f"\n[Fast-Fail] Querying Buildkite builds for commit "
         f"{commit_sha[:8]} in org '{org}'..."
     )
-    cancelled: List[Dict[str, Any]] = []
+    cancelled: list[dict[str, object]] = []
     norm_pr = _normalize_pr_number(pr_number)
 
     url = (
@@ -260,17 +332,24 @@ def cancel_buildkite_builds(
         return cancelled
 
     for build in resp:
+        if not isinstance(build, dict):
+            continue
         state = build.get("state")
         if state not in CANCELLABLE_BK_STATES:
             continue
 
         build_id = str(build.get("id"))
         build_num = build.get("number")
-        pipeline = build.get("pipeline", {}).get("slug", "unknown")
+        pipeline_obj = build.get("pipeline")
+        pipeline = (
+            str(pipeline_obj.get("slug", "unknown"))
+            if isinstance(pipeline_obj, dict)
+            else "unknown"
+        )
         branch = build.get("branch")
         web_url = build.get("web_url")
-        build_pr = build.get("pull_request") or {}
-        raw_pr_id = build_pr.get("id")
+        build_pr = build.get("pull_request")
+        raw_pr_id = build_pr.get("id") if isinstance(build_pr, dict) else None
         build_pr_id = str(raw_pr_id) if raw_pr_id is not None else None
 
         if current_build_id and build_id == str(current_build_id):
@@ -291,7 +370,7 @@ def cancel_buildkite_builds(
             )
             continue
 
-        build_info = {
+        build_info: dict[str, object] = {
             "id": build_id,
             "number": build_num,
             "pipeline": pipeline,
@@ -331,6 +410,11 @@ def cancel_buildkite_builds(
 
 
 def main() -> int:
+    """CLI entrypoint for fast-fail CI cancellation.
+
+    Returns:
+        Exit code 0 so failure hooks do not mask primary CI failure logs.
+    """
     parser = argparse.ArgumentParser(
         description=("Fast-Fail CI Cancel: stop sibling GHA runs and Buildkite builds.")
     )
