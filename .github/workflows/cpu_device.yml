@@ -105,6 +105,7 @@ jobs:
               - '.github/scripts/cpu_device_test.sh'
               - '.github/scripts/cpu_server_bench_test.sh'
               - '.github/scripts/cpu_vllm_e2e_test.sh'
+              - '.github/scripts/cpu_p2p_e2e_test.sh'
               - '.github/scripts/install_vllm_cpu.sh'
               - '.github/scripts/cpu_nightly.py'
               - '.github/scripts/install_lmcache_cpu.sh'
@@ -361,6 +362,22 @@ jobs:
           LMCACHE_REQUEST_PORT_E2E=15559 \
           VLLM_PORT_E2E=18002 \
             bash .github/scripts/cpu_device_test.sh vllm_e2e
+
+      # Coordinator + two MP servers sharing KV over P2P (NIXL over UCX
+      # TCP), driven by `lmcache bench server`; covers peer kill, peer
+      # restart and coordinator restart. Model-agnostic, so one leg is
+      # enough. Last, so the NIXL install cannot affect the steps above.
+      - name: P2P e2e — CPU
+        if: >-
+          runner.os == 'Linux' && matrix.model.name == 'opt-125m' &&
+          matrix.request_transport == 'zmq' && !inputs.nightly_verify
+        run: |
+          pip install -r requirements/nixl.txt
+          # Surface a torch swap or a broken NIXL wheel here, not as a
+          # discovery timeout in the test.
+          pip show torch nixl nixl-cu12 nixl-cu13 | grep -E '^(Name|Version):' || true
+          python -c 'from nixl._api import nixl_agent, nixl_agent_config'
+          bash .github/scripts/cpu_p2p_e2e_test.sh
 
       - name: Upload logs on failure
         if: failure()
