@@ -40,6 +40,8 @@ from lmcache.v1.multiprocess.native_completion import (
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
+    TransferStep,
+    collect_off_stream_steps,
     downsample_and_stage_block_ids,
     get_unfull_chunk_layout_desc,
     get_unfull_chunk_staging_buffer,
@@ -1143,7 +1145,9 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the retrieve operation, and the
             second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted.
+            The event handle is empty when no device work was submitted. A
+            retrieve with off-stream steps (objects a peer owns) fails: no
+            off-stream engine runs them yet.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1224,9 +1228,13 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             gpu_block_ids, blocks_per_chunk, num_chunks, bool(unfull_obj_keys)
         )
 
+        # Retrieve steps of engines whose bytes land off the stream: the
+        # transfers hand them over instead of staging them.
+        off_stream_steps: list[TransferStep] = []
         with (
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
+            collect_off_stream_steps(off_stream_steps),
         ):
             event = event_backend.create_event(cache_context.device)
 
@@ -1307,7 +1315,44 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                 retained_keys, read_owners
             )
             total_bytes = 0
+            num_tokens = 0
             retrieve_succeeded = True
+
+            def finish() -> None:
+                """Complete the retrieve: call once the last device work that
+                fills its blocks is queued on the stream."""
+                nonlocal num_tokens
+                event_backend.record_event(event, cache_context.stream)
+                if retained_keys:
+                    submit_callback_to_stream(
+                        cache_context.cupy_stream,
+                        "finish_read_by_owner",
+                        read_completion,
+                    )
+                num_tokens = (
+                    num_chunks * chunk_size
+                    + (key.end % chunk_size if unfull_obj_keys else 0)
+                    if len(prefetched_keys) == expected_retained
+                    else 0
+                )
+                self._ctx.event_bus.publish_on_stream(
+                    cache_context.cupy_stream,
+                    Event(
+                        event_type=EventType.MP_RETRIEVE_END,
+                        session_id=key.request_id,
+                        metadata={
+                            "retrieved_count": len(prefetched_keys),
+                            "device": str(cache_context.device),
+                            "engine_id": instance_id,
+                            "model_name": model_name,
+                            "cache_salt": key.cache_salt,
+                            "total_bytes": total_bytes,
+                            "num_tokens": num_tokens,
+                            "transfer_key": transfer_key,
+                        },
+                    ),
+                )
+
             try:
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
@@ -1354,40 +1399,21 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
                         chunk_size,
                     )
                     prefetched_keys.extend(unfull_retained_keys)
+                if off_stream_steps:
+                    # No engine runs off-stream steps yet, so their bytes
+                    # never land: the blocks must be recomputed.
+                    logger.error(
+                        "Cannot retrieve: %d steps are off the stream and "
+                        "there is no off-stream engine to run them",
+                        len(off_stream_steps),
+                    )
+                    prefetched_keys.clear()
+                    retrieve_succeeded = False
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                if retained_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_by_owner",
-                        read_completion,
-                    )
-                num_tokens = (
-                    num_chunks * chunk_size
-                    + (key.end % chunk_size if unfull_obj_keys else 0)
-                    if len(prefetched_keys) == expected_retained
-                    else 0
-                )
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": len(prefetched_keys),
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "cache_salt": key.cache_salt,
-                            "total_bytes": total_bytes,
-                            "num_tokens": num_tokens,
-                            "transfer_key": transfer_key,
-                        },
-                    ),
-                )
+                finish()
         if retrieve_succeeded:
             ed = time.perf_counter()
             logger.info(

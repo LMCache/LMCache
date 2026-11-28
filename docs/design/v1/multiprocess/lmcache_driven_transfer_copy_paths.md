@@ -91,9 +91,18 @@ collect block gets `NotImplementedError` for an off-stream step.
 Stores are not steps: a store queues the kernels first and stages out
 after them, on the stream, with an on-stream engine.
 
-**Status.** No `OffStreamEngine` exists yet and no handler collects steps,
-so a retrieve of a peer-owned object still fails with `NotImplementedError`,
-as before.
+**The RETRIEVE handler** (`lmcache_driven_transfer.py`) wraps its transfers
+in `collect_off_stream_steps(off_stream_steps)`, and the code that completes
+a retrieve (record the completion event, queue the read-lock release,
+publish `MP_RETRIEVE_END`) is one function, `finish()`. It must run after
+the last device work that fills the blocks is queued: today right after the
+transfers, and for off-stream steps once their engine queued the kernels.
+
+**Status.** No `OffStreamEngine` exists yet, so the handler fails a retrieve
+that collected off-stream steps (it logs the count, reports no tokens and
+returns False, and the read locks are released as for any failed retrieve).
+A retrieve of a peer-owned object failed before too, with
+`NotImplementedError`.
 
 | L1 object | Engine | `stage` | Full-chunk copy path |
 |---|---|---|---|
@@ -168,9 +177,8 @@ flowchart TD
   batch that `skip_first_n_tokens` covers entirely; the kernel skips them.
 - **Store.** The loop queues the kernels, then stages out.
 - **NIC DMA** is not implemented: a retrieve step of objects a peer owns is
-  off-stream and no caller collects such steps yet, and a store reaches the
-  placeholder `stage`; both raise `NotImplementedError`, so the transfer
-  fails.
+  off-stream, and the handler fails a retrieve that collected one; a store
+  reaches the placeholder `stage`, which raises `NotImplementedError`.
 - **Errors.** A retrieve raises on a missing object; a store skips the batch
   that contains one.
 - **Partial work.** When a later run raises, the earlier runs are already
@@ -343,6 +351,9 @@ moves strided 2-D rows more slowly than 1-D entries of the same size
   run with its chunk range, the unimplemented NIC engine, and `run_step`:
   an on-stream step is staged then launched, an off-stream step is handed
   to the collector with its own copy of the block ids (CPU only).
+- `tests/v1/multiprocess/test_lmcache_driven_off_stream_steps.py`: a
+  retrieve whose transfers hand off an off-stream step fails and is still
+  completed once (CPU only).
 - `tests/v1/multiprocess/test_staged_loop.py`: the per-batch loop's chunk
   range, block-id slices, skipped chunks, missing objects and the order of
   staging and kernels (CPU only, fakes).
