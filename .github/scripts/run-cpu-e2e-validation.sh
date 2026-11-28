@@ -612,7 +612,7 @@ fi
 # Preserve the exact CPU server configuration for the shared restart workload.
 MP_TEST_LMCACHE_LAUNCH_SCRIPT="$ARTIFACT_DIR/launch-lmcache.sh"
 printf '#!/usr/bin/env bash\nexec ' > "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
-printf '%q ' env VLLM_TARGET_DEVICE=cpu "\${LMCACHE_SERVER_VENV:+\${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
+printf '%q ' env VLLM_TARGET_DEVICE=cpu "${LMCACHE_SERVER_VENV:+${LMCACHE_SERVER_VENV}/bin/}lmcache" server "${LMCACHE_ARGS[@]}" \
   >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
 printf '\n' >> "$MP_TEST_LMCACHE_LAUNCH_SCRIPT"
 bash "$MP_TEST_LMCACHE_LAUNCH_SCRIPT" >"${LMCACHE_LOG}" 2>&1 &
@@ -956,7 +956,7 @@ echo "✅ Cache miss confirmed for different prompt — metrics are trustworthy"
 # One representative model, transfer mode, and RPC transport reuse this environment.
 if [[ "$VLLM_MODEL_ID" == "facebook/opt-125m" &&
       "$LMCACHE_MP_TRANSFER_MODE" == "lmcache_driven" &&
-      "$LMCACHE_REQUEST_TRANSPORT" == "zmq" ]]; then
+      "$LMCACHE_REQUEST_TRANSPORT" == "grpc" ]]; then
   echo "=== Shared fault tolerance and restart recovery (Phase 4) ==="
   MP_SCRIPTS="${SHARED_SCRIPTS_DIR}/../../.buildkite/k3_tests/multiprocess/scripts"
   export MP_TEST_PID_FILE="$ARTIFACT_DIR/recovery-pids.txt"

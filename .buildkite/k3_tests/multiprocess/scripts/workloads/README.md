@@ -74,7 +74,7 @@ by the adapter, so a common pipeline matrix can safely include engines with
 different capabilities.
 
 CPU E2E reuses `common/restart-recovery.sh` and `vllm/fault-tolerance.sh`
-in its opt-125m / LMCache-driven / ZMQ leg. `RR_PREPARE_ONLY=1` captures the first
+in its opt-125m / LMCache-driven / gRPC leg. `RR_PREPARE_ONLY=1` captures the first
 benchmark (4 requests × 512 tokens) and current registrations before fault
 injection. `FT_REUSE_SERVICES=1` preserves the running engine;
 `RR_SERVER_STOPPED=1` then resumes recovery from that same outage.
@@ -85,3 +85,10 @@ Both workloads use `MP_TEST_PID_FILE` (server PID on line 1);
 Recovery waits for an actual completed store before measuring the second bench:
 server-side registration can precede completion of the Worker's recovery callback.
 Benchmark summaries, counter deltas, outputs and registration snapshots are retained.
+
+When running the CPU workload from a separate checkout, ensure the installed
+LMCache CLI points to that checkout or to the intended server wheel. The
+OPT-125M random-prefill benchmark sends chat requests, so the engine needs a chat
+template. For this fixed BF16 model, the CPU harness supplies
+`RR_TOKENS_PER_GB=29127` (36,864 KV bytes per token) because an offline engine can
+register a snapshot path that differs from the served model ID.
