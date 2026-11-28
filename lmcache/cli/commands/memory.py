@@ -11,11 +11,6 @@ from lmcache.v1.common.logging import init_logger
 
 logger = init_logger(__name__)
 
-_PROTO_PACKAGES = (
-    "lmcache.v1.memory_orchestrator._proto_gen",
-    "lmcache.v1.transport.grpc._proto_gen",
-)
-
 
 class MemoryCommand(BaseCommand):
     """CLI command that launches the memory orchestrator (gRPC)."""
@@ -47,7 +42,7 @@ class MemoryCommand(BaseCommand):
             # First Party
             from lmcache.v1.memory_orchestrator.server import add_orchestrator_args
         except ImportError as e:
-            advice = missing_grpc_bindings_hint(_PROTO_PACKAGES) or (
+            advice = missing_grpc_bindings_hint(e) or (
                 "install the full lmcache package to use 'memory'"
             )
             logger.warning("Cannot load the memory orchestrator (%s); %s.", e, advice)
@@ -75,7 +70,7 @@ class MemoryCommand(BaseCommand):
         except ImportError as e:
             print(
                 f"The 'lmcache memory' command cannot load its runtime: {e}",
-                missing_grpc_bindings_hint(_PROTO_PACKAGES)
+                missing_grpc_bindings_hint(e)
                 or "Install the full lmcache package with: pip install lmcache",
                 sep="\n",
                 file=sys.stderr,

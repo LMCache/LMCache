@@ -9,8 +9,6 @@ from collections.abc import Sequence
 from pathlib import Path
 import abc
 import argparse
-import importlib
-import pkgutil
 import sys
 
 # First Party
@@ -63,49 +61,50 @@ def nonnegative_int(value: str) -> int:
     return count
 
 
-def missing_grpc_bindings_hint(generated_packages: tuple[str, ...]) -> str | None:
-    """Return how to produce the bindings *generated_packages* lack, or ``None``.
+def missing_grpc_bindings_hint(error: ImportError) -> str | None:
+    """Return how to produce the binding *error* shows as missing, or ``None``.
 
     An editable ``pip install -e .`` runs the generator from ``build_py``, but
     setuptools downgrades a failing custom ``build_py`` to a warning, so a
     missing ``grpcio-tools`` leaves a package that imports without the
     bindings and the commands that need them fail with an import error that
-    hides the cause. The remedy runs the generator from the repository, so it
-    is only offered for a package installed from a source checkout, where
-    ``requirements/proto.txt`` sits next to it; the ``lmcache-cli`` wheel ships
-    without the bindings too, and its users get ``None`` so that the caller's
-    reinstall advice stands. Callers pass the ``_proto_gen`` packages their own
-    import chain loads, so the hint is offered only when the missing bindings
-    explain that import's failure.
-
-    Note:
-        Imports each ``_proto_gen`` package to list its modules. Callers run
-        this inside an ``except ImportError`` handler, so it relies on those
-        packages and their parents importing nothing beyond their docstrings.
+    hides the cause. The failing import itself names what is missing, so the
+    remedy is tied to it and offered for nothing else. It runs the generator
+    from the repository, so it is only offered for a package installed from a
+    source checkout, where ``requirements/proto.txt`` sits next to it; the
+    ``lmcache-cli`` wheel ships without the bindings too, and its users get
+    ``None`` so that the caller's reinstall advice stands.
 
     Args:
-        generated_packages: Dotted names of the ``_proto_gen`` packages the
-            failing import needs.
+        error: The ``ImportError`` raised while loading the command's runtime.
 
     Returns:
-        The remedy, or ``None`` when the package is not installed from a
-        source checkout or every package in *generated_packages* holds
-        ``*_pb2`` modules.
+        The remedy, or ``None`` when *error* does not report a missing binding
+        or the package is not installed from a source checkout.
     """
     # <repository>/lmcache/cli/commands/base.py
     repository_root = Path(__file__).resolve().parents[3]
     if not (repository_root / "requirements" / "proto.txt").is_file():
         return None
-    for package in generated_packages:
-        search_path = importlib.import_module(package).__path__
-        if not any(m.name.endswith("_pb2") for m in pkgutil.iter_modules(search_path)):
-            return (
-                "This installation is missing LMCache's generated gRPC "
-                "bindings. From the repository root, regenerate them with:\n"
-                "  pip install -r requirements/proto.txt\n"
-                "  python lmcache/v1/transport/grpc/_proto_gen/_generate.py"
-            )
-    return None
+    name = error.name
+    if name is None:
+        return None
+    if error.path is None:
+        # "No module named <package>.<binding>": the binding is the leaf.
+        package, _, binding = name.rpartition(".")
+        if not binding.endswith(("_pb2", "_pb2_grpc")):
+            return None
+    else:
+        # "cannot import name <binding> from <package>": the name is the package.
+        package = name
+    if not package.endswith("._proto_gen"):
+        return None
+    return (
+        "This installation is missing LMCache's generated gRPC bindings. "
+        "From the repository root, regenerate them with:\n"
+        "  pip install -r requirements/proto.txt\n"
+        "  python lmcache/v1/transport/grpc/_proto_gen/_generate.py"
+    )
 
 
 def _route_head(tokens: Sequence[str]) -> tuple[str | None, list[str]]:
