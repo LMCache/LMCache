@@ -2,6 +2,7 @@
 """Mooncake Transfer Engine implementation of the transfer channel abstraction."""
 
 # Standard
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 import os
 import threading
@@ -64,6 +65,47 @@ def collect_env_var() -> tuple[str, str]:
     return mc_te_protocol, mc_te_device_id
 
 
+def _supports_whole_batch_status_check(engine: "TransferEngine") -> bool:
+    """Return whether ``engine`` provides non-blocking whole-batch status checks.
+
+    Mooncake introduced ``batch_transfer_check_status(batch_ids)`` alongside the
+    whole-batch ``transfer_check_status`` fix. Older bindings only check task 0
+    in ``transfer_check_status`` and do not expose ``batch_transfer_check_status``.
+    """
+    return callable(getattr(engine, "batch_transfer_check_status", None))
+
+
+def _best_effort_free_batches(engine: "TransferEngine", batch_ids: list[int]) -> None:
+    """Release ``batch_ids`` without blocking when ``free_batch_id`` is available."""
+    free_batch_id = getattr(engine, "free_batch_id", None)
+    if not callable(free_batch_id):
+        return
+    for batch_id in batch_ids:
+        try:
+            free_batch_id(batch_id)
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            logger.warning(
+                "Failed to free Mooncake batch_id %s during cleanup",
+                batch_id,
+                exc_info=True,
+            )
+
+
+@dataclass
+class _PendingTransferTask:
+    """In-flight Mooncake batch handle(s) for a single transfer task.
+
+    When the engine supports whole-batch status checks, one batch covers all
+    objects (``pending_batches`` maps ``batch_id -> None``). On legacy engines
+    where ``transfer_check_status`` inspects only task 0, multi-buffer transfers
+    are split into single-buffer batches (``batch_id -> object_index``).
+    """
+
+    object_count: int
+    pending_batches: dict[int, int | None]
+    succeeded_mask: list[bool]
+
+
 ############################################################
 # Handshake messages (msgspec, tagged union)
 ############################################################
@@ -101,9 +143,9 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         self._remote_buffer_ptr = remote_buffer_ptr
 
         self._task_counter = 0
-        # task_id -> (xfer_handle, remote_addresses)
-        self._tasks: dict[int, tuple] = {}
+        self._tasks: dict[int, _PendingTransferTask] = {}
         self._lock = threading.Lock()
+        self._warned_legacy_split = False
 
     def submit_read(
         self,
@@ -141,6 +183,43 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         """
         return self._submit_transfer("WRITE", local_addresses, remote_addresses)
 
+    def _apply_polled_statuses(
+        self,
+        task: _PendingTransferTask,
+        polled: list[tuple[int, int]],
+    ) -> int | None:
+        """Record terminal batch statuses on ``task``; return unexpected code if any.
+
+        Must be called while holding ``self._lock``.
+        """
+        unexpected_status: int | None = None
+        for batch_id, status in polled:
+            if batch_id not in task.pending_batches:
+                continue
+            if status == 0:
+                continue
+            obj_idx = task.pending_batches.pop(batch_id)
+            if status == 1:
+                if obj_idx is None:
+                    task.succeeded_mask = [True] * task.object_count
+                else:
+                    task.succeeded_mask[obj_idx] = True
+            elif status == -1:
+                logger.error(
+                    "Transfer failed %s batch_id %s",
+                    self._remote_session_id,
+                    batch_id,
+                )
+            elif status == -2:
+                logger.error(
+                    "Transfer timed out %s batch_id %s",
+                    self._remote_session_id,
+                    batch_id,
+                )
+            elif unexpected_status is None:
+                unexpected_status = status
+        return unexpected_status
+
     def query_status(self, task_id: int) -> TransferChannelTransferResult:
         """Query the status of a previously submitted read or write.
 
@@ -156,51 +235,79 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             RuntimeError: The engine reported an unknown status code.
         """
         with self._lock:
-            if task_id not in self._tasks:
+            task = self._tasks.get(task_id)
+            if task is None:
                 raise KeyError(f"Unknown transfer task id: {task_id}")
-            batch_id, remote_addresses = self._tasks[task_id]
+            if not task.pending_batches:
+                self._tasks.pop(task_id, None)
+                return TransferChannelTransferResult(
+                    finished=True, succeeded_mask=list(task.succeeded_mask)
+                )
+            pending_ids = list(task.pending_batches.keys())
 
-        status = self._ctx.mooncake_te_engine.transfer_check_status(batch_id)
-        if status == 0:
-            return TransferChannelTransferResult(finished=False, succeeded_mask=[])
+        engine = self._ctx.mooncake_te_engine
+        if _supports_whole_batch_status_check(engine):
+            statuses = engine.batch_transfer_check_status(pending_ids)
+            if len(statuses) != len(pending_ids):
+                with self._lock:
+                    self._tasks.pop(task_id, None)
+                raise RuntimeError(
+                    "batch_transfer_check_status returned "
+                    f"{len(statuses)} statuses, expected {len(pending_ids)}"
+                )
+            polled = list(zip(pending_ids, statuses, strict=True))
+        else:
+            polled = []
+            try:
+                for batch_id in pending_ids:
+                    polled.append((batch_id, engine.transfer_check_status(batch_id)))
+            except Exception:
+                # Never re-poll batch handles that already returned a terminal
+                # status (Mooncake frees handles immediately on terminal check).
+                if polled:
+                    with self._lock:
+                        if self._tasks.get(task_id) is task:
+                            self._apply_polled_statuses(task, polled)
+                raise
 
         with self._lock:
+            if self._tasks.get(task_id) is not task:
+                raise KeyError(f"Unknown transfer task id: {task_id}")
+            unexpected_status = self._apply_polled_statuses(task, polled)
+            if unexpected_status is not None:
+                self._tasks.pop(task_id, None)
+                raise RuntimeError(
+                    f"unexpected mooncake transfer engine status: {unexpected_status}"
+                )
+            if task.pending_batches:
+                return TransferChannelTransferResult(finished=False, succeeded_mask=[])
             self._tasks.pop(task_id, None)
-        if status == 1:
             return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[True] * len(remote_addresses)
+                finished=True, succeeded_mask=list(task.succeeded_mask)
             )
-        elif status == -1:
-            logger.error(
-                "Transfer failed %s batch_id %s",
-                self._remote_session_id,
-                batch_id,
-            )
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[False] * len(remote_addresses)
-            )
-        elif status == -2:
-            logger.error(
-                "Transfer timed out %s batch_id %s",
-                self._remote_session_id,
-                batch_id,
-            )
-            return TransferChannelTransferResult(
-                finished=True, succeeded_mask=[False] * len(remote_addresses)
-            )
-
-        raise RuntimeError(f"unexpected mooncake transfer engine status: {status}")
 
     def close(self) -> None:
         """
         Close the transfer channel, releasing any pending tasks and the remote handle.
-
-        Note:
-            Mooncake Transfer Engine does not need anything when we close the client
-            because transfers do not create a remote handle that needs to be
-            released.
         """
-        pass
+        with self._lock:
+            tasks = list(self._tasks.values())
+            self._tasks.clear()
+        batch_ids = [
+            batch_id for task in tasks for batch_id in task.pending_batches.keys()
+        ]
+        if batch_ids:
+            _best_effort_free_batches(self._ctx.mooncake_te_engine, batch_ids)
+
+    def _validate_batch_id(self, batch_id: int, operation: str) -> None:
+        if batch_id == 0 or batch_id == INVALID_BATCH_ID:
+            raise RuntimeError(
+                f"Failed to submit async {operation.lower()}. "
+                f"Peer {self._remote_session_id} is probably not running, "
+                "not reachable, or the remote metadata is invalid."
+            )
+        if batch_id < 0 or batch_id >= (1 << 63):
+            raise RuntimeError(f"Invalid batch ID returned: {batch_id}")
 
     def _submit_transfer(
         self,
@@ -219,7 +326,10 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
         Raises:
             ValueError: The two address lists differ in length, or an object
                 has different sizes on the two sides.
-            RuntimeError: The engine refused the batch.
+            RuntimeError: The engine refused the first batch, so nothing is in
+                flight. If a later per-buffer batch is refused, the task is
+                still returned and reports the unsubmitted buffers as failed
+                once the submitted ones finish.
         """
         if len(local_addresses) != len(remote_addresses):
             raise ValueError(
@@ -235,33 +345,88 @@ class MooncakeTeTransferChannelClient(TransferChannelClient):
             if a[0].size != a[1].size:
                 raise ValueError("local and remote sizes must match")
             data_lengths.append(a[0].size)
+
+        object_count = len(remote_addresses)
+        if object_count == 0:
+            task = _PendingTransferTask(
+                object_count=0,
+                pending_batches={},
+                succeeded_mask=[],
+            )
+            with self._lock:
+                task_id = self._task_counter
+                self._task_counter += 1
+                self._tasks[task_id] = task
+            return task_id
+
         engine = self._ctx.mooncake_te_engine
         submit = (
             engine.batch_transfer_async_write
             if operation == "WRITE"
             else engine.batch_transfer_async_read
         )
-        batch_id = submit(
-            self._remote_session_id,
-            local_ptrs,
-            remote_ptrs,
-            data_lengths,
-        )
 
-        if batch_id == 0 or batch_id == INVALID_BATCH_ID:
-            raise RuntimeError(
-                f"Failed to submit async {operation.lower()}. "
-                f"Peer {self._remote_session_id} is probably not running, "
-                "not reachable, or the remote metadata is invalid."
+        pending_batches: dict[int, int | None] = {}
+        if _supports_whole_batch_status_check(engine) or object_count == 1:
+            batch_id = submit(
+                self._remote_session_id,
+                local_ptrs,
+                remote_ptrs,
+                data_lengths,
             )
+            self._validate_batch_id(batch_id, operation)
+            pending_batches[batch_id] = None
+        else:
+            # Legacy Mooncake TE bindings check only task index 0 in
+            # transfer_check_status(batch_id). Split multi-buffer transfers into
+            # one single-buffer batch per object so completion polling tracks
+            # every buffer non-blockingly.
+            if not self._warned_legacy_split:
+                self._warned_legacy_split = True
+                logger.warning(
+                    "Mooncake TransferEngine lacks batch_transfer_check_status; "
+                    "splitting multi-buffer transfers into per-buffer batches "
+                    "to ensure whole-transfer completion for peer %s",
+                    self._remote_session_id,
+                )
+            for idx, (local_ptr, remote_ptr, length) in enumerate(
+                zip(local_ptrs, remote_ptrs, data_lengths, strict=True)
+            ):
+                try:
+                    batch_id = submit(
+                        self._remote_session_id,
+                        [local_ptr],
+                        [remote_ptr],
+                        [length],
+                    )
+                    self._validate_batch_id(batch_id, operation)
+                    if batch_id in pending_batches:
+                        raise RuntimeError(f"Duplicate batch ID returned: {batch_id}")
+                except Exception:
+                    if not pending_batches:
+                        raise
+                    # Batches already submitted cannot be cancelled and keep
+                    # accessing the caller's buffers, so the task must stay in
+                    # flight until they drain; unsubmitted buffers are failed.
+                    logger.exception(
+                        "Submitted %d of %d buffers to peer %s; "
+                        "reporting the rest as failed",
+                        len(pending_batches),
+                        object_count,
+                        self._remote_session_id,
+                    )
+                    break
+                pending_batches[batch_id] = idx
 
-        if batch_id < 0 or batch_id >= (1 << 63):
-            raise RuntimeError(f"Invalid batch ID returned: {batch_id}")
-
+        task = _PendingTransferTask(
+            object_count=object_count,
+            pending_batches=pending_batches,
+            succeeded_mask=[False] * object_count,
+        )
         with self._lock:
             task_id = self._task_counter
             self._task_counter += 1
-            self._tasks[task_id] = (batch_id, list(remote_addresses))
+            self._tasks[task_id] = task
         return task_id
 
 
