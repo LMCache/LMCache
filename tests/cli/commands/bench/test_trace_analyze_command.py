@@ -5,12 +5,15 @@
 from pathlib import Path
 import argparse
 import json
+import subprocess
+import sys
 
 # Third Party
 import pytest
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from tests.import_utils import lmcache_subprocess_env
 
 FIXTURE = (
     Path(__file__).parents[3] / "tools" / "data" / "trace_formats" / "lmcache.jsonl"
@@ -78,3 +81,63 @@ def test_empty_trace_exits(tmp_path: Path) -> None:
     args = _parse(["-i", str(empty), "--html", str(tmp_path / "r.html"), "-q"])
     with pytest.raises(SystemExit):
         args.func(args)
+
+
+def test_reinserted_chunk_counts_in_cli_reports(tmp_path: Path) -> None:
+    """A resident suffix remains a blend hit after an oversize replay."""
+    trace = tmp_path / "trace.jsonl"
+    prompts = [
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        [9, 5, 6, 7, 8],
+    ]
+    spans = [
+        {
+            "name": "mp.request.trace",
+            "startTimeUnixNano": str(i + 1),
+            "attributes": [
+                {"key": "session_id", "value": {"stringValue": str(i)}},
+                {"key": "lmcache.model", "value": {"stringValue": "m"}},
+                {
+                    "key": "lmcache.input_ids",
+                    "value": {"stringValue": json.dumps(tokens)},
+                },
+            ],
+        }
+        for i, tokens in enumerate(prompts)
+    ]
+    trace.write_text(
+        json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}) + "\n"
+    )
+    report = tmp_path / "report.html"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "lmcache.cli.main",
+            "bench",
+            "trace-analyze",
+            "-i",
+            str(trace),
+            "--chunk-size",
+            "4",
+            "--capacity",
+            "4",
+            "--html",
+            str(report),
+            "--format",
+            "json",
+        ],
+        cwd=tmp_path,
+        env=lmcache_subprocess_env(),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    row = json.loads(result.stdout)["metrics"]["grid"][0]
+    assert row["prefix_hit_tokens"] == 0
+    assert row["non_prefix_hit_tokens"] == 8
+    page = report.read_text()
+    payload = page.split('<script id="data" type="application/json">', 1)[1]
+    data = json.loads(payload.split("</script>", 1)[0])
+    assert data["cells"]["4:4"]["non_prefix_hit_tokens"] == 8

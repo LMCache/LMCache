@@ -2691,8 +2691,10 @@ hashes (the trailing partial chunk is never cached):
   registered with the real ``BlendTokenRangeMatcher``; each lookup probes
   it and the matches are reconciled like the blend lookup: matches inside
   the prefix are dropped, then a non-overlapping subset of the rest is
-  kept. Evicted chunks are removed from the matcher. Only matched tokens
-  are reported; CacheBlend's recompute is not modelled.
+  kept. Evicted chunks are removed from the matcher. After a request larger
+  than the cache, its retained suffix remains eligible for later matches,
+  including when the same request is replayed repeatedly. Only matched
+  tokens are reported; CacheBlend's recompute is not modelled.
 
 Capacity is a token budget, since the trace carries no KV shape. Only whole
 chunks fit. A budget smaller than one chunk yields zero prefix and non-prefix

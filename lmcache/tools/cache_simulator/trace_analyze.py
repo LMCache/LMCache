@@ -442,9 +442,11 @@ def replay(
     For each request, in order: the leading run of cached chunk hashes is
     the prefix hit; the matcher is probed with the full prompt and its
     matches are reconciled with :func:`select_non_prefix_segments`; the
-    request's chunks are then registered with the matcher and inserted in
-    the LRU (prefix hits are touched, not re-inserted), and every chunk the
-    LRU evicts is removed from the matcher so later probes cannot match it.
+    request's chunks are then inserted in the LRU (prefix hits are touched,
+    not re-inserted), and every chunk the LRU evicts is removed from the
+    matcher. The request's retained suffix is registered after all insertions
+    so chunks evicted and reinserted within the request remain matchable,
+    while chunks outside the final cache cannot match later probes.
 
     Args:
         records: Requests in replay order.
@@ -483,7 +485,6 @@ def replay(
             # token coverage.
             non_prefix_tokens = sum(s.cur_ed - s.cur_st for s in segments)
 
-            matcher.on_new_token_hashes(record.input_ids, chunk_hashes)
             for i, h in enumerate(chunk_hashes):
                 if i < hit_prefix:
                     cache.access(h)
@@ -491,6 +492,16 @@ def replay(
                 evicted = cache.insert(h)
                 if evicted is not None:
                     matcher.remove_chunks([evicted])
+
+            # Sequential LRU admission retains the last capacity_chunks chunks.
+            # Register after eviction so a reinserted chunk keeps its fingerprint.
+            retained_start = max(0, len(chunk_hashes) - capacity_chunks)
+            token_offset = retained_start * chunk_size
+            matcher.on_new_token_hashes(
+                record.input_ids[token_offset:],
+                chunk_hashes[retained_start:],
+                position_offset=token_offset,
+            )
 
         total_tokens += len(record.input_ids)
         prefix_total += prefix_tokens
